@@ -278,8 +278,18 @@ fn ffi_with_scope(
   on_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
 ) -> ScopedCompletion(a)
 
-/// Executes work with temporary attachments, guaranteeing cleanup attempt and
-/// preserving original return values separately from cleanup outcome.
+/// Executes work with temporary scoped attachments, guaranteeing one cleanup attempt
+/// upon normal return or catchable BEAM exception (error, exit, throw), and preserving
+/// original return values separately from cleanup outcomes.
+///
+/// Limits and operational semantics:
+/// - Non-quiescence: Detaching unregisters the handler from subsequent event dispatches,
+///   but does not wait for or interrupt callbacks already in flight on other processes.
+///   Captured resources should remain valid until independent handler work terminates.
+/// - Uncatchable termination: Abrupt process loss, VM termination, or untrappable exits
+///   will bypass cleanup. No linear ownership or exactly-once guarantee is promised.
+/// - Re-raising: Catchable work exceptions (error, exit, throw) preserve exact class,
+///   reason, and stacktrace. Reporter failures do not mask work exceptions.
 pub fn with_attachments(
   first: Event(m, d),
   rest: List(Event(m, d)),

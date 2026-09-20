@@ -10,6 +10,7 @@
     telemetry_detach/1,
     telemetry_execute/3,
     raise_callback_failure/1,
+    telemetry_span/3,
     identity/1
 ]).
 
@@ -57,3 +58,6 @@ telemetry_execute(EventName, Measurements, Metadata) ->
 
 raise_callback_failure(Reason) ->
     erlang:error({sinal_callback_failure, Reason}).
+
+telemetry_span(EventPrefix, StartMetadata, SpanFun) ->
+    telemetry:span(EventPrefix, StartMetadata, SpanFun).

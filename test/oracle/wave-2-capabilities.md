@@ -23,7 +23,7 @@ Observations report completed package transitions and never control them. Sinal 
 
 ## 3. Language Intelligence and Compiler Probes
 
-- **`agent-lsp` probe:** Probed via devShell (`which agent-lsp`); binary is not present in the current Nix development shell.
+- **`agent-lsp` probe:** Configured bridge probed via absolute executable `/etc/profiles/per-user/edgar/bin/agent-lsp gleam:gleam,lsp` with Nix Gleam binary in `PATH`. MCP handshake succeeded, and calling `list_symbols` on `src/sinal.gleam` successfully resolved 29 language symbols.
 - **Built-in `gleam lsp` probe:** Probed via stdio initialize request (`gleam lsp`); returns `ProtocolError("disconnected channel")` on non-interactive pipes as expected.
 - **Compiler fallback:** Configured project compiler `nix develop --command gleam check` probed and confirmed working synchronously as the authoritative type checker and diagnostic authority.
 

@@ -49,3 +49,10 @@ pub fn telemetry_execute(
 
 @external(erlang, "sinal_ffi", "raise_callback_failure")
 pub fn raise_callback_failure(reason: String) -> a
+
+@external(erlang, "sinal_ffi", "telemetry_span")
+pub fn telemetry_span(
+  event_prefix: List(Atom),
+  start_metadata: Dynamic,
+  span_fun: fn() -> #(a, Dynamic, Dynamic),
+) -> a

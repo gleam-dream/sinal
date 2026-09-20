@@ -1,7 +1,10 @@
+import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/list
 import sinal
 import sinal/fields
+import sinal/internal/ffi
 
 pub opaque type EventPrefix {
   EventPrefix(prefix: List(Atom))
@@ -34,22 +37,66 @@ pub fn prefix_native_name(prefix: EventPrefix) -> List(Atom) {
   prefix.prefix
 }
 
-pub type SystemTime
+pub opaque type SystemTime {
+  SystemTime(Dynamic)
+}
 
-pub type MonotonicTime
+pub opaque type MonotonicTime {
+  MonotonicTime(Dynamic)
+}
 
-pub type NativeDuration
+pub opaque type NativeDuration {
+  NativeDuration(Dynamic)
+}
 
-pub type SpanContext
+pub opaque type SpanContext {
+  SpanContext(Dynamic)
+}
 
-pub type ExceptionReason
+pub opaque type ExceptionReason {
+  ExceptionReason(Dynamic)
+}
 
-pub type ExceptionStacktrace
+pub opaque type ExceptionStacktrace {
+  ExceptionStacktrace(Dynamic)
+}
 
 pub type ExceptionKind {
   ExceptionError
   ExceptionExit
   ExceptionThrow
+}
+
+pub fn system_time_to_dynamic(time: SystemTime) -> Dynamic {
+  let SystemTime(dyn) = time
+  dyn
+}
+
+pub fn monotonic_time_to_dynamic(time: MonotonicTime) -> Dynamic {
+  let MonotonicTime(dyn) = time
+  dyn
+}
+
+pub fn duration_to_dynamic(duration: NativeDuration) -> Dynamic {
+  let NativeDuration(dyn) = duration
+  dyn
+}
+
+pub fn span_context_to_dynamic(context: SpanContext) -> Dynamic {
+  let SpanContext(dyn) = context
+  dyn
+}
+
+pub fn exception_reason_to_dynamic(reason: ExceptionReason) -> Dynamic {
+  let ExceptionReason(dyn) = reason
+  dyn
+}
+
+pub fn exception_stacktrace_to_dynamic(
+  stacktrace: ExceptionStacktrace,
+) -> Dynamic {
+  let ExceptionStacktrace(dyn) = stacktrace
+  dyn
 }
 
 pub type StartMeasurements {
@@ -149,10 +196,30 @@ pub type SpanEvents(start_metadata, extra_measurements, stop_metadata) {
   )
 }
 
+/// Derives typed start, stop, and exception event descriptors for the span.
 pub fn events(
-  _span: Span(start_metadata, extra_measurements, stop_metadata),
+  span: Span(start_metadata, extra_measurements, stop_metadata),
 ) -> SpanEvents(start_metadata, extra_measurements, stop_metadata) {
-  todo as "span event descriptor derivation is not yet implemented"
+  let prefix = span.prefix.prefix
+  let assert Ok(start_ev) =
+    sinal.trusted_event(
+      list.append(prefix, [atom.create("start")]),
+      start_measurement_fields(),
+      start_metadata_fields(span.start_metadata),
+    )
+  let assert Ok(stop_ev) =
+    sinal.trusted_event(
+      list.append(prefix, [atom.create("stop")]),
+      stop_measurement_fields(span.extra_measurements),
+      stop_metadata_fields(span.stop_metadata),
+    )
+  let assert Ok(exception_ev) =
+    sinal.trusted_event(
+      list.append(prefix, [atom.create("exception")]),
+      exception_measurement_fields(),
+      exception_metadata_fields(span.start_metadata),
+    )
+  SpanEvents(start: start_ev, stop: stop_ev, exception: exception_ev)
 }
 
 pub type Completion(result, extra_measurements, stop_metadata) {
@@ -163,12 +230,242 @@ pub type Completion(result, extra_measurements, stop_metadata) {
   )
 }
 
+/// Executes work inside a native telemetry span, emitting start and either stop or exception events.
 pub fn run_span(
-  _span: Span(start_metadata, extra_measurements, stop_metadata),
-  _start_metadata: start_metadata,
-  _work: fn() -> Completion(a, extra_measurements, stop_metadata),
+  span: Span(start_metadata, extra_measurements, stop_metadata),
+  start_metadata: start_metadata,
+  work: fn() -> Completion(a, extra_measurements, stop_metadata),
 ) -> a {
-  todo as "native telemetry run_span is not yet implemented"
+  let raw_start_metadata = case
+    fields.encode(span.start_metadata, start_metadata)
+  {
+    Ok(map) -> map
+    Error(fields.FieldEncodeError(msg)) ->
+      panic as { "Failed to encode span start metadata: " <> msg }
+  }
+
+  ffi.telemetry_span(span.prefix.prefix, raw_start_metadata, fn() {
+    let Completion(result, extra_meas, stop_meta) = work()
+    let raw_extra_meas = case
+      fields.encode(span.extra_measurements, extra_meas)
+    {
+      Ok(map) -> map
+      Error(fields.FieldEncodeError(msg)) ->
+        panic as { "Failed to encode span extra measurements: " <> msg }
+    }
+    let raw_stop_meta = case fields.encode(span.stop_metadata, stop_meta) {
+      Ok(map) -> map
+      Error(fields.FieldEncodeError(msg)) ->
+        panic as { "Failed to encode span stop metadata: " <> msg }
+    }
+    #(result, raw_extra_meas, raw_stop_meta)
+  })
+}
+
+fn start_measurement_fields() -> fields.Fields(StartMeasurements) {
+  let sys_key = atom.create("system_time")
+  let mono_key = atom.create("monotonic_time")
+  let sys_field =
+    fields.field(
+      sys_key,
+      fn(time) {
+        let SystemTime(dyn) = time
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(SystemTime(dyn)) },
+    )
+  let mono_field =
+    fields.field(
+      mono_key,
+      fn(time) {
+        let MonotonicTime(dyn) = time
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(MonotonicTime(dyn)) },
+    )
+  let assert Ok(p) = fields.pair(sys_field, mono_field)
+  fields.imap(
+    p,
+    fn(pair) { StartMeasurements(pair.0, pair.1) },
+    fn(m: StartMeasurements) { #(m.system_time, m.monotonic_time) },
+  )
+}
+
+fn stop_measurement_fields(
+  extra: fields.Fields(extra),
+) -> fields.Fields(StopMeasurements(extra)) {
+  let dur_key = atom.create("duration")
+  let mono_key = atom.create("monotonic_time")
+  let dur_field =
+    fields.field(
+      dur_key,
+      fn(dur) {
+        let NativeDuration(dyn) = dur
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(NativeDuration(dyn)) },
+    )
+  let mono_field =
+    fields.field(
+      mono_key,
+      fn(time) {
+        let MonotonicTime(dyn) = time
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(MonotonicTime(dyn)) },
+    )
+  let assert Ok(timing) = fields.pair(dur_field, mono_field)
+  let assert Ok(all) = fields.pair(timing, extra)
+  fields.imap(
+    all,
+    fn(pair) {
+      let #(#(dur, mono), extra_meas) = pair
+      StopMeasurements(dur, mono, extra_meas)
+    },
+    fn(m: StopMeasurements(extra)) {
+      #(#(m.duration, m.monotonic_time), m.extra)
+    },
+  )
+}
+
+fn exception_measurement_fields() -> fields.Fields(ExceptionMeasurements) {
+  let dur_key = atom.create("duration")
+  let mono_key = atom.create("monotonic_time")
+  let dur_field =
+    fields.field(
+      dur_key,
+      fn(dur) {
+        let NativeDuration(dyn) = dur
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(NativeDuration(dyn)) },
+    )
+  let mono_field =
+    fields.field(
+      mono_key,
+      fn(time) {
+        let MonotonicTime(dyn) = time
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(MonotonicTime(dyn)) },
+    )
+  let assert Ok(timing) = fields.pair(dur_field, mono_field)
+  fields.imap(
+    timing,
+    fn(pair) { ExceptionMeasurements(pair.0, pair.1) },
+    fn(m: ExceptionMeasurements) { #(m.duration, m.monotonic_time) },
+  )
+}
+
+fn span_context_field() -> fields.Fields(SpanContext) {
+  let ctx_key = atom.create("telemetry_span_context")
+  fields.field(
+    ctx_key,
+    fn(c) {
+      let SpanContext(dyn) = c
+      Ok(dyn)
+    },
+    fn(dyn) { Ok(SpanContext(dyn)) },
+  )
+}
+
+fn start_metadata_fields(
+  metadata: fields.Fields(meta),
+) -> fields.Fields(StartMetadata(meta)) {
+  let ctx = span_context_field()
+  let assert Ok(p) = fields.pair(metadata, ctx)
+  fields.imap(
+    p,
+    fn(pair) { StartMetadata(pair.0, pair.1) },
+    fn(m: StartMetadata(meta)) { #(m.metadata, m.context) },
+  )
+}
+
+fn stop_metadata_fields(
+  metadata: fields.Fields(meta),
+) -> fields.Fields(StopMetadata(meta)) {
+  let ctx = span_context_field()
+  let assert Ok(p) = fields.pair(metadata, ctx)
+  fields.imap(
+    p,
+    fn(pair) { StopMetadata(pair.0, pair.1) },
+    fn(m: StopMetadata(meta)) { #(m.metadata, m.context) },
+  )
+}
+
+fn exception_metadata_fields(
+  metadata: fields.Fields(meta),
+) -> fields.Fields(ExceptionMetadata(meta)) {
+  let ctx = span_context_field()
+  let kind_key = atom.create("kind")
+  let reason_key = atom.create("reason")
+  let stack_key = atom.create("stacktrace")
+
+  let kind_field =
+    fields.field(
+      kind_key,
+      fn(kind) {
+        case kind {
+          ExceptionError -> Ok(ffi.to_dynamic(atom.create("error")))
+          ExceptionExit -> Ok(ffi.to_dynamic(atom.create("exit")))
+          ExceptionThrow -> Ok(ffi.to_dynamic(atom.create("throw")))
+        }
+      },
+      fn(dyn) {
+        case decode.run(dyn, atom.decoder()) {
+          Ok(a) ->
+            case atom.to_string(a) {
+              "error" -> Ok(ExceptionError)
+              "exit" -> Ok(ExceptionExit)
+              "throw" -> Ok(ExceptionThrow)
+              _ ->
+                Error(fields.FieldDecodeError(
+                  "Expected exception kind atom: error, exit, or throw",
+                ))
+            }
+          Error(_) ->
+            Error(fields.FieldDecodeError(
+              "Expected exception kind atom: error, exit, or throw",
+            ))
+        }
+      },
+    )
+
+  let reason_field =
+    fields.field(
+      reason_key,
+      fn(r) {
+        let ExceptionReason(dyn) = r
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(ExceptionReason(dyn)) },
+    )
+
+  let stack_field =
+    fields.field(
+      stack_key,
+      fn(s) {
+        let ExceptionStacktrace(dyn) = s
+        Ok(dyn)
+      },
+      fn(dyn) { Ok(ExceptionStacktrace(dyn)) },
+    )
+
+  let assert Ok(with_ctx) = fields.pair(metadata, ctx)
+  let assert Ok(with_kind) = fields.pair(with_ctx, kind_field)
+  let assert Ok(with_reason) = fields.pair(with_kind, reason_field)
+  let assert Ok(all) = fields.pair(with_reason, stack_field)
+
+  fields.imap(
+    all,
+    fn(tuple) {
+      let #(#(#(#(meta, c), k), r), s) = tuple
+      ExceptionMetadata(meta, c, k, r, s)
+    },
+    fn(m: ExceptionMetadata(meta)) {
+      #(#(#(#(m.metadata, m.context), m.kind), m.reason), m.stacktrace)
+    },
+  )
 }
 
 fn check_reserved(
