@@ -2,6 +2,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
+import gleam/list
 import gleeunit
 import gleeunit/should
 import sinal
@@ -349,9 +350,9 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
   let listener_id =
     ffi.to_dynamic(atom.create("telemetry_failure_listener_meas"))
   let telemetry_failure_subject = process.new_subject()
-  let listener_cb = fn(_ev_name, measurements, metadata, _config) {
+  let listener_cb = fn(ev_name, measurements, metadata, _config) {
     let rec = decode_failure_event(measurements, metadata)
-    process.send(telemetry_failure_subject, rec)
+    process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
     ffi.telemetry_attach_many(
@@ -374,7 +375,14 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
   }
 
   // Upstream failure event occurred with full contract payload
-  let assert Ok(rec) = process.receive(telemetry_failure_subject, 100)
+  let assert Ok(#(actual_failure_ev_name, rec)) =
+    process.receive(telemetry_failure_subject, 100)
+  actual_failure_ev_name
+  |> should.equal([
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ])
   rec.has_valid_times |> should.equal(True)
   rec.event_name |> should.equal(["test", "malformed_meas"])
   rec.kind |> should.equal("error")
@@ -382,6 +390,7 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
   |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
+  term_equals(rec.handler_config, ffi.to_dynamic(Nil)) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   // Handler is detached as consequence of failure
@@ -416,9 +425,9 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
   let listener_id =
     ffi.to_dynamic(atom.create("telemetry_failure_listener_meta"))
   let telemetry_failure_subject = process.new_subject()
-  let listener_cb = fn(_ev_name, measurements, metadata, _config) {
+  let listener_cb = fn(ev_name, measurements, metadata, _config) {
     let rec = decode_failure_event(measurements, metadata)
-    process.send(telemetry_failure_subject, rec)
+    process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
     ffi.telemetry_attach_many(
@@ -439,7 +448,14 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
     _ -> panic as "expected MalformedMetadata"
   }
 
-  let assert Ok(rec) = process.receive(telemetry_failure_subject, 100)
+  let assert Ok(#(actual_failure_ev_name, rec)) =
+    process.receive(telemetry_failure_subject, 100)
+  actual_failure_ev_name
+  |> should.equal([
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ])
   rec.has_valid_times |> should.equal(True)
   rec.event_name |> should.equal(["test", "malformed_meta"])
   rec.kind |> should.equal("error")
@@ -447,6 +463,7 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
   |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
+  term_equals(rec.handler_config, ffi.to_dynamic(Nil)) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   sinal.detach(att) |> should.equal(Error(sinal.NotAttached))
@@ -472,9 +489,9 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
   let listener_id =
     ffi.to_dynamic(atom.create("telemetry_failure_listener_return"))
   let telemetry_failure_subject = process.new_subject()
-  let listener_cb = fn(_ev_name, measurements, metadata, _config) {
+  let listener_cb = fn(ev_name, measurements, metadata, _config) {
     let rec = decode_failure_event(measurements, metadata)
-    process.send(telemetry_failure_subject, rec)
+    process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
     ffi.telemetry_attach_many(
@@ -490,7 +507,14 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
   ev_label |> should.equal(["test", "handler_error"])
   failure |> should.equal(sinal.HandlerReturned("simulated business error"))
 
-  let assert Ok(rec) = process.receive(telemetry_failure_subject, 100)
+  let assert Ok(#(actual_failure_ev_name, rec)) =
+    process.receive(telemetry_failure_subject, 100)
+  actual_failure_ev_name
+  |> should.equal([
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ])
   rec.has_valid_times |> should.equal(True)
   rec.event_name |> should.equal(["test", "handler_error"])
   rec.kind |> should.equal("error")
@@ -498,6 +522,7 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
   |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
+  term_equals(rec.handler_config, ffi.to_dynamic(Nil)) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   sinal.detach(att) |> should.equal(Error(sinal.NotAttached))
@@ -525,9 +550,9 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
   let listener_id =
     ffi.to_dynamic(atom.create("telemetry_failure_listener_crash"))
   let telemetry_failure_subject = process.new_subject()
-  let listener_cb = fn(_ev_name, measurements, metadata, _config) {
+  let listener_cb = fn(ev_name, measurements, metadata, _config) {
     let rec = decode_failure_event(measurements, metadata)
-    process.send(telemetry_failure_subject, rec)
+    process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
     ffi.telemetry_attach_many(
@@ -544,13 +569,21 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
   process.receive(failure_subject, 50) |> should.be_error()
 
   // Upstream failure event fired with original panic reason
-  let assert Ok(rec) = process.receive(telemetry_failure_subject, 100)
+  let assert Ok(#(actual_failure_ev_name, rec)) =
+    process.receive(telemetry_failure_subject, 100)
+  actual_failure_ev_name
+  |> should.equal([
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ])
   rec.has_valid_times |> should.equal(True)
   rec.event_name |> should.equal(["test", "crash_not_converted"])
   rec.kind |> should.equal("error")
   is_panic_reason(rec.reason, "unexpected crash") |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
+  term_equals(rec.handler_config, ffi.to_dynamic(Nil)) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   // Handler was removed
@@ -647,6 +680,25 @@ fn telemetry_persist() -> Nil
 @external(erlang, "scope_test_ffi", "sleep")
 fn sleep(ms: Int) -> Nil
 
+@external(erlang, "scope_test_ffi", "is_native_integer")
+fn is_native_integer(term: Dynamic) -> Bool
+
+@external(erlang, "scope_test_ffi", "is_positive_integer")
+fn is_positive_integer(term: Dynamic) -> Bool
+
+@external(erlang, "scope_test_ffi", "is_non_negative_integer")
+fn is_non_negative_integer(term: Dynamic) -> Bool
+
+@external(erlang, "scope_test_ffi", "is_native_reference")
+fn is_native_reference(term: Dynamic) -> Bool
+
+@external(erlang, "scope_test_ffi", "has_origin_frame")
+fn has_origin_frame(
+  stacktrace: Dynamic,
+  module: String,
+  function: String,
+) -> Bool
+
 pub fn scoped_lifetime_ordinary_completion_test() {
   let empty = fields.empty()
   let ev_name = [atom.create("scope"), atom.create("ordinary")]
@@ -742,6 +794,8 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
       term_equals(reason, ffi.to_dynamic("work_failure_error"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_error")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught error exception"
   }
@@ -776,6 +830,8 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
       term_equals(reason, ffi.to_dynamic("work_failure_exit"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_exit")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught exit exception"
   }
@@ -810,6 +866,8 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
       term_equals(reason, ffi.to_dynamic("work_failure_throw"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_throw")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught throw exception"
   }
@@ -858,6 +916,8 @@ pub fn scoped_lifetime_cleanup_error_does_not_mask_work_exception_test() {
       term_equals(reason, ffi.to_dynamic("work_throw_with_cleanup_error"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_throw")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected work throw to be preserved"
   }
@@ -904,6 +964,8 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
       term_equals(reason, ffi.to_dynamic("original_work_error"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_error")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught error exception"
   }
@@ -931,6 +993,8 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
       term_equals(reason, ffi.to_dynamic("original_work_exit"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_exit")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught exit exception"
   }
@@ -958,6 +1022,8 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
       term_equals(reason, ffi.to_dynamic("original_work_throw"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_throw")
+      |> should.equal(True)
     }
     Returned(_) -> panic as "expected caught throw exception"
   }
@@ -1272,17 +1338,33 @@ pub fn run_span_ordinary_success_test() {
 
   result |> should.equal(Ok("item_123"))
 
-  let assert Ok(#(_start_meas, start_meta)) =
-    process.receive(start_subject, 100)
+  let assert Ok(#(start_meas, start_meta)) = process.receive(start_subject, 100)
   start_meta.metadata.method |> should.equal("GET")
   start_meta.metadata.route |> should.equal("/api/items")
+  is_positive_integer(span.system_time_to_dynamic(start_meas.system_time))
+  |> should.equal(True)
+  is_native_integer(span.monotonic_time_to_dynamic(start_meas.monotonic_time))
+  |> should.equal(True)
 
   let assert Ok(#(stop_meas, stop_meta)) = process.receive(stop_subject, 100)
   stop_meas.extra.bytes |> should.equal(1024)
   stop_meta.metadata.status |> should.equal(200)
+  is_non_negative_integer(span.duration_to_dynamic(stop_meas.duration))
+  |> should.equal(True)
+  is_native_integer(span.monotonic_time_to_dynamic(stop_meas.monotonic_time))
+  |> should.equal(True)
 
-  // Context equality within one invocation
+  // Context equality within one invocation and native reference check
+  is_native_reference(span.span_context_to_dynamic(start_meta.context))
+  |> should.equal(True)
+  is_native_reference(span.span_context_to_dynamic(stop_meta.context))
+  |> should.equal(True)
   start_meta.context |> should.equal(stop_meta.context)
+  term_equals(
+    span.span_context_to_dynamic(start_meta.context),
+    span.span_context_to_dynamic(stop_meta.context),
+  )
+  |> should.equal(True)
 
   sinal.detach(att1) |> should.equal(Ok(Nil))
   sinal.detach(att2) |> should.equal(Ok(Nil))
@@ -1375,8 +1457,13 @@ pub fn run_span_distinct_contexts_across_invocations_test() {
     })
   let assert Ok(ctx2) = process.receive(context_subject, 100)
 
-  // Contexts across distinct invocations must differ
+  // Contexts across distinct invocations must differ and be native references
+  let dyn1 = span.span_context_to_dynamic(ctx1)
+  let dyn2 = span.span_context_to_dynamic(ctx2)
+  is_native_reference(dyn1) |> should.equal(True)
+  is_native_reference(dyn2) |> should.equal(True)
   ctx1 |> should.not_equal(ctx2)
+  term_equals(dyn1, dyn2) |> should.equal(False)
 
   sinal.detach(att) |> should.equal(Ok(Nil))
 }
@@ -1430,19 +1517,44 @@ pub fn run_span_exception_reraise_and_event_test() {
         raise_test_error("fatal_span_error")
       })
     })
-  case caught_err {
+  let caught_err_stack = case caught_err {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("error")
       term_equals(reason, ffi.to_dynamic("fatal_span_error"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_error")
+      |> should.equal(True)
+      stacktrace
     }
     Returned(_) -> panic as "expected error exception"
   }
   let assert Ok(start_meta_err) = process.receive(start_subject, 100)
-  let assert Ok(#(_meas_err, exc_meta_err)) = process.receive(exc_subject, 100)
+  let assert Ok(#(meas_err, exc_meta_err)) = process.receive(exc_subject, 100)
   exc_meta_err.kind |> should.equal(span.ExceptionError)
   exc_meta_err.context |> should.equal(start_meta_err.context)
+  is_non_negative_integer(span.duration_to_dynamic(meas_err.duration))
+  |> should.equal(True)
+  is_native_integer(span.monotonic_time_to_dynamic(meas_err.monotonic_time))
+  |> should.equal(True)
+  is_native_reference(span.span_context_to_dynamic(exc_meta_err.context))
+  |> should.equal(True)
+  term_equals(
+    span.span_context_to_dynamic(start_meta_err.context),
+    span.span_context_to_dynamic(exc_meta_err.context),
+  )
+  |> should.equal(True)
+  term_equals(
+    span.exception_stacktrace_to_dynamic(exc_meta_err.stacktrace),
+    caught_err_stack,
+  )
+  |> should.equal(True)
+  has_origin_frame(
+    span.exception_stacktrace_to_dynamic(exc_meta_err.stacktrace),
+    "scope_test_ffi",
+    "raise_test_error",
+  )
+  |> should.equal(True)
   term_equals(
     span.exception_reason_to_dynamic(exc_meta_err.reason),
     ffi.to_dynamic("fatal_span_error"),
@@ -1457,20 +1569,44 @@ pub fn run_span_exception_reraise_and_event_test() {
         raise_test_exit("fatal_span_exit")
       })
     })
-  case caught_exit {
+  let caught_exit_stack = case caught_exit {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("exit")
       term_equals(reason, ffi.to_dynamic("fatal_span_exit"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_exit")
+      |> should.equal(True)
+      stacktrace
     }
     Returned(_) -> panic as "expected exit exception"
   }
   let assert Ok(start_meta_exit) = process.receive(start_subject, 100)
-  let assert Ok(#(_meas_exit, exc_meta_exit)) =
-    process.receive(exc_subject, 100)
+  let assert Ok(#(meas_exit, exc_meta_exit)) = process.receive(exc_subject, 100)
   exc_meta_exit.kind |> should.equal(span.ExceptionExit)
   exc_meta_exit.context |> should.equal(start_meta_exit.context)
+  is_non_negative_integer(span.duration_to_dynamic(meas_exit.duration))
+  |> should.equal(True)
+  is_native_integer(span.monotonic_time_to_dynamic(meas_exit.monotonic_time))
+  |> should.equal(True)
+  is_native_reference(span.span_context_to_dynamic(exc_meta_exit.context))
+  |> should.equal(True)
+  term_equals(
+    span.span_context_to_dynamic(start_meta_exit.context),
+    span.span_context_to_dynamic(exc_meta_exit.context),
+  )
+  |> should.equal(True)
+  term_equals(
+    span.exception_stacktrace_to_dynamic(exc_meta_exit.stacktrace),
+    caught_exit_stack,
+  )
+  |> should.equal(True)
+  has_origin_frame(
+    span.exception_stacktrace_to_dynamic(exc_meta_exit.stacktrace),
+    "scope_test_ffi",
+    "raise_test_exit",
+  )
+  |> should.equal(True)
   term_equals(
     span.exception_reason_to_dynamic(exc_meta_exit.reason),
     ffi.to_dynamic("fatal_span_exit"),
@@ -1485,26 +1621,54 @@ pub fn run_span_exception_reraise_and_event_test() {
         raise_test_throw("fatal_span_throw")
       })
     })
-  case caught_throw {
+  let caught_throw_stack = case caught_throw {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("throw")
       term_equals(reason, ffi.to_dynamic("fatal_span_throw"))
       |> should.equal(True)
       is_stacktrace_list(stacktrace) |> should.equal(True)
+      has_origin_frame(stacktrace, "scope_test_ffi", "raise_test_throw")
+      |> should.equal(True)
+      stacktrace
     }
     Returned(_) -> panic as "expected throw exception"
   }
   let assert Ok(start_meta_throw) = process.receive(start_subject, 100)
-  let assert Ok(#(_meas_throw, exc_meta_throw)) =
+  let assert Ok(#(meas_throw, exc_meta_throw)) =
     process.receive(exc_subject, 100)
   exc_meta_throw.kind |> should.equal(span.ExceptionThrow)
   exc_meta_throw.context |> should.equal(start_meta_throw.context)
+  is_non_negative_integer(span.duration_to_dynamic(meas_throw.duration))
+  |> should.equal(True)
+  is_native_integer(span.monotonic_time_to_dynamic(meas_throw.monotonic_time))
+  |> should.equal(True)
+  is_native_reference(span.span_context_to_dynamic(exc_meta_throw.context))
+  |> should.equal(True)
+  term_equals(
+    span.span_context_to_dynamic(start_meta_throw.context),
+    span.span_context_to_dynamic(exc_meta_throw.context),
+  )
+  |> should.equal(True)
+  term_equals(
+    span.exception_stacktrace_to_dynamic(exc_meta_throw.stacktrace),
+    caught_throw_stack,
+  )
+  |> should.equal(True)
+  has_origin_frame(
+    span.exception_stacktrace_to_dynamic(exc_meta_throw.stacktrace),
+    "scope_test_ffi",
+    "raise_test_throw",
+  )
+  |> should.equal(True)
   term_equals(
     span.exception_reason_to_dynamic(exc_meta_throw.reason),
     ffi.to_dynamic("fatal_span_throw"),
   )
   |> should.equal(True)
   process.receive(stop_subject, 50) |> should.be_error()
+
+  // Prove no second exception event remains after final throw case
+  process.receive(exc_subject, 50) |> should.be_error()
 
   sinal.detach(att1) |> should.equal(Ok(Nil))
   sinal.detach(att2) |> should.equal(Ok(Nil))
@@ -1766,28 +1930,140 @@ pub fn telemetry_persist_preserves_handlers_test() {
   sinal.detach(att2) |> should.equal(Ok(Nil))
 }
 
-pub fn detach_during_concurrent_emission_test() {
-  let ev_name = [atom.create("detach_test"), atom.create("concurrent")]
+pub fn detach_in_flight_barrier_race_test() {
+  let ev_name = [atom.create("detach_race"), atom.create("in_flight")]
   let empty = fields.empty()
   let assert Ok(ev) = sinal.event(ev_name, empty, empty)
-  let assert Ok(hid) = sinal.handler_id("detach-concurrent-handler")
-  let received_subject = process.new_subject()
+  let assert Ok(hid) = sinal.handler_id("in-flight-race-handler")
+
+  let in_flight_started_subject = process.new_subject()
+  let finished_subject = process.new_subject()
 
   let handler =
     sinal.handler(fn(_ev, _meas, _meta) {
-      process.send(received_subject, "tick")
+      // The executing process creates its own subject so it can receive from the coordinator
+      let allow_finish_subject = process.new_subject()
+      process.send(in_flight_started_subject, allow_finish_subject)
+      // Block until coordinator confirms detach has executed
+      let assert Ok(Nil) = process.receive(allow_finish_subject, 2000)
+      process.send(finished_subject, "callback_finished")
       Ok(Nil)
     })
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
-  // Emit once: handler receives it
-  sinal.emit(ev, Nil, Nil) |> should.equal(Ok(Nil))
-  process.receive(received_subject, 100) |> should.equal(Ok("tick"))
+  // Spawn emitter process that calls emit synchronously
+  process.spawn(fn() {
+    let assert Ok(Nil) = sinal.emit(ev, Nil, Nil)
+    Nil
+  })
 
-  // Detach
+  // Coordinator waits until the callback is actively executing inside the emitter process
+  let assert Ok(allow_finish_subject) =
+    process.receive(in_flight_started_subject, 1000)
+
+  // While callback is in flight, coordinator detaches the handler
   sinal.detach(att) |> should.equal(Ok(Nil))
 
-  // Subsequent emissions do not reach handler
+  // Permit the in-flight callback to finish
+  process.send(allow_finish_subject, Nil)
+
+  // In-flight callback finishes its execution cleanly
+  process.receive(finished_subject, 1000)
+  |> should.equal(Ok("callback_finished"))
+
+  // Subsequent emissions from any process do NOT invoke the detached handler
   sinal.emit(ev, Nil, Nil) |> should.equal(Ok(Nil))
-  process.receive(received_subject, 50) |> should.be_error()
+  process.receive(in_flight_started_subject, 50) |> should.be_error()
+
+  // Repeated detach reports NotAttached
+  sinal.detach(att) |> should.equal(Error(sinal.NotAttached))
+}
+
+pub fn overlapping_subscriptions_order_independent_test() {
+  let ev1_name = [atom.create("overlap"), atom.create("ev1")]
+  let ev2_name = [atom.create("overlap"), atom.create("ev2")]
+  let empty = fields.empty()
+  let assert Ok(ev1) = sinal.event(ev1_name, empty, empty)
+  let assert Ok(ev2) = sinal.event(ev2_name, empty, empty)
+
+  let delivery_subject = process.new_subject()
+
+  let assert Ok(hid1) = sinal.handler_id("overlap-handler-1")
+  let assert Ok(hid2) = sinal.handler_id("overlap-handler-2")
+
+  let handler1 =
+    sinal.handler(fn(ev, _, _) {
+      process.send(delivery_subject, #("handler_1", sinal.event_name(ev)))
+      Ok(Nil)
+    })
+  let handler2 =
+    sinal.handler(fn(ev, _, _) {
+      process.send(delivery_subject, #("handler_2", sinal.event_name(ev)))
+      Ok(Nil)
+    })
+
+  // Handler 1 listens only to ev1
+  let assert Ok(att1) = sinal.attach(hid1, ev1, handler1, fn(_, _) { Nil })
+  // Handler 2 listens to both ev1 and ev2 via attach_many
+  let assert Ok(att2) =
+    sinal.attach_many(hid2, ev1, [ev2], handler2, fn(_, _) { Nil })
+
+  // Emit ev1: BOTH handlers are invoked.
+  // Order between handlers is unspecified in BEAM telemetry; assert order-independently.
+  let assert Ok(Nil) = sinal.emit(ev1, Nil, Nil)
+
+  let assert Ok(msg_a) = process.receive(delivery_subject, 100)
+  let assert Ok(msg_b) = process.receive(delivery_subject, 100)
+  let received_ev1 = [msg_a, msg_b]
+  list.contains(received_ev1, #("handler_1", ["overlap", "ev1"]))
+  |> should.equal(True)
+  list.contains(received_ev1, #("handler_2", ["overlap", "ev1"]))
+  |> should.equal(True)
+
+  // Emit ev2: ONLY handler 2 is invoked
+  let assert Ok(Nil) = sinal.emit(ev2, Nil, Nil)
+  let assert Ok(msg_c) = process.receive(delivery_subject, 100)
+  msg_c |> should.equal(#("handler_2", ["overlap", "ev2"]))
+  process.receive(delivery_subject, 50) |> should.be_error()
+
+  sinal.detach(att1) |> should.equal(Ok(Nil))
+  sinal.detach(att2) |> should.equal(Ok(Nil))
+}
+
+pub fn public_id_replacement_after_detach_test() {
+  let ev_name = [atom.create("replace"), atom.create("event")]
+  let empty = fields.empty()
+  let assert Ok(ev) = sinal.event(ev_name, empty, empty)
+  let assert Ok(hid) = sinal.handler_id("reusable-handler-id")
+  let subject = process.new_subject()
+
+  let handler_v1 =
+    sinal.handler(fn(_, _, _) {
+      process.send(subject, "v1")
+      Ok(Nil)
+    })
+  let handler_v2 =
+    sinal.handler(fn(_, _, _) {
+      process.send(subject, "v2")
+      Ok(Nil)
+    })
+
+  let assert Ok(att1) = sinal.attach(hid, ev, handler_v1, fn(_, _) { Nil })
+  // Duplicate attach fails while attached
+  sinal.attach(hid, ev, handler_v2, fn(_, _) { Nil })
+  |> should.equal(Error(sinal.AlreadyExists))
+
+  // Emit invokes v1
+  let assert Ok(Nil) = sinal.emit(ev, Nil, Nil)
+  process.receive(subject, 100) |> should.equal(Ok("v1"))
+
+  // Detach att1
+  sinal.detach(att1) |> should.equal(Ok(Nil))
+
+  // Now attaching with same hid succeeds
+  let assert Ok(att2) = sinal.attach(hid, ev, handler_v2, fn(_, _) { Nil })
+  let assert Ok(Nil) = sinal.emit(ev, Nil, Nil)
+  process.receive(subject, 100) |> should.equal(Ok("v2"))
+
+  sinal.detach(att2) |> should.equal(Ok(Nil))
 }

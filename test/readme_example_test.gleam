@@ -1,58 +1,16 @@
-# sinal
+import gleam/bit_array
+import gleam/dynamic
+import gleam/dynamic/decode
+import gleam/erlang/atom
+import gleam/list
+import gleam/string
+import gleeunit/should
+import sinal
+import sinal/fields
+import sinal/span
 
-A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead of dynamic maps and atoms.
+// --- Snippet 1: Defining Fields and Events ---
 
-`sinal` wraps native BEAM `:telemetry` 1.4.2 directly. It replaces untyped string/atom map lookups with type-safe generic codecs (`Fields(t)`), structured event descriptors (`Event(m, d)`), and typed span execution. Typed encoding and decoding execute directly at the callback boundary; the included microbenchmarks establish an empirical performance baseline.
-
----
-
-## Target and Support Matrix
-
-| Target            | Status                         | Notes                                                                                                                  |
-| :---------------- | :----------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| **Erlang / BEAM** | **Reviewed Release Candidate** | Full initial facade implemented. Tested against Erlang/OTP 28 and `:telemetry` 1.4.2.                                  |
-| **JavaScript**    | **Unsupported**                | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
-
----
-
-## Architecture and Core Design
-
-1. **Direct Native Binding**: Measurements and metadata are decoded directly from native Erlang maps into typed Gleam records via explicit field codecs at the callback boundary.
-2. **Atom Safety**: Event prefixes and field names use Erlang atoms. Atoms must be trusted constants or pre-validated identifiers; never dynamically construct atoms from untrusted user strings.
-3. **Same-Process Synchronous Dispatch**: Telemetry handlers execute synchronously inside the emitting process.
-4. **Honest Failure Isolation**: Handler errors and malformed maps notify a local typed observer and emit the standard native `[telemetry, handler, failure]` event before removing the failing handler, without crashing the emitter.
-
----
-
-## Getting Started
-
-Add `sinal` to your `gleam.toml` dependencies:
-
-```toml
-[dependencies]
-sinal = ">= 0.1.0 and < 1.0.0"
-```
-
----
-
-## Usage Examples
-
-All examples below are checked against BEAM `:telemetry` and verified verbatim against `test/readme_example_test.gleam`.
-
-Common imports used across examples:
-
-- `import sinal`
-- `import sinal/fields`
-- `import sinal/span`
-- `import gleam/erlang/atom`
-- `import gleam/dynamic`
-- `import gleam/dynamic/decode`
-
-### 1. Defining Fields and Events
-
-Events are parameterized by measurement and metadata types: `Event(measurements, metadata)`.
-
-```gleam
 pub type HttpMeasurements {
   HttpMeasurements(duration_ms: Int, bytes_sent: Int)
 }
@@ -135,11 +93,9 @@ pub fn http_request_event() -> Result(
     meta_fields,
   )
 }
-```
 
-### 2. Emitting Events
+// --- Snippet 2: Emitting Events ---
 
-```gleam
 pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   let meas = HttpMeasurements(duration_ms: 42, bytes_sent: 2048)
   let meta = HttpMetadata(method: "GET", route: "/api/users", status: 200)
@@ -150,11 +106,9 @@ pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
     Error(sinal.BackendFailed(msg)) -> panic as msg
   }
 }
-```
 
-### 3. Attaching and Detaching Handlers
+// --- Snippet 3: Attaching and Detaching Handlers ---
 
-```gleam
 pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   let assert Ok(hid) = sinal.handler_id("prometheus-http-metrics")
 
@@ -177,13 +131,9 @@ pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   let assert Ok(Nil) = sinal.detach(attachment)
   Nil
 }
-```
 
-### 4. Scoped Attachments (`with_attachments`)
+// --- Snippet 4: Scoped Attachments (with_attachments) ---
 
-Attach temporary handlers for the duration of a callback, with cleanup attempted on normal return or catchable BEAM exception (error, exit, throw) and original exception preservation (uncatchable termination such as `kill` bypasses cleanup):
-
-```gleam
 pub fn scoped_metrics_example(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
 ) -> Result(sinal.ScopedCompletion(Int), sinal.AttachError) {
@@ -211,13 +161,9 @@ pub fn scoped_metrics_example(
     },
   )
 }
-```
 
-### 5. Native Telemetry Spans (`sinal/span`)
+// --- Snippet 5: Native Telemetry Spans (sinal/span) ---
 
-Execute code wrapped in standard `:telemetry` spans, emitting start and stop (or exception) events:
-
-```gleam
 pub type QueryMeta {
   QueryMeta(sql: String)
 }
@@ -261,41 +207,64 @@ pub fn execute_traced_query(query_str: String) -> String {
     )
   })
 }
-```
 
----
+// --- Runnable Tests ---
 
-## Operational Limits and Semantics
+pub fn readme_example_flow_test() {
+  let assert Ok(ev) = http_request_event()
+  setup_metrics(ev)
+  log_request(ev)
 
-- **Synchronous Execution**: Handlers execute synchronously in the caller process. Slow handlers directly block the emitter.
-- **Unspecified Handler Order**: When multiple handlers are attached to an event, the order in which `:telemetry` calls them is explicitly unspecified.
-- **Non-Quiescence on Detach**: Detaching a handler prevents it from being selected for subsequent event emissions. However, if a callback is already executing in flight in another process, detaching does not wait for or abort that in-flight execution.
-- **Uncatchable VM Exits**: Abrupt process exits or untrappable signals (`kill`) bypass cleanup hooks.
-- **Storage Migration**: Handlers initially live in ETS tables. Calling `:telemetry.persist/0` compiles them into `persistent_term` for read-optimized lookup without interrupting event delivery.
-- **No In-Core Export or Buffering**: `sinal` is an in-process telemetry delivery facade. Network export (OTLP, StatsD, Prometheus) and batch buffering belong in dedicated adapter processes.
+  let assert Ok(scoped_completion) = scoped_metrics_example(ev)
+  scoped_completion.work_result |> should.equal(42)
+}
 
----
+pub fn readme_span_example_test() {
+  let res = execute_traced_query("SELECT 1;")
+  res |> should.equal("result for: SELECT 1;")
+}
 
-## Development, Tests & Benchmarks
+pub fn readme_snippets_match_source_test() {
+  let assert Ok(readme_bytes) = read_file("README.md")
+  let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
+  let snippets = extract_gleam_snippets(readme_str)
+  list.length(snippets) |> should.equal(5)
 
-To enter the dev shell and run test suites:
+  let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
+  let assert Ok(source_str) = bit_array.to_string(source_bytes)
 
-```sh
-# Enter reproducible dev environment
-nix develop
+  let normalized_source = string.replace(source_str, "\r\n", "\n")
 
-# Run unit tests and bounded stress harness (47 tests)
-gleam test
+  list.each(snippets, fn(snippet) {
+    let normalized_snippet = string.replace(snippet, "\r\n", "\n")
+    case string.contains(normalized_source, normalized_snippet) {
+      True -> Nil
+      False ->
+        panic as {
+          "README snippet not found verbatim in test/readme_example_test.gleam:\n"
+          <> normalized_snippet
+        }
+    }
+  })
+}
 
-# Run microbenchmarks (reproducible latency and throughput baseline)
-gleam run -m benchmark
+fn extract_gleam_snippets(markdown: String) -> List(String) {
+  let normalized = string.replace(markdown, "\r\n", "\n")
+  extract_snippets_loop(normalized, [])
+}
 
-# Run standalone bounded stress test
-gleam run -m stress_test
+fn extract_snippets_loop(remaining: String, acc: List(String)) -> List(String) {
+  case string.split_once(remaining, "```gleam\n") {
+    Error(Nil) -> list.reverse(acc)
+    Ok(#(_before, rest)) -> {
+      case string.split_once(rest, "\n```") {
+        Error(Nil) -> list.reverse(acc)
+        Ok(#(snippet, after)) ->
+          extract_snippets_loop(after, [string.trim(snippet), ..acc])
+      }
+    }
+  }
+}
 
-# Validate documentation generation
-gleam docs build
-
-# Validate Hex package generation (dry run)
-gleam export hex-tarball
-```
+@external(erlang, "scope_test_ffi", "read_file")
+fn read_file(path: String) -> Result(BitArray, String)

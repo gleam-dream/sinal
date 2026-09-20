@@ -11,7 +11,15 @@
     is_panic_reason/2,
     term_equals/2,
     telemetry_persist/0,
-    sleep/1
+    sleep/1,
+    is_native_integer/1,
+    is_positive_integer/1,
+    is_non_negative_integer/1,
+    is_native_reference/1,
+    has_origin_frame/3,
+    get_otp_release/0,
+    monotonic_nanos/0,
+    read_file/1
 ]).
 
 catch_exception(Fun) ->
@@ -82,3 +90,47 @@ telemetry_persist() ->
 
 sleep(Ms) ->
     timer:sleep(Ms).
+
+is_native_integer(Term) ->
+    is_integer(Term).
+
+is_positive_integer(Term) ->
+    is_integer(Term) andalso Term > 0.
+
+is_non_negative_integer(Term) ->
+    is_integer(Term) andalso Term >= 0.
+
+is_native_reference(Term) ->
+    is_reference(Term).
+
+has_origin_frame(Stacktrace, ModBin, FunBin) when is_list(Stacktrace), is_binary(ModBin), is_binary(FunBin) ->
+    try
+        ModAtom = binary_to_existing_atom(ModBin, utf8),
+        FunAtom = binary_to_existing_atom(FunBin, utf8),
+        has_origin_frame_loop(Stacktrace, ModAtom, FunAtom)
+    catch
+        error:badarg -> false
+    end;
+has_origin_frame(_, _, _) ->
+    false.
+
+has_origin_frame_loop([{Mod, Fun, _Arity, _Location} | _], Mod, Fun) ->
+    true;
+has_origin_frame_loop([{Mod, Fun, _Args} | _], Mod, Fun) ->
+    true;
+has_origin_frame_loop([_ | Rest], Mod, Fun) ->
+    has_origin_frame_loop(Rest, Mod, Fun);
+has_origin_frame_loop([], _, _) ->
+    false.
+
+get_otp_release() ->
+    list_to_binary(erlang:system_info(otp_release)).
+
+monotonic_nanos() ->
+    erlang:monotonic_time(nanosecond).
+
+read_file(Path) ->
+    case file:read_file(Path) of
+        {ok, Bin} -> {ok, Bin};
+        {error, Reason} -> {error, atom_to_binary(Reason, utf8)}
+    end.
