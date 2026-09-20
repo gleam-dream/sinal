@@ -1,7 +1,9 @@
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/list
 import sinal/exception.{type BeamException}
 import sinal/fields.{type FieldEncodeError, type FieldError, type Fields}
+import sinal/internal/ffi
 
 /// Package version reporting for compatibility checks and smoke testing.
 pub fn version() -> String {
@@ -153,52 +155,152 @@ fn validate_rest_names(
 
 /// Emits an event synchronously to native BEAM telemetry.
 pub fn emit(
-  _event: Event(m, d),
-  _measurements: m,
-  _metadata: d,
+  event: Event(m, d),
+  measurements: m,
+  metadata: d,
 ) -> Result(Nil, EmitError) {
-  todo as "native telemetry emit is not yet implemented"
+  case fields.encode(event.measurements, measurements) {
+    Error(err) -> Error(EncodingFailed(err))
+    Ok(raw_measurements) ->
+      case fields.encode(event.metadata, metadata) {
+        Error(err) -> Error(EncodingFailed(err))
+        Ok(raw_metadata) -> {
+          ffi.telemetry_execute(event.name, raw_measurements, raw_metadata)
+          Ok(Nil)
+        }
+      }
+  }
 }
 
 /// Attaches a typed handler to a single event descriptor.
 pub fn attach(
-  _id: HandlerId,
-  _event: Event(m, d),
-  _handler: Handler(m, d, e),
-  _on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+  id: HandlerId,
+  event: Event(m, d),
+  handler: Handler(m, d, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
 ) -> Result(Attachment, AttachError) {
-  todo as "native telemetry attach is not yet implemented"
+  attach_many(id, event, [], handler, on_failure)
 }
 
 /// Attaches a typed handler to multiple same-shaped event descriptors.
 pub fn attach_many(
-  _id: HandlerId,
+  id: HandlerId,
   first: Event(m, d),
   rest: List(Event(m, d)),
-  _handler: Handler(m, d, e),
-  _on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+  handler: Handler(m, d, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
 ) -> Result(Attachment, AttachError) {
   case validate_event_names(first, rest) {
     Error(err) -> Error(err)
-    Ok(Nil) -> todo as "native telemetry attach_many is not yet implemented"
+    Ok(Nil) -> {
+      let descriptors = [first, ..rest]
+      let event_names = list.map(descriptors, fn(ev) { ev.name })
+      let callback = fn(event_name, raw_measurements, raw_metadata, _config) {
+        dispatch(
+          event_name,
+          raw_measurements,
+          raw_metadata,
+          descriptors,
+          handler,
+          on_failure,
+        )
+      }
+      let raw_id = ffi.to_dynamic(id)
+      case
+        ffi.telemetry_attach_many(
+          raw_id,
+          event_names,
+          callback,
+          ffi.to_dynamic(Nil),
+        )
+      {
+        Ok(Nil) -> {
+          let detach_fn = fn() {
+            case ffi.telemetry_detach(raw_id) {
+              Ok(Nil) -> Ok(Nil)
+              Error(ffi.NativeNotFound) -> Error(NotAttached)
+              Error(ffi.NativeDetachOther(_)) ->
+                Error(DetachBackendNotAvailable)
+            }
+          }
+          Ok(Attachment(detach_fn))
+        }
+        Error(ffi.NativeAlreadyExists) -> Error(AlreadyExists)
+        Error(ffi.NativeAttachOther(_)) -> Error(BackendNotAvailable)
+      }
+    }
   }
 }
+
+fn dispatch(
+  event_name: List(Atom),
+  raw_measurements: Dynamic,
+  raw_metadata: Dynamic,
+  descriptors: List(Event(m, d)),
+  handler: Handler(m, d, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+) -> Nil {
+  case list.find(descriptors, fn(ev) { ev.name == event_name }) {
+    Error(Nil) -> ffi.raise_callback_failure("unrecognized_event_descriptor")
+    Ok(descriptor) ->
+      case fields.decode(descriptor.measurements, raw_measurements) {
+        Error(field_err) -> {
+          on_failure(descriptor, MalformedMeasurements(field_err))
+          ffi.raise_callback_failure("malformed_measurements")
+        }
+        Ok(measurements) ->
+          case fields.decode(descriptor.metadata, raw_metadata) {
+            Error(field_err) -> {
+              on_failure(descriptor, MalformedMetadata(field_err))
+              ffi.raise_callback_failure("malformed_metadata")
+            }
+            Ok(metadata) -> {
+              let Handler(run) = handler
+              case run(descriptor, measurements, metadata) {
+                Ok(Nil) -> Nil
+                Error(handler_err) -> {
+                  on_failure(descriptor, HandlerReturned(handler_err))
+                  ffi.raise_callback_failure("handler_returned_error")
+                }
+              }
+            }
+          }
+      }
+  }
+}
+
+/// Executes work with temporary attachments, guaranteeing cleanup attempt and
+/// preserving original return values separately from cleanup outcome.
+@external(erlang, "sinal_scope_ffi", "with_scope")
+fn ffi_with_scope(
+  work: fn() -> a,
+  cleanup: fn() -> Result(Nil, DetachError),
+  on_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
+) -> ScopedCompletion(a)
 
 /// Executes work with temporary attachments, guaranteeing cleanup attempt and
 /// preserving original return values separately from cleanup outcome.
 pub fn with_attachments(
   first: Event(m, d),
   rest: List(Event(m, d)),
-  _handler: Handler(m, d, e),
-  _on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-  _on_exception_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
-  _run: fn() -> a,
+  handler: Handler(m, d, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+  on_exception_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
+  run: fn() -> a,
 ) -> Result(ScopedCompletion(a), AttachError) {
   case validate_event_names(first, rest) {
     Error(err) -> Error(err)
     Ok(Nil) -> {
-      let _scoped_id = ScopedHandlerId(fresh_scoped_handler_number())
-      todo as "scoped attachment lifetime is not yet implemented"
+      let scoped_id = ScopedHandlerId(fresh_scoped_handler_number())
+      case attach_many(scoped_id, first, rest, handler, on_failure) {
+        Error(err) -> Error(err)
+        Ok(attachment) -> {
+          let cleanup = fn() { detach(attachment) }
+          let completion =
+            ffi_with_scope(run, cleanup, on_exception_cleanup_failure)
+          Ok(completion)
+        }
+      }
     }
   }
 }

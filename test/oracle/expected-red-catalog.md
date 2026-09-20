@@ -4,9 +4,9 @@ This document records the durable expected-red catalog for the initial Sinal che
 
 ## Expected-Red Cases
 
-| Focused command                                       | Public behavior under test                                                                                                                                                                                                                       | Expected failure site and message                                                 | Observed failure                                                                                                                                                                            | Removal condition                                                                                                                                 |
-| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `nix develop --command gleam run -m focused_behavior` | Synchronous invocation of attached handler upon event emission in emitting process with exact decoded measurements (`count == 42`), exact decoded metadata (`user == "alice"`), and matching emitting PID (`report.emitter_pid == current_pid`). | `src/sinal.gleam:170`: `todo as "native telemetry attach is not yet implemented"` | Exit code 1: `runtime error: todo: native telemetry attach is not yet implemented` at `sinal.attach src/sinal.gleam:170` called from `focused_behavior.main test/focused_behavior.gleam:71` | Implement native `:telemetry.attach/4` and `:telemetry.execute/3` FFI handlers in `sinal.gleam` and `sinal_ffi.erl` in the first green TDD cycle. |
+| Focused command                                       | Public behavior under test                                                                                                                                                                                                                       | Expected failure site and message                                                 | Historical observed failure                                                                                                                                                                 | Resolution status                                                                                                                                                             |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `nix develop --command gleam run -m focused_behavior` | Synchronous invocation of attached handler upon event emission in emitting process with exact decoded measurements (`count == 42`), exact decoded metadata (`user == "alice"`), and matching emitting PID (`report.emitter_pid == current_pid`). | `src/sinal.gleam:170`: `todo as "native telemetry attach is not yet implemented"` | Exit code 1: `runtime error: todo: native telemetry attach is not yet implemented` at `sinal.attach src/sinal.gleam:170` called from `focused_behavior.main test/focused_behavior.gleam:61` | **Resolved Green in Wave 2** via native `:telemetry.attach_many/4` and `:telemetry.execute/3` FFI handlers in `src/sinal.gleam` and `src/sinal_ffi.erl`. Command now exits 0. |
 
 ## Detailed Case Entry
 
@@ -26,7 +26,7 @@ This document records the durable expected-red catalog for the initial Sinal che
   5. Detach cleanly via `sinal.detach(attachment)`.
 - **Expected failure site:** `src/sinal.gleam:170`
 - **Expected failure message:** `todo as "native telemetry attach is not yet implemented"`
-- **Observed failure output:**
+- **Historical observed failure output:**
   ```text
   runtime error: todo
 
@@ -36,16 +36,12 @@ This document records the durable expected-red catalog for the initial Sinal che
     sinal.attach src/sinal.gleam:170
     focused_behavior.main test/focused_behavior.gleam:61
   ```
-- **Exit code:** 1
-- **Removal condition:** First green TDD vertical implementing native `:telemetry.attach/4` and `:telemetry.execute/3` bindings.
+- **Historical exit code:** 1
+- **Resolution:** Resolved green in Wave 2. Native telemetry execution and attachment implemented in `src/sinal.gleam` and `src/sinal_ffi.erl`. `gleam run -m focused_behavior` now exits with code 0.
 
 ## Scaffold-Warning Inventory
 
-These 6 named `todo` warnings represent deliberate, unreached executable boundaries in the compile-green scaffold, distinct from the expected-red test failure above:
+With native telemetry dispatch, attachment, and scoped lifetime implemented in Wave 2, only 2 named `todo` warnings remain for unreached executable boundaries in spans (Wave 3 scope):
 
-1. `src/sinal.gleam:160`: `todo as "native telemetry emit is not yet implemented"` — type signature and field encoding scaffolded; native `:telemetry.execute/3` dispatch deferred.
-2. `src/sinal.gleam:170`: `todo as "native telemetry attach is not yet implemented"` — handler types, validation, and detachment scaffolded; native `:telemetry.attach/4` registration deferred (entry point for first red test).
-3. `src/sinal.gleam:183`: `todo as "native telemetry attach_many is not yet implemented"` — multi-event signature and duplicate native name validation scaffolded; native `:telemetry.attach_many/4` deferred.
-4. `src/sinal.gleam:201`: `todo as "scoped attachment lifetime is not yet implemented"` — scoped signature and error types scaffolded; native temporary attachment lifecycle deferred.
-5. `src/sinal/span.gleam:155`: `todo as "span event descriptor derivation is not yet implemented"` — span prefix and reserved field validation enforced; deriving start/stop/exception descriptors deferred.
-6. `src/sinal/span.gleam:171`: `todo as "native telemetry run_span is not yet implemented"` — timing types and completion result signatures scaffolded; native `:telemetry.span/3` call deferred.
+1. `src/sinal/span.gleam:155`: `todo as "span event descriptor derivation is not yet implemented"` — span prefix and reserved field validation enforced; deriving start/stop/exception descriptors deferred to Wave 3.
+2. `src/sinal/span.gleam:171`: `todo as "native telemetry run_span is not yet implemented"` — timing types and completion result signatures scaffolded; native `:telemetry.span/3` call deferred to Wave 3.
