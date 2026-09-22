@@ -1,4 +1,5 @@
 import gleam/dynamic.{type Dynamic}
+import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/list
 import sinal/internal/ffi
@@ -41,7 +42,7 @@ pub fn empty() -> Fields(Nil) {
   )
 }
 
-/// Declares a single native field backed by a trusted BEAM atom key.
+/// Canonical constructor for a custom native field backed by a trusted BEAM atom key.
 /// Field identity is derived strictly from the atom. Encoding is fallible.
 /// Unrelated foreign fields present in a valid map are ignored.
 pub fn field(
@@ -79,13 +80,34 @@ pub fn field(
   )
 }
 
-/// Declares a single native field backed by a trusted BEAM atom key.
-pub fn native_field(
-  key: Atom,
-  encode: fn(a) -> Result(Dynamic, FieldEncodeError),
-  decode: fn(Dynamic) -> Result(a, FieldDecodeError),
-) -> Fields(a) {
-  field(key, encode, decode)
+/// Declares a native string field from a trusted, application-defined atom key.
+pub fn string(key: Atom) -> Fields(String) {
+  field(key, fn(value) { Ok(dynamic.string(value)) }, fn(raw) {
+    case decode.run(raw, decode.string) {
+      Ok(value) -> Ok(value)
+      Error(_) -> Error(FieldDecodeError("Expected a native BEAM string"))
+    }
+  })
+}
+
+/// Declares a native integer field from a trusted, application-defined atom key.
+pub fn int(key: Atom) -> Fields(Int) {
+  field(key, fn(value) { Ok(dynamic.int(value)) }, fn(raw) {
+    case decode.run(raw, decode.int) {
+      Ok(value) -> Ok(value)
+      Error(_) -> Error(FieldDecodeError("Expected a native BEAM integer"))
+    }
+  })
+}
+
+/// Declares a native boolean field from a trusted, application-defined atom key.
+pub fn bool(key: Atom) -> Fields(Bool) {
+  field(key, fn(value) { Ok(dynamic.bool(value)) }, fn(raw) {
+    case decode.run(raw, decode.bool) {
+      Ok(value) -> Ok(value)
+      Error(_) -> Error(FieldDecodeError("Expected a native BEAM boolean"))
+    }
+  })
 }
 
 /// Composes two field specifications. Rejects duplicate declared native keys.

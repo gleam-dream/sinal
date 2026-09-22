@@ -5,11 +5,6 @@ import sinal/exception.{type BeamException}
 import sinal/fields.{type FieldEncodeError, type FieldError, type Fields}
 import sinal/internal/ffi
 
-/// Package version reporting for compatibility checks and smoke testing.
-pub fn version() -> String {
-  "0.1.0"
-}
-
 /// A strongly-typed event descriptor retaining native atom identity
 /// and typed measurement and metadata field specifications.
 pub opaque type Event(measurements, metadata) {
@@ -24,7 +19,7 @@ pub type EventError {
   EmptyEventName
 }
 
-/// Constructs a typed event descriptor from trusted native atoms, deriving
+/// Canonical constructor for a typed event descriptor from trusted native atoms, deriving
 /// the logical name safely from the atoms and rejecting empty names.
 pub fn event(
   name: List(Atom),
@@ -35,15 +30,6 @@ pub fn event(
     [] -> Error(EmptyEventName)
     _ -> Ok(Event(name, measurements, metadata))
   }
-}
-
-/// Convenience constructor for trusted native event descriptors.
-pub fn trusted_event(
-  name: List(Atom),
-  measurements: Fields(m),
-  metadata: Fields(d),
-) -> Result(Event(m, d), EventError) {
-  event(name, measurements, metadata)
 }
 
 /// Exposes the logical name derived from the native atom list.
@@ -75,17 +61,6 @@ pub fn handler_id(name: String) -> Result(HandlerId, IdentityError) {
 
 @external(erlang, "erlang", "unique_integer")
 fn fresh_scoped_handler_number() -> Int
-
-pub opaque type Handler(m, d, e) {
-  Handler(run: fn(Event(m, d), m, d) -> Result(Nil, e))
-}
-
-/// Constructs a typed handler receiving the selected descriptor and decoded values.
-pub fn handler(
-  run: fn(Event(m, d), m, d) -> Result(Nil, e),
-) -> Handler(m, d, e) {
-  Handler(run)
-}
 
 pub opaque type Attachment {
   Attachment(detach_fn: fn() -> Result(Nil, DetachError))
@@ -132,7 +107,7 @@ pub fn detach(attachment: Attachment) -> Result(Nil, DetachError) {
 }
 
 /// Validates that a nonempty set of event descriptors contains no duplicate native names.
-pub fn validate_event_names(
+fn validate_event_names(
   first: Event(m, d),
   rest: List(Event(m, d)),
 ) -> Result(Nil, AttachError) {
@@ -176,10 +151,30 @@ pub fn emit(
 pub fn attach(
   id: HandlerId,
   event: Event(m, d),
-  handler: Handler(m, d, e),
+  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
   on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
 ) -> Result(Attachment, AttachError) {
   attach_many(id, event, [], handler, on_failure)
+}
+
+/// Attaches an infallible observer to one event using native failure isolation.
+/// The callback runs synchronously in the emitting process. Malformed native
+/// maps still remove this registration and emit telemetry's handler failure event.
+/// Retain the returned attachment and call `detach` when observation is complete.
+pub fn observe(
+  id: HandlerId,
+  event: Event(m, d),
+  run: fn(m, d) -> Nil,
+) -> Result(Attachment, AttachError) {
+  attach(
+    id,
+    event,
+    fn(_selected_event, measurements, metadata) {
+      run(measurements, metadata)
+      Ok(Nil)
+    },
+    fn(_selected_event, _failure) { Nil },
+  )
 }
 
 /// Attaches a typed handler to multiple same-shaped event descriptors.
@@ -187,7 +182,7 @@ pub fn attach_many(
   id: HandlerId,
   first: Event(m, d),
   rest: List(Event(m, d)),
-  handler: Handler(m, d, e),
+  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
   on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
 ) -> Result(Attachment, AttachError) {
   case validate_event_names(first, rest) {
@@ -237,7 +232,7 @@ fn dispatch(
   raw_measurements: Dynamic,
   raw_metadata: Dynamic,
   descriptors: List(Event(m, d)),
-  handler: Handler(m, d, e),
+  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
   on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
 ) -> Nil {
   case list.find(descriptors, fn(ev) { ev.name == event_name }) {
@@ -255,8 +250,7 @@ fn dispatch(
               ffi.raise_callback_failure("malformed_metadata")
             }
             Ok(metadata) -> {
-              let Handler(run) = handler
-              case run(descriptor, measurements, metadata) {
+              case handler(descriptor, measurements, metadata) {
                 Ok(Nil) -> Nil
                 Error(handler_err) -> {
                   on_failure(descriptor, HandlerReturned(handler_err))
@@ -293,7 +287,7 @@ fn ffi_with_scope(
 pub fn with_attachments(
   first: Event(m, d),
   rest: List(Event(m, d)),
-  handler: Handler(m, d, e),
+  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
   on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
   on_exception_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
   run: fn() -> a,

@@ -22,11 +22,6 @@ pub fn event_prefix(prefix: List(Atom)) -> Result(EventPrefix, PrefixError) {
   }
 }
 
-/// Convenience constructor for trusted span prefixes.
-pub fn trusted_prefix(prefix: List(Atom)) -> Result(EventPrefix, PrefixError) {
-  event_prefix(prefix)
-}
-
 /// Returns the logical prefix strings derived from the native prefix atoms.
 pub fn prefix_name(prefix: EventPrefix) -> List(String) {
   list.map(prefix.prefix, atom.to_string)
@@ -202,19 +197,19 @@ pub fn events(
 ) -> SpanEvents(start_metadata, extra_measurements, stop_metadata) {
   let prefix = span.prefix.prefix
   let assert Ok(start_ev) =
-    sinal.trusted_event(
+    sinal.event(
       list.append(prefix, [atom.create("start")]),
       start_measurement_fields(),
       start_metadata_fields(span.start_metadata),
     )
   let assert Ok(stop_ev) =
-    sinal.trusted_event(
+    sinal.event(
       list.append(prefix, [atom.create("stop")]),
       stop_measurement_fields(span.extra_measurements),
       stop_metadata_fields(span.stop_metadata),
     )
   let assert Ok(exception_ev) =
-    sinal.trusted_event(
+    sinal.event(
       list.append(prefix, [atom.create("exception")]),
       exception_measurement_fields(),
       exception_metadata_fields(span.start_metadata),

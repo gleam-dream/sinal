@@ -49,20 +49,19 @@ pub fn main() {
   let current_pid = process.self()
   let subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(selected_event, count: Int, user: String) {
-      let executing_pid = process.self()
-      process.send(
-        subject,
-        DeliveryReport(
-          selected_event_name: sinal.event_name(selected_event),
-          count: count,
-          user: user,
-          emitter_pid: executing_pid,
-        ),
-      )
-      Ok(Nil)
-    })
+  let handler = fn(selected_event, count: Int, user: String) {
+    let executing_pid = process.self()
+    process.send(
+      subject,
+      DeliveryReport(
+        selected_event_name: sinal.event_name(selected_event),
+        count: count,
+        user: user,
+        emitter_pid: executing_pid,
+      ),
+    )
+    Ok(Nil)
+  }
 
   let on_failure = fn(_ev, _failure) { Nil }
 

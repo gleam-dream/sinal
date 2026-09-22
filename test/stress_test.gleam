@@ -39,11 +39,10 @@ pub fn repeated_attach_emit_detach_stress_test() {
   list.each(range(1, 50), fn(i) {
     let id_str = "stress-churn-handler-" <> int.to_string(i)
     let assert Ok(hid) = sinal.handler_id(id_str)
-    let handler =
-      sinal.handler(fn(_ev, iter: Int, _meta) {
-        process.send(subject, iter)
-        Ok(Nil)
-      })
+    let handler = fn(_ev, iter: Int, _meta) {
+      process.send(subject, iter)
+      Ok(Nil)
+    }
     let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
     // Emit and verify exact delivery
@@ -86,11 +85,10 @@ pub fn concurrent_emitters_high_throughput_stress_test() {
   let assert Ok(hid) = sinal.handler_id("stress-flood-handler")
   let collector_subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_ev, meas: #(Int, Int), _meta) {
-      process.send(collector_subject, meas)
-      Ok(Nil)
-    })
+  let handler = fn(_ev, meas: #(Int, Int), _meta) {
+    process.send(collector_subject, meas)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   let num_workers = 10
@@ -157,28 +155,22 @@ pub fn concurrent_spans_stress_test() {
   let start_subject = process.new_subject()
   let stop_subject = process.new_subject()
 
-  let start_handler =
-    sinal.handler(
-      fn(
-        _ev,
-        _meas: span.StartMeasurements,
-        meta: span.StartMetadata(StressSpanMeta),
-      ) {
-        process.send(start_subject, #(meta.metadata.worker, meta.context))
-        Ok(Nil)
-      },
-    )
-  let stop_handler =
-    sinal.handler(
-      fn(
-        _ev,
-        _meas: span.StopMeasurements(Nil),
-        meta: span.StopMetadata(StressSpanMeta),
-      ) {
-        process.send(stop_subject, #(meta.metadata.worker, meta.context))
-        Ok(Nil)
-      },
-    )
+  let start_handler = fn(
+    _ev,
+    _meas: span.StartMeasurements,
+    meta: span.StartMetadata(StressSpanMeta),
+  ) {
+    process.send(start_subject, #(meta.metadata.worker, meta.context))
+    Ok(Nil)
+  }
+  let stop_handler = fn(
+    _ev,
+    _meas: span.StopMeasurements(Nil),
+    meta: span.StopMetadata(StressSpanMeta),
+  ) {
+    process.send(stop_subject, #(meta.metadata.worker, meta.context))
+    Ok(Nil)
+  }
 
   let assert Ok(hid_start) = sinal.handler_id("stress-span-start")
   let assert Ok(hid_stop) = sinal.handler_id("stress-span-stop")

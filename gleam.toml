@@ -2,6 +2,7 @@ name = "sinal"
 version = "0.1.0"
 target = "erlang"
 gleam = ">= 1.18.0"
+internal_modules = ["sinal/internal", "sinal/internal/*"]
 licenses = ["Apache-2.0"]
 description = "A strongly-typed take on Erlang :telemetry, built for Gleam's generics instead of dynamic maps and atoms."
 repository = { type = "github", user = "gleam-dream", repo = "sinal" }

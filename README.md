@@ -37,7 +37,7 @@ sinal = ">= 0.1.0 and < 1.0.0"
 
 ## Usage Examples
 
-All examples below are checked against BEAM `:telemetry` and verified verbatim against `test/readme_example_test.gleam`.
+The examples are exercised against BEAM `:telemetry` in `test/sinal_test.gleam` and `test/readme_example_test.gleam`.
 
 Common imports used across examples:
 
@@ -47,6 +47,39 @@ Common imports used across examples:
 - `import gleam/erlang/atom`
 - `import gleam/dynamic`
 - `import gleam/dynamic/decode`
+
+For ordinary events, use `sinal.event` and the primitive `fields.string`,
+`fields.int`, and `fields.bool` constructors. Keys and event names must be
+trusted, application-defined atoms. Use `fields.field` for custom native
+fields with explicit encode and decode functions.
+
+An infallible observer needs only the decoded measurements and metadata:
+
+```gleam
+pub fn observe_request_example() {
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("request"), atom.create("finished")],
+      fields.int(atom.create("duration_ms")),
+      fields.string(atom.create("route")),
+    )
+  let assert Ok(id) = sinal.handler_id("request-finished-observer")
+  let assert Ok(attachment) =
+    sinal.observe(id, ev, fn(_duration_ms, _route) {
+      // Handle the event synchronously in the emitting process.
+      Nil
+    })
+  let assert Ok(Nil) = sinal.emit(ev, 42, "/users")
+  let assert Ok(Nil) = sinal.detach(attachment)
+}
+```
+
+`observe` uses the same native attachment path as `attach`. Malformed native
+maps and observer exceptions remove the registration and emit the standard
+`[telemetry, handler, failure]` event; `observe` does not expose a typed failure
+callback. Use `attach` when you need a fallible handler, the selected event
+descriptor, or a typed failure callback. Keep the returned attachment to detach
+an observer explicitly.
 
 ### 1. Defining Fields and Events
 
@@ -158,13 +191,14 @@ pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
 pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   let assert Ok(hid) = sinal.handler_id("prometheus-http-metrics")
 
-  let handler =
-    sinal.handler(
-      fn(_event, _measurements: HttpMeasurements, _metadata: HttpMetadata) {
-        // Record metrics synchronously
-        Ok(Nil)
-      },
-    )
+  let handler = fn(
+    _event,
+    _measurements: HttpMeasurements,
+    _metadata: HttpMetadata,
+  ) {
+    // Record metrics synchronously
+    Ok(Nil)
+  }
 
   let on_failure = fn(_event, _failure) {
     // Called if measurements/metadata cannot be decoded or handler returned Error
@@ -187,12 +221,13 @@ Attach temporary handlers for the duration of a callback, with cleanup attempted
 pub fn scoped_metrics_example(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
 ) -> Result(sinal.ScopedCompletion(Int), sinal.AttachError) {
-  let handler =
-    sinal.handler(
-      fn(_event, _measurements: HttpMeasurements, _metadata: HttpMetadata) {
-        Ok(Nil)
-      },
-    )
+  let handler = fn(
+    _event,
+    _measurements: HttpMeasurements,
+    _metadata: HttpMetadata,
+  ) {
+    Ok(Nil)
+  }
 
   let on_attach_failure = fn(_event, _err) { Nil }
   let on_cleanup_failure = fn(_err) { Nil }

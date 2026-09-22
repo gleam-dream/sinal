@@ -110,7 +110,7 @@ fn bench_single_handler() {
   let assert Ok(ev) = sinal.event(ev_name, val_field, fields.empty())
   let assert Ok(hid) = sinal.handler_id("bench-single-handler")
 
-  let handler = sinal.handler(fn(_ev, _val: Int, _meta) { Ok(Nil) })
+  let handler = fn(_ev, _val: Int, _meta) { Ok(Nil) }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   let warmup = 10_000

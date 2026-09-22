@@ -9,6 +9,25 @@ import sinal
 import sinal/fields
 import sinal/span
 
+// --- Snippet 0: Ordinary observation ---
+
+pub fn observe_request_example() {
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("request"), atom.create("finished")],
+      fields.int(atom.create("duration_ms")),
+      fields.string(atom.create("route")),
+    )
+  let assert Ok(id) = sinal.handler_id("request-finished-observer")
+  let assert Ok(attachment) =
+    sinal.observe(id, ev, fn(_duration_ms, _route) {
+      // Handle the event synchronously in the emitting process.
+      Nil
+    })
+  let assert Ok(Nil) = sinal.emit(ev, 42, "/users")
+  let assert Ok(Nil) = sinal.detach(attachment)
+}
+
 // --- Snippet 1: Defining Fields and Events ---
 
 pub type HttpMeasurements {
@@ -112,13 +131,14 @@ pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
 pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   let assert Ok(hid) = sinal.handler_id("prometheus-http-metrics")
 
-  let handler =
-    sinal.handler(
-      fn(_event, _measurements: HttpMeasurements, _metadata: HttpMetadata) {
-        // Record metrics synchronously
-        Ok(Nil)
-      },
-    )
+  let handler = fn(
+    _event,
+    _measurements: HttpMeasurements,
+    _metadata: HttpMetadata,
+  ) {
+    // Record metrics synchronously
+    Ok(Nil)
+  }
 
   let on_failure = fn(_event, _failure) {
     // Called if measurements/metadata cannot be decoded or handler returned Error
@@ -137,12 +157,13 @@ pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
 pub fn scoped_metrics_example(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
 ) -> Result(sinal.ScopedCompletion(Int), sinal.AttachError) {
-  let handler =
-    sinal.handler(
-      fn(_event, _measurements: HttpMeasurements, _metadata: HttpMetadata) {
-        Ok(Nil)
-      },
-    )
+  let handler = fn(
+    _event,
+    _measurements: HttpMeasurements,
+    _metadata: HttpMetadata,
+  ) {
+    Ok(Nil)
+  }
 
   let on_attach_failure = fn(_event, _err) { Nil }
   let on_cleanup_failure = fn(_err) { Nil }
@@ -228,7 +249,7 @@ pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(5)
+  list.length(snippets) |> should.equal(6)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)

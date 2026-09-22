@@ -14,9 +14,132 @@ pub fn main() -> Nil {
   gleeunit.main()
 }
 
-pub fn version_test() {
-  sinal.version()
-  |> should.equal("0.1.0")
+pub fn primitive_fields_round_trip_and_reject_malformed_native_values_test() {
+  let string_key = atom.create("ergonomic_string")
+  let int_key = atom.create("ergonomic_int")
+  let bool_key = atom.create("ergonomic_bool")
+
+  let string_field = fields.string(string_key)
+  let int_field = fields.int(int_key)
+  let bool_field = fields.bool(bool_key)
+
+  let assert Ok(string_map) = fields.encode(string_field, "hello")
+  let assert Ok(int_map) = fields.encode(int_field, 42)
+  let assert Ok(bool_map) = fields.encode(bool_field, True)
+
+  fields.decode(string_field, string_map) |> should.equal(Ok("hello"))
+  fields.decode(int_field, int_map) |> should.equal(Ok(42))
+  fields.decode(bool_field, bool_map) |> should.equal(Ok(True))
+
+  fields.decode(string_field, ffi.map_from_pair(string_key, dynamic.int(7)))
+  |> should.be_error()
+  fields.decode(int_field, ffi.map_from_pair(int_key, dynamic.string("7")))
+  |> should.be_error()
+  fields.decode(bool_field, ffi.map_from_pair(bool_key, dynamic.int(1)))
+  |> should.be_error()
+  fields.decode(int_field, ffi.empty_map())
+  |> should.equal(Error(fields.MissingField("ergonomic_int")))
+}
+
+pub fn observe_runs_synchronously_and_detaches_test() {
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("test"), atom.create("observe_simple")],
+      fields.int(atom.create("count")),
+      fields.string(atom.create("name")),
+    )
+  let assert Ok(hid) = sinal.handler_id("observe-simple-handler")
+  let caller = process.self()
+  let subject = process.new_subject()
+  let assert Ok(attachment) =
+    sinal.observe(hid, ev, fn(count, name) {
+      process.send(subject, #(count, name, process.self()))
+    })
+
+  sinal.emit(ev, 3, "Ada") |> should.equal(Ok(Nil))
+  process.receive(subject, 100) |> should.equal(Ok(#(3, "Ada", caller)))
+
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  sinal.emit(ev, 4, "Lin") |> should.equal(Ok(Nil))
+  process.receive(subject, 50) |> should.be_error()
+}
+
+pub fn observe_malformed_native_map_keeps_failure_isolation_test() {
+  let key = atom.create("count")
+  let ev_name = [atom.create("test"), atom.create("observe_malformed")]
+  let assert Ok(ev) = sinal.event(ev_name, fields.int(key), fields.empty())
+  let assert Ok(hid) = sinal.handler_id("observe-malformed-handler")
+  let subject = process.new_subject()
+  let assert Ok(attachment) =
+    sinal.observe(hid, ev, fn(_count, _metadata) { process.send(subject, Nil) })
+
+  let failure_event = [
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ]
+  let listener_id =
+    ffi.to_dynamic(atom.create("observe_malformed_failure_listener"))
+  let failure_subject = process.new_subject()
+  let listener = fn(_, measurements, metadata, _config) {
+    process.send(failure_subject, decode_failure_event(measurements, metadata))
+  }
+  let assert Ok(Nil) =
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      listener,
+      ffi.to_dynamic(Nil),
+    )
+
+  ffi.telemetry_execute(
+    ev_name,
+    ffi.map_from_pair(key, dynamic.string("bad")),
+    ffi.empty_map(),
+  )
+  process.receive(subject, 50) |> should.be_error()
+  let assert Ok(failure) = process.receive(failure_subject, 100)
+  failure.event_name |> should.equal(["test", "observe_malformed"])
+  is_callback_failure_reason(failure.reason, "malformed_measurements")
+  |> should.equal(True)
+  failure.has_stacktrace |> should.equal(True)
+  let _ = ffi.telemetry_detach(listener_id)
+  sinal.detach(attachment) |> should.equal(Error(sinal.NotAttached))
+}
+
+pub fn observe_callback_panic_keeps_native_failure_isolation_test() {
+  let ev_name = [atom.create("test"), atom.create("observe_panic")]
+  let assert Ok(ev) = sinal.event(ev_name, fields.empty(), fields.empty())
+  let assert Ok(hid) = sinal.handler_id("observe-panic-handler")
+  let assert Ok(attachment) =
+    sinal.observe(hid, ev, fn(_, _) { panic as "observer panic" })
+
+  let failure_event = [
+    atom.create("telemetry"),
+    atom.create("handler"),
+    atom.create("failure"),
+  ]
+  let listener_id =
+    ffi.to_dynamic(atom.create("observe_panic_failure_listener"))
+  let failure_subject = process.new_subject()
+  let listener = fn(_, measurements, metadata, _config) {
+    process.send(failure_subject, decode_failure_event(measurements, metadata))
+  }
+  let assert Ok(Nil) =
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      listener,
+      ffi.to_dynamic(Nil),
+    )
+
+  sinal.emit(ev, Nil, Nil) |> should.equal(Ok(Nil))
+  let assert Ok(failure) = process.receive(failure_subject, 100)
+  failure.event_name |> should.equal(["test", "observe_panic"])
+  is_panic_reason(failure.reason, "observer panic") |> should.equal(True)
+  failure.has_stacktrace |> should.equal(True)
+  let _ = ffi.telemetry_detach(listener_id)
+  sinal.detach(attachment) |> should.equal(Error(sinal.NotAttached))
 }
 
 pub fn handler_id_validation_test() {
@@ -129,26 +252,30 @@ pub fn empty_fields_rejects_non_map_boundary_test() {
   )
 }
 
-pub fn validate_event_names_duplicate_native_rejection_test() {
+pub fn attach_many_duplicate_native_event_rejection_test() {
   let atom_a = atom.create("event_a")
   let atom_b = atom.create("event_b")
   let empty = fields.empty()
 
-  let assert Ok(ev_a1) = sinal.trusted_event([atom_a], empty, empty)
-  let assert Ok(ev_a2) = sinal.trusted_event([atom_a], empty, empty)
-  let assert Ok(ev_b) = sinal.trusted_event([atom_b], empty, empty)
+  let assert Ok(ev_a1) = sinal.event([atom_a], empty, empty)
+  let assert Ok(ev_a2) = sinal.event([atom_a], empty, empty)
+  let assert Ok(ev_b) = sinal.event([atom_b], empty, empty)
+  let assert Ok(id) = sinal.handler_id("attach-many-native-duplicate")
+  let run = fn(_, _, _) { Ok(Nil) }
+  let on_failure = fn(_, _) { Nil }
 
   // Disjoint event names succeed
-  sinal.validate_event_names(ev_a1, [ev_b])
-  |> should.equal(Ok(Nil))
+  let assert Ok(attachment) =
+    sinal.attach_many(id, ev_a1, [ev_b], run, on_failure)
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 
   // Duplicate native event names are rejected
-  sinal.validate_event_names(ev_a1, [ev_a2])
+  sinal.attach_many(id, ev_a1, [ev_a2], run, on_failure)
   |> should.equal(Error(sinal.DuplicateEventName(["event_a"])))
 }
 
 pub fn span_reserved_field_rejection_test() {
-  let assert Ok(prefix) = span.trusted_prefix([atom.create("test_prefix")])
+  let assert Ok(prefix) = span.event_prefix([atom.create("test_prefix")])
   let empty = fields.empty()
 
   let duration_atom = atom.create("duration")
@@ -196,17 +323,16 @@ pub fn native_attach_and_emit_synchronous_delivery_test() {
   let assert Ok(hid) = sinal.handler_id("sync-delivery-handler")
   let parent = process.self()
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(selected_ev, count: Int, user: String) {
-      let calling_pid = process.self()
-      process.send(subject, #(
-        sinal.event_name(selected_ev),
-        count,
-        user,
-        calling_pid,
-      ))
-      Ok(Nil)
-    })
+  let handler = fn(selected_ev, count: Int, user: String) {
+    let calling_pid = process.self()
+    process.send(subject, #(
+      sinal.event_name(selected_ev),
+      count,
+      user,
+      calling_pid,
+    ))
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
   let assert Ok(Nil) = sinal.emit(ev, 100, "bob")
   let assert Ok(#(ev_name, count, user, calling_pid)) =
@@ -223,7 +349,7 @@ pub fn duplicate_handler_id_rejection_test() {
   let assert Ok(ev) =
     sinal.event([atom.create("test"), atom.create("dup_id")], empty, empty)
   let assert Ok(hid) = sinal.handler_id("duplicate-id-test")
-  let handler = sinal.handler(fn(_, _, _) { Ok(Nil) })
+  let handler = fn(_, _, _) { Ok(Nil) }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
   sinal.attach(hid, ev, handler, fn(_, _) { Nil })
   |> should.equal(Error(sinal.AlreadyExists))
@@ -240,11 +366,10 @@ pub fn detach_and_repeated_detach_test() {
     )
   let assert Ok(hid) = sinal.handler_id("repeated-detach-test")
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject, Nil)
-      Ok(Nil)
-    })
+  let handler = fn(_, _, _) {
+    process.send(subject, Nil)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
   sinal.detach(att) |> should.equal(Ok(Nil))
   sinal.detach(att) |> should.equal(Error(sinal.NotAttached))
@@ -269,11 +394,10 @@ pub fn attach_many_multi_event_descriptor_selection_test() {
     )
   let assert Ok(hid) = sinal.handler_id("attach-many-selection-test")
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(selected_ev, _, _) {
-      process.send(subject, sinal.event_name(selected_ev))
-      Ok(Nil)
-    })
+  let handler = fn(selected_ev, _, _) {
+    process.send(subject, sinal.event_name(selected_ev))
+    Ok(Nil)
+  }
   let assert Ok(att) =
     sinal.attach_many(hid, ev_a, [ev_b], handler, fn(_, _) { Nil })
   let assert Ok(Nil) = sinal.emit(ev_a, Nil, Nil)
@@ -306,11 +430,10 @@ pub fn encode_refusal_invokes_no_native_dispatch_test() {
     )
   let assert Ok(hid) = sinal.handler_id("encode-refusal-handler")
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject, Nil)
-      Ok(Nil)
-    })
+  let handler = fn(_, _, _) {
+    process.send(subject, Nil)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
   // Negative value fails encode
   sinal.emit(ev, -1, Nil)
@@ -338,7 +461,7 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
   let on_failure = fn(selected_ev, failure) {
     process.send(failure_subject, #(sinal.event_name(selected_ev), failure))
   }
-  let handler = sinal.handler(fn(_, _, _) { Ok(Nil) })
+  let handler = fn(_, _, _) { Ok(Nil) }
   let assert Ok(att) = sinal.attach(hid, ev, handler, on_failure)
 
   // Listen for native telemetry [telemetry, handler, failure]
@@ -413,7 +536,7 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
   let on_failure = fn(selected_ev, failure) {
     process.send(failure_subject, #(sinal.event_name(selected_ev), failure))
   }
-  let handler = sinal.handler(fn(_, _, _) { Ok(Nil) })
+  let handler = fn(_, _, _) { Ok(Nil) }
   let assert Ok(att) = sinal.attach(hid, ev, handler, on_failure)
 
   // Listen for native telemetry [telemetry, handler, failure]
@@ -478,7 +601,7 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
   let on_failure = fn(selected_ev, failure) {
     process.send(failure_subject, #(sinal.event_name(selected_ev), failure))
   }
-  let handler = sinal.handler(fn(_, _, _) { Error("simulated business error") })
+  let handler = fn(_, _, _) { Error("simulated business error") }
   let assert Ok(att) = sinal.attach(hid, ev, handler, on_failure)
 
   let failure_event = [
@@ -535,11 +658,10 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
   let assert Ok(hid) = sinal.handler_id("unexpected-crash-handler")
   let failure_subject = process.new_subject()
   let on_failure = fn(_, failure) { process.send(failure_subject, failure) }
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      // Panic causes an untyped BEAM exception
-      panic as "unexpected crash"
-    })
+  let handler = fn(_, _, _) {
+    // Panic causes an untyped BEAM exception
+    panic as "unexpected crash"
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, on_failure)
 
   let failure_event = [
@@ -603,11 +725,10 @@ pub fn foreign_raw_emission_with_extra_fields_tolerated_test() {
   let assert Ok(ev) = sinal.event(ev_name, count_field, fields.empty())
   let assert Ok(hid) = sinal.handler_id("foreign-extra-fields-handler")
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(_, count: Int, _) {
-      process.send(subject, count)
-      Ok(Nil)
-    })
+  let handler = fn(_, count: Int, _) {
+    process.send(subject, count)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   // Create native map with target_count PLUS unknown extra keys
@@ -704,11 +825,10 @@ pub fn scoped_lifetime_ordinary_completion_test() {
   let ev_name = [atom.create("scope"), atom.create("ordinary")]
   let assert Ok(ev) = sinal.event(ev_name, empty, empty)
   let subject = process.new_subject()
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject, "handler_called")
-      Ok(Nil)
-    })
+  let handler = fn(_, _, _) {
+    process.send(subject, "handler_called")
+    Ok(Nil)
+  }
 
   let result =
     sinal.with_attachments(
@@ -740,10 +860,10 @@ pub fn scoped_lifetime_ordinary_completion_test() {
 pub fn scoped_lifetime_attach_refusal_test() {
   let empty = fields.empty()
   let ev_name = [atom.create("scope"), atom.create("dup")]
-  let assert Ok(ev1) = sinal.trusted_event(ev_name, empty, empty)
-  let assert Ok(ev2) = sinal.trusted_event(ev_name, empty, empty)
+  let assert Ok(ev1) = sinal.event(ev_name, empty, empty)
+  let assert Ok(ev2) = sinal.event(ev_name, empty, empty)
   let subject = process.new_subject()
-  let handler = sinal.handler(fn(_, _, _) { Ok(Nil) })
+  let handler = fn(_, _, _) { Ok(Nil) }
 
   let result =
     sinal.with_attachments(
@@ -769,11 +889,10 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
 
   // 1. erlang:error/1 fidelity
   let subject_err = process.new_subject()
-  let handler_err =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject_err, "called_before_crash")
-      Ok(Nil)
-    })
+  let handler_err = fn(_, _, _) {
+    process.send(subject_err, "called_before_crash")
+    Ok(Nil)
+  }
   let caught_err =
     catch_exception(fn() {
       sinal.with_attachments(
@@ -805,11 +924,10 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
 
   // 2. erlang:exit/1 fidelity
   let subject_exit = process.new_subject()
-  let handler_exit =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject_exit, "called_before_exit")
-      Ok(Nil)
-    })
+  let handler_exit = fn(_, _, _) {
+    process.send(subject_exit, "called_before_exit")
+    Ok(Nil)
+  }
   let caught_exit =
     catch_exception(fn() {
       sinal.with_attachments(
@@ -841,11 +959,10 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
 
   // 3. erlang:throw/1 fidelity
   let subject_throw = process.new_subject()
-  let handler_throw =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject_throw, "called_before_throw")
-      Ok(Nil)
-    })
+  let handler_throw = fn(_, _, _) {
+    process.send(subject_throw, "called_before_throw")
+    Ok(Nil)
+  }
   let caught_throw =
     catch_exception(fn() {
       sinal.with_attachments(
@@ -882,11 +999,10 @@ pub fn scoped_lifetime_cleanup_error_does_not_mask_work_exception_test() {
   let assert Ok(ev) = sinal.event(ev_name, empty, empty)
   let cleanup_failure_subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      // Handler failure removes it from telemetry
-      Error("fail_and_remove_for_detach_error")
-    })
+  let handler = fn(_, _, _) {
+    // Handler failure removes it from telemetry
+    Error("fail_and_remove_for_detach_error")
+  }
   let on_cleanup_failure = fn(failure) {
     process.send(cleanup_failure_subject, failure)
   }
@@ -929,11 +1045,10 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
   let assert Ok(ev) = sinal.event(ev_name, empty, empty)
   let cleanup_failure_subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      // Cause handler failure so telemetry removes it before scope exit
-      Error("fail_and_remove")
-    })
+  let handler = fn(_, _, _) {
+    // Cause handler failure so telemetry removes it before scope exit
+    Error("fail_and_remove")
+  }
 
   let on_cleanup_failure = fn(failure) {
     process.send(cleanup_failure_subject, failure)
@@ -1036,16 +1151,14 @@ pub fn scoped_lifetime_nested_identity_test() {
   let outer_subject = process.new_subject()
   let inner_subject = process.new_subject()
 
-  let outer_handler =
-    sinal.handler(fn(_, _, _) {
-      process.send(outer_subject, "outer")
-      Ok(Nil)
-    })
-  let inner_handler =
-    sinal.handler(fn(_, _, _) {
-      process.send(inner_subject, "inner")
-      Ok(Nil)
-    })
+  let outer_handler = fn(_, _, _) {
+    process.send(outer_subject, "outer")
+    Ok(Nil)
+  }
+  let inner_handler = fn(_, _, _) {
+    process.send(inner_subject, "inner")
+    Ok(Nil)
+  }
 
   let outer_res =
     sinal.with_attachments(
@@ -1104,11 +1217,10 @@ pub fn scoped_lifetime_already_removed_not_attached_test() {
   let ev_name = [atom.create("scope"), atom.create("already_removed")]
   let assert Ok(ev) = sinal.event(ev_name, empty, empty)
 
-  let handler =
-    sinal.handler(fn(_, _, _) {
-      // Cause handler failure so telemetry detaches it
-      Error("fail_handler")
-    })
+  let handler = fn(_, _, _) {
+    // Cause handler failure so telemetry detaches it
+    Error("fail_handler")
+  }
 
   let result =
     sinal.with_attachments(
@@ -1142,16 +1254,15 @@ pub fn remove_all_handler_on_failure_across_events_test() {
   // 1. Failure via erlang:error/1 removes handler from every registered event
   let assert Ok(hid_err) = sinal.handler_id("multi-fail-err")
   let ev2_called_err = process.new_subject()
-  let handler_err =
-    sinal.handler(fn(selected_ev, _, _) {
-      case sinal.event_name(selected_ev) {
-        ["multi_fail", "ev1"] -> raise_test_error("fail_on_ev1_error")
-        _ -> {
-          process.send(ev2_called_err, "called")
-          Ok(Nil)
-        }
+  let handler_err = fn(selected_ev, _, _) {
+    case sinal.event_name(selected_ev) {
+      ["multi_fail", "ev1"] -> raise_test_error("fail_on_ev1_error")
+      _ -> {
+        process.send(ev2_called_err, "called")
+        Ok(Nil)
       }
-    })
+    }
+  }
   let assert Ok(att_err) =
     sinal.attach_many(hid_err, ev1, [ev2], handler_err, fn(_, _) { Nil })
 
@@ -1163,16 +1274,15 @@ pub fn remove_all_handler_on_failure_across_events_test() {
   // 2. Failure via erlang:exit/1 removes handler from every registered event
   let assert Ok(hid_exit) = sinal.handler_id("multi-fail-exit")
   let ev2_called_exit = process.new_subject()
-  let handler_exit =
-    sinal.handler(fn(selected_ev, _, _) {
-      case sinal.event_name(selected_ev) {
-        ["multi_fail", "ev1"] -> raise_test_exit("fail_on_ev1_exit")
-        _ -> {
-          process.send(ev2_called_exit, "called")
-          Ok(Nil)
-        }
+  let handler_exit = fn(selected_ev, _, _) {
+    case sinal.event_name(selected_ev) {
+      ["multi_fail", "ev1"] -> raise_test_exit("fail_on_ev1_exit")
+      _ -> {
+        process.send(ev2_called_exit, "called")
+        Ok(Nil)
       }
-    })
+    }
+  }
   let assert Ok(att_exit) =
     sinal.attach_many(hid_exit, ev1, [ev2], handler_exit, fn(_, _) { Nil })
 
@@ -1184,16 +1294,15 @@ pub fn remove_all_handler_on_failure_across_events_test() {
   // 3. Failure via erlang:throw/1 removes handler from every registered event
   let assert Ok(hid_throw) = sinal.handler_id("multi-fail-throw")
   let ev2_called_throw = process.new_subject()
-  let handler_throw =
-    sinal.handler(fn(selected_ev, _, _) {
-      case sinal.event_name(selected_ev) {
-        ["multi_fail", "ev1"] -> raise_test_throw("fail_on_ev1_throw")
-        _ -> {
-          process.send(ev2_called_throw, "called")
-          Ok(Nil)
-        }
+  let handler_throw = fn(selected_ev, _, _) {
+    case sinal.event_name(selected_ev) {
+      ["multi_fail", "ev1"] -> raise_test_throw("fail_on_ev1_throw")
+      _ -> {
+        process.send(ev2_called_throw, "called")
+        Ok(Nil)
       }
-    })
+    }
+  }
   let assert Ok(att_throw) =
     sinal.attach_many(hid_throw, ev1, [ev2], handler_throw, fn(_, _) { Nil })
 
@@ -1293,28 +1402,22 @@ pub fn run_span_ordinary_success_test() {
   let start_subject = process.new_subject()
   let stop_subject = process.new_subject()
 
-  let start_handler =
-    sinal.handler(
-      fn(
-        _ev,
-        meas: span.StartMeasurements,
-        meta: span.StartMetadata(SpanTestStartMetadata),
-      ) {
-        process.send(start_subject, #(meas, meta))
-        Ok(Nil)
-      },
-    )
-  let stop_handler =
-    sinal.handler(
-      fn(
-        _ev,
-        meas: span.StopMeasurements(SpanTestExtraMeasurements),
-        meta: span.StopMetadata(SpanTestStopMetadata),
-      ) {
-        process.send(stop_subject, #(meas, meta))
-        Ok(Nil)
-      },
-    )
+  let start_handler = fn(
+    _ev,
+    meas: span.StartMeasurements,
+    meta: span.StartMetadata(SpanTestStartMetadata),
+  ) {
+    process.send(start_subject, #(meas, meta))
+    Ok(Nil)
+  }
+  let stop_handler = fn(
+    _ev,
+    meas: span.StopMeasurements(SpanTestExtraMeasurements),
+    meta: span.StopMetadata(SpanTestStopMetadata),
+  ) {
+    process.send(stop_subject, #(meas, meta))
+    Ok(Nil)
+  }
 
   let assert Ok(hid1) = sinal.handler_id("span-success-start-handler")
   let assert Ok(hid2) = sinal.handler_id("span-success-stop-handler")
@@ -1377,16 +1480,18 @@ pub fn run_span_business_error_as_stop_test() {
   let stop_subject = process.new_subject()
   let exception_subject = process.new_subject()
 
-  let stop_handler =
-    sinal.handler(fn(_ev, _meas, meta: span.StopMetadata(SpanTestStopMetadata)) {
-      process.send(stop_subject, meta.metadata.status)
-      Ok(Nil)
-    })
-  let exception_handler =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      process.send(exception_subject, "exception_called")
-      Ok(Nil)
-    })
+  let stop_handler = fn(
+    _ev,
+    _meas,
+    meta: span.StopMetadata(SpanTestStopMetadata),
+  ) {
+    process.send(stop_subject, meta.metadata.status)
+    Ok(Nil)
+  }
+  let exception_handler = fn(_ev, _meas, _meta) {
+    process.send(exception_subject, "exception_called")
+    Ok(Nil)
+  }
 
   let assert Ok(hid_stop) = sinal.handler_id("span-biz-err-stop-handler")
   let assert Ok(hid_exc) = sinal.handler_id("span-biz-err-exc-handler")
@@ -1426,13 +1531,14 @@ pub fn run_span_distinct_contexts_across_invocations_test() {
   let events = span.events(sp)
   let context_subject = process.new_subject()
 
-  let start_handler =
-    sinal.handler(
-      fn(_ev, _meas, meta: span.StartMetadata(SpanTestStartMetadata)) {
-        process.send(context_subject, meta.context)
-        Ok(Nil)
-      },
-    )
+  let start_handler = fn(
+    _ev,
+    _meas,
+    meta: span.StartMetadata(SpanTestStartMetadata),
+  ) {
+    process.send(context_subject, meta.context)
+    Ok(Nil)
+  }
   let assert Ok(hid) = sinal.handler_id("span-ctx-dist-handler")
   let assert Ok(att) =
     sinal.attach(hid, events.start, start_handler, fn(_, _) { Nil })
@@ -1476,29 +1582,26 @@ pub fn run_span_exception_reraise_and_event_test() {
   let stop_subject = process.new_subject()
   let exc_subject = process.new_subject()
 
-  let start_handler =
-    sinal.handler(
-      fn(_ev, _meas, meta: span.StartMetadata(SpanTestStartMetadata)) {
-        process.send(start_subject, meta)
-        Ok(Nil)
-      },
-    )
-  let stop_handler =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      process.send(stop_subject, "stop_fired")
-      Ok(Nil)
-    })
-  let exc_handler =
-    sinal.handler(
-      fn(
-        _ev,
-        meas: span.ExceptionMeasurements,
-        meta: span.ExceptionMetadata(SpanTestStartMetadata),
-      ) {
-        process.send(exc_subject, #(meas, meta))
-        Ok(Nil)
-      },
-    )
+  let start_handler = fn(
+    _ev,
+    _meas,
+    meta: span.StartMetadata(SpanTestStartMetadata),
+  ) {
+    process.send(start_subject, meta)
+    Ok(Nil)
+  }
+  let stop_handler = fn(_ev, _meas, _meta) {
+    process.send(stop_subject, "stop_fired")
+    Ok(Nil)
+  }
+  let exc_handler = fn(
+    _ev,
+    meas: span.ExceptionMeasurements,
+    meta: span.ExceptionMetadata(SpanTestStartMetadata),
+  ) {
+    process.send(exc_subject, #(meas, meta))
+    Ok(Nil)
+  }
 
   let assert Ok(hid1) = sinal.handler_id("span-exc-start-handler")
   let assert Ok(hid2) = sinal.handler_id("span-exc-stop-handler")
@@ -1687,28 +1790,30 @@ pub fn run_span_nested_ordering_test() {
 
   let order_subject = process.new_subject()
 
-  let outer_start_handler =
-    sinal.handler(
-      fn(_ev, _meas, meta: span.StartMetadata(SpanTestStartMetadata)) {
-        process.send(order_subject, #("outer_start", meta.context))
-        Ok(Nil)
-      },
-    )
-  let outer_stop_handler =
-    sinal.handler(fn(_ev, _meas, meta: span.StopMetadata(SpanTestStopMetadata)) {
-      process.send(order_subject, #("outer_stop", meta.context))
-      Ok(Nil)
-    })
-  let inner_start_handler =
-    sinal.handler(fn(_ev, _meas, meta: span.StartMetadata(Nil)) {
-      process.send(order_subject, #("inner_start", meta.context))
-      Ok(Nil)
-    })
-  let inner_stop_handler =
-    sinal.handler(fn(_ev, _meas, meta: span.StopMetadata(Nil)) {
-      process.send(order_subject, #("inner_stop", meta.context))
-      Ok(Nil)
-    })
+  let outer_start_handler = fn(
+    _ev,
+    _meas,
+    meta: span.StartMetadata(SpanTestStartMetadata),
+  ) {
+    process.send(order_subject, #("outer_start", meta.context))
+    Ok(Nil)
+  }
+  let outer_stop_handler = fn(
+    _ev,
+    _meas,
+    meta: span.StopMetadata(SpanTestStopMetadata),
+  ) {
+    process.send(order_subject, #("outer_stop", meta.context))
+    Ok(Nil)
+  }
+  let inner_start_handler = fn(_ev, _meas, meta: span.StartMetadata(Nil)) {
+    process.send(order_subject, #("inner_start", meta.context))
+    Ok(Nil)
+  }
+  let inner_stop_handler = fn(_ev, _meas, meta: span.StopMetadata(Nil)) {
+    process.send(order_subject, #("inner_stop", meta.context))
+    Ok(Nil)
+  }
 
   let assert Ok(h1) = sinal.handler_id("nested-outer-start")
   let assert Ok(h2) = sinal.handler_id("nested-outer-stop")
@@ -1812,11 +1917,10 @@ pub fn sinal_handler_observes_raw_telemetry_emission_test() {
   let assert Ok(hid) = sinal.handler_id("sinal-observing-raw")
   let subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_ev, count: Int, _meta) {
-      process.send(subject, count)
-      Ok(Nil)
-    })
+  let handler = fn(_ev, count: Int, _meta) {
+    process.send(subject, count)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   let raw_map = ffi.map_from_pair(key, dynamic.int(999))
@@ -1834,12 +1938,11 @@ pub fn synchronous_execution_in_caller_pid_and_slow_handler_blocks_test() {
   let assert Ok(hid) = sinal.handler_id("sync-blocking-handler")
   let subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      sleep(25)
-      process.send(subject, "handler_finished")
-      Ok(Nil)
-    })
+  let handler = fn(_ev, _meas, _meta) {
+    sleep(25)
+    process.send(subject, "handler_finished")
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   // When emit returns, the slow handler has already finished
@@ -1863,11 +1966,10 @@ pub fn concurrent_emitters_test() {
   let assert Ok(hid) = sinal.handler_id("concurrency-parallel-handler")
   let subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_ev, worker_id: Int, _meta) {
-      process.send(subject, worker_id)
-      Ok(Nil)
-    })
+  let handler = fn(_ev, worker_id: Int, _meta) {
+    process.send(subject, worker_id)
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   // Spawn 5 workers that emit concurrently
@@ -1895,11 +1997,10 @@ pub fn telemetry_persist_preserves_handlers_test() {
   let subject1 = process.new_subject()
   let subject2 = process.new_subject()
 
-  let handler1 =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      process.send(subject1, "h1")
-      Ok(Nil)
-    })
+  let handler1 = fn(_ev, _meas, _meta) {
+    process.send(subject1, "h1")
+    Ok(Nil)
+  }
   let assert Ok(att1) = sinal.attach(hid1, ev, handler1, fn(_, _) { Nil })
 
   // Emit before persist
@@ -1915,11 +2016,10 @@ pub fn telemetry_persist_preserves_handlers_test() {
 
   // Attach new handler after persist
   let assert Ok(hid2) = sinal.handler_id("persist-handler-2")
-  let handler2 =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      process.send(subject2, "h2")
-      Ok(Nil)
-    })
+  let handler2 = fn(_ev, _meas, _meta) {
+    process.send(subject2, "h2")
+    Ok(Nil)
+  }
   let assert Ok(att2) = sinal.attach(hid2, ev, handler2, fn(_, _) { Nil })
 
   sinal.emit(ev, Nil, Nil) |> should.equal(Ok(Nil))
@@ -1939,16 +2039,15 @@ pub fn detach_in_flight_barrier_race_test() {
   let in_flight_started_subject = process.new_subject()
   let finished_subject = process.new_subject()
 
-  let handler =
-    sinal.handler(fn(_ev, _meas, _meta) {
-      // The executing process creates its own subject so it can receive from the coordinator
-      let allow_finish_subject = process.new_subject()
-      process.send(in_flight_started_subject, allow_finish_subject)
-      // Block until coordinator confirms detach has executed
-      let assert Ok(Nil) = process.receive(allow_finish_subject, 2000)
-      process.send(finished_subject, "callback_finished")
-      Ok(Nil)
-    })
+  let handler = fn(_ev, _meas, _meta) {
+    // The executing process creates its own subject so it can receive from the coordinator
+    let allow_finish_subject = process.new_subject()
+    process.send(in_flight_started_subject, allow_finish_subject)
+    // Block until coordinator confirms detach has executed
+    let assert Ok(Nil) = process.receive(allow_finish_subject, 2000)
+    process.send(finished_subject, "callback_finished")
+    Ok(Nil)
+  }
   let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
 
   // Spawn emitter process that calls emit synchronously
@@ -1991,16 +2090,14 @@ pub fn overlapping_subscriptions_order_independent_test() {
   let assert Ok(hid1) = sinal.handler_id("overlap-handler-1")
   let assert Ok(hid2) = sinal.handler_id("overlap-handler-2")
 
-  let handler1 =
-    sinal.handler(fn(ev, _, _) {
-      process.send(delivery_subject, #("handler_1", sinal.event_name(ev)))
-      Ok(Nil)
-    })
-  let handler2 =
-    sinal.handler(fn(ev, _, _) {
-      process.send(delivery_subject, #("handler_2", sinal.event_name(ev)))
-      Ok(Nil)
-    })
+  let handler1 = fn(ev, _, _) {
+    process.send(delivery_subject, #("handler_1", sinal.event_name(ev)))
+    Ok(Nil)
+  }
+  let handler2 = fn(ev, _, _) {
+    process.send(delivery_subject, #("handler_2", sinal.event_name(ev)))
+    Ok(Nil)
+  }
 
   // Handler 1 listens only to ev1
   let assert Ok(att1) = sinal.attach(hid1, ev1, handler1, fn(_, _) { Nil })
@@ -2037,16 +2134,14 @@ pub fn public_id_replacement_after_detach_test() {
   let assert Ok(hid) = sinal.handler_id("reusable-handler-id")
   let subject = process.new_subject()
 
-  let handler_v1 =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject, "v1")
-      Ok(Nil)
-    })
-  let handler_v2 =
-    sinal.handler(fn(_, _, _) {
-      process.send(subject, "v2")
-      Ok(Nil)
-    })
+  let handler_v1 = fn(_, _, _) {
+    process.send(subject, "v1")
+    Ok(Nil)
+  }
+  let handler_v2 = fn(_, _, _) {
+    process.send(subject, "v2")
+    Ok(Nil)
+  }
 
   let assert Ok(att1) = sinal.attach(hid, ev, handler_v1, fn(_, _) { Nil })
   // Duplicate attach fails while attached
