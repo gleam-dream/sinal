@@ -8,10 +8,10 @@ A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead
 
 ## Target and Support Matrix
 
-| Target            | Status                         | Notes                                                                                                                  |
-| :---------------- | :----------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| **Erlang / BEAM** | **Reviewed Release Candidate** | Full initial facade implemented. Tested against Erlang/OTP 28 and `:telemetry` 1.4.2.                                  |
-| **JavaScript**    | **Unsupported**                | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
+| Target            | Status                        | Notes                                                                                                                  |
+| :---------------- | :---------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| **Erlang / BEAM** | **Initial release candidate** | Full initial facade implemented. CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                       |
+| **JavaScript**    | **Unsupported**               | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
 
 ---
 
@@ -26,7 +26,7 @@ A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead
 
 ## Getting Started
 
-Add `sinal` to your `gleam.toml` dependencies:
+The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` 1.4.2 is a direct dependency; applications do not need to declare it separately. The dependency declaration below is for the planned initial release:
 
 ```toml
 [dependencies]
@@ -36,6 +36,8 @@ sinal = ">= 0.1.0 and < 1.0.0"
 ---
 
 ## Usage Examples
+
+Register long-lived handlers during application startup, before events are emitted, and retain each `Attachment` for shutdown cleanup. A public `HandlerId` must be unique among currently attached native telemetry handlers; an occupied ID returns `AlreadyExists`. `sinal` has no global configuration step. Define event names and field keys as trusted atoms in application code, and attach the resulting descriptors where their lifecycle is owned. Temporary observers can use `with_subscriptions`; its acquisition is sequential and visible to concurrent emitters.
 
 The examples are exercised against BEAM `:telemetry` in `test/sinal_test.gleam` and `test/readme_example_test.gleam`.
 
@@ -319,6 +321,8 @@ as integers before their opaque wrappers are constructed.
 
 ## Operational Limits and Semantics
 
+- **Span event names**: `span.events(sp)` exposes typed `start`, `stop`, and `exception` descriptors for a span prefix. Attach observers before calling `run_span` or `run_span_result` when those events must be seen. Native telemetry owns the lifecycle and timing fields.
+- **Span result retention**: `run_span_result` preserves a completed work result when stop instrumentation encoding fails. It cannot recover a result from work that raises; native telemetry emits an exception event and re-raises the original exception.
 - **Synchronous Execution**: Handlers execute synchronously in the caller process. Slow handlers directly block the emitter.
 - **Unspecified Handler Order**: When multiple handlers are attached to an event, the order in which `:telemetry` calls them is explicitly unspecified.
 - **Non-Quiescence on Detach**: Detaching a handler prevents it from being selected for subsequent event emissions. However, if a callback is already executing in flight in another process, detaching does not wait for or abort that in-flight execution.
@@ -336,7 +340,7 @@ To enter the dev shell and run test suites:
 # Enter reproducible dev environment
 nix develop
 
-# Run unit tests and bounded stress harness (47 tests)
+# Run unit tests and bounded stress harness
 gleam test
 
 # Run microbenchmarks (reproducible latency and throughput baseline)
