@@ -2,6 +2,7 @@ import gleam/bit_array
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/erlang/atom
+import gleam/erlang/process
 import gleam/list
 import gleam/string
 import gleeunit/should
@@ -74,6 +75,8 @@ pub fn http_request_event() -> Result(
       fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
     )
 
+  let method_field = fields.string(atom.create("method"))
+
   let route_field =
     fields.field(
       atom.create("route"),
@@ -98,12 +101,16 @@ pub fn http_request_event() -> Result(
       },
     )
 
-  let assert Ok(meta_pair) = fields.pair(route_field, status_field)
+  let assert Ok(method_route) = fields.pair(method_field, route_field)
+  let assert Ok(meta_triple) = fields.pair(method_route, status_field)
   let meta_fields =
     fields.imap(
-      meta_pair,
-      fn(p) { HttpMetadata(method: "GET", route: p.0, status: p.1) },
-      fn(m: HttpMetadata) { #(m.route, m.status) },
+      meta_triple,
+      fn(p) {
+        let #(#(method, route), status) = p
+        HttpMetadata(method: method, route: route, status: status)
+      },
+      fn(m: HttpMetadata) { #(#(m.method, m.route), m.status) },
     )
 
   sinal.event(
@@ -122,7 +129,6 @@ pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   case sinal.emit(ev, meas, meta) {
     Ok(Nil) -> Nil
     Error(sinal.EncodingFailed(fields.FieldEncodeError(msg))) -> panic as msg
-    Error(sinal.BackendFailed(msg)) -> panic as msg
   }
 }
 
@@ -156,31 +162,15 @@ pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
 
 pub fn scoped_metrics_example(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
-) -> Result(sinal.ScopedCompletion(Int), sinal.AttachError) {
-  let handler = fn(
-    _event,
-    _measurements: HttpMeasurements,
-    _metadata: HttpMetadata,
-  ) {
-    Ok(Nil)
-  }
+) -> Result(sinal.SubscriptionCompletion(Int), sinal.SubscriptionScopeError) {
+  let observer = sinal.subscription(event, fn(_measurements, _metadata) { Nil })
 
-  let on_attach_failure = fn(_event, _err) { Nil }
-  let on_cleanup_failure = fn(_err) { Nil }
-
-  sinal.with_attachments(
-    event,
-    [],
-    handler,
-    on_attach_failure,
-    on_cleanup_failure,
-    fn() {
-      // Work runs with attachments active.
-      // Detach runs on normal return or catchable error, exit, or throw.
-      // Original error/exit/throw is re-raised with exact origin stacktrace.
-      42
-    },
-  )
+  sinal.with_subscriptions(sinal.subscriptions([observer]), fn() {
+    // Work runs with attachments active.
+    // Detach runs on normal return or catchable error, exit, or throw.
+    // Original error/exit/throw is re-raised with exact origin stacktrace.
+    42
+  })
 }
 
 // --- Snippet 5: Native Telemetry Spans (sinal/span) ---
@@ -238,6 +228,24 @@ pub fn readme_example_flow_test() {
 
   let assert Ok(scoped_completion) = scoped_metrics_example(ev)
   scoped_completion.work_result |> should.equal(42)
+}
+
+pub fn readme_http_metadata_preserves_method_test() {
+  let assert Ok(event) = http_request_event()
+  let assert Ok(id) = sinal.handler_id("readme-method-preserved")
+  let subject = process.new_subject()
+  let assert Ok(attachment) =
+    sinal.observe(id, event, fn(_, metadata) {
+      process.send(subject, metadata.method)
+    })
+  let assert Ok(Nil) =
+    sinal.emit(
+      event,
+      HttpMeasurements(duration_ms: 2, bytes_sent: 5),
+      HttpMetadata(method: "POST", route: "/submit", status: 201),
+    )
+  process.receive(subject, 100) |> should.equal(Ok("POST"))
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
 pub fn readme_span_example_test() {

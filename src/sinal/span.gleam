@@ -33,15 +33,24 @@ pub fn prefix_native_name(prefix: EventPrefix) -> List(Atom) {
 }
 
 pub opaque type SystemTime {
-  SystemTime(Dynamic)
+  SystemTime(Int)
 }
 
 pub opaque type MonotonicTime {
-  MonotonicTime(Dynamic)
+  MonotonicTime(Int)
 }
 
 pub opaque type NativeDuration {
-  NativeDuration(Dynamic)
+  NativeDuration(Int)
+}
+
+/// A unit accepted by the Erlang runtime for native time conversion.
+pub type TimeUnit {
+  Native
+  Nanosecond
+  Microsecond
+  Millisecond
+  Second
 }
 
 pub opaque type SpanContext {
@@ -63,18 +72,39 @@ pub type ExceptionKind {
 }
 
 pub fn system_time_to_dynamic(time: SystemTime) -> Dynamic {
-  let SystemTime(dyn) = time
-  dyn
+  let SystemTime(value) = time
+  ffi.to_dynamic(value)
 }
 
 pub fn monotonic_time_to_dynamic(time: MonotonicTime) -> Dynamic {
-  let MonotonicTime(dyn) = time
-  dyn
+  let MonotonicTime(value) = time
+  ffi.to_dynamic(value)
 }
 
 pub fn duration_to_dynamic(duration: NativeDuration) -> Dynamic {
-  let NativeDuration(dyn) = duration
-  dyn
+  let NativeDuration(value) = duration
+  ffi.to_dynamic(value)
+}
+
+@external(erlang, "sinal_ffi", "convert_native_time")
+fn convert_native_time(value: Int, unit: TimeUnit) -> Int
+
+/// Converts a native span duration to the selected unit.
+pub fn duration_in(duration: NativeDuration, unit: TimeUnit) -> Int {
+  let NativeDuration(value) = duration
+  convert_native_time(value, unit)
+}
+
+/// Converts a native system timestamp to the selected unit.
+pub fn system_time_in(time: SystemTime, unit: TimeUnit) -> Int {
+  let SystemTime(value) = time
+  convert_native_time(value, unit)
+}
+
+/// Converts a native monotonic timestamp to the selected unit.
+pub fn monotonic_time_in(time: MonotonicTime, unit: TimeUnit) -> Int {
+  let MonotonicTime(value) = time
+  convert_native_time(value, unit)
 }
 
 pub fn span_context_to_dynamic(context: SpanContext) -> Dynamic {
@@ -225,6 +255,61 @@ pub type Completion(result, extra_measurements, stop_metadata) {
   )
 }
 
+pub type CompletionEncodeError {
+  ExtraMeasurementsEncodingFailed(fields.FieldEncodeError)
+  StopMetadataEncodingFailed(fields.FieldEncodeError)
+}
+
+/// Completed work is retained when stop instrumentation cannot be encoded.
+pub type SpanOutcome(a) {
+  SpanCompleted(a)
+  StartEncodingFailed(fields.FieldEncodeError)
+  CompletionEncodingFailed(result: a, error: CompletionEncodeError)
+}
+
+type EncodedCompletion(a) {
+  EncodedCompletion(a, Dynamic, Dynamic)
+  UnencodedCompletion(a, CompletionEncodeError)
+}
+
+@external(erlang, "sinal_ffi", "telemetry_span_outcome")
+fn telemetry_span_outcome(
+  prefix: List(Atom),
+  start_metadata: Dynamic,
+  work: fn() -> EncodedCompletion(a),
+) -> SpanOutcome(a)
+
+/// Executes a span without panicking for metadata encoding failures. Start
+/// failure skips work and emits no event. Completion failure retains the work
+/// result; native telemetry emits an exception event with a structured
+/// `sinal_completion_encoding_failed` reason and no stop event. The reason
+/// carries a private per-call reference and the encoding error. The completed
+/// business result stays private. Catchable exceptions raised by work follow native telemetry's
+/// exception event and exact re-raise behavior.
+pub fn run_span_result(
+  span: Span(start_metadata, extra_measurements, stop_metadata),
+  start_metadata: start_metadata,
+  work: fn() -> Completion(a, extra_measurements, stop_metadata),
+) -> SpanOutcome(a) {
+  case fields.encode(span.start_metadata, start_metadata) {
+    Error(error) -> StartEncodingFailed(error)
+    Ok(raw_start_metadata) ->
+      telemetry_span_outcome(span.prefix.prefix, raw_start_metadata, fn() {
+        let Completion(result, extra, stop) = work()
+        case fields.encode(span.extra_measurements, extra) {
+          Error(error) ->
+            UnencodedCompletion(result, ExtraMeasurementsEncodingFailed(error))
+          Ok(raw_extra) ->
+            case fields.encode(span.stop_metadata, stop) {
+              Error(error) ->
+                UnencodedCompletion(result, StopMetadataEncodingFailed(error))
+              Ok(raw_stop) -> EncodedCompletion(result, raw_extra, raw_stop)
+            }
+        }
+      })
+  }
+}
+
 /// Executes work inside a native telemetry span, emitting start and either stop or exception events.
 pub fn run_span(
   span: Span(start_metadata, extra_measurements, stop_metadata),
@@ -264,19 +349,35 @@ fn start_measurement_fields() -> fields.Fields(StartMeasurements) {
     fields.field(
       sys_key,
       fn(time) {
-        let SystemTime(dyn) = time
-        Ok(dyn)
+        let SystemTime(value) = time
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(SystemTime(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(SystemTime(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError(
+              "Expected a native integer system_time",
+            ))
+        }
+      },
     )
   let mono_field =
     fields.field(
       mono_key,
       fn(time) {
-        let MonotonicTime(dyn) = time
-        Ok(dyn)
+        let MonotonicTime(value) = time
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(MonotonicTime(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(MonotonicTime(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError(
+              "Expected a native integer monotonic_time",
+            ))
+        }
+      },
     )
   let assert Ok(p) = fields.pair(sys_field, mono_field)
   fields.imap(
@@ -295,19 +396,33 @@ fn stop_measurement_fields(
     fields.field(
       dur_key,
       fn(dur) {
-        let NativeDuration(dyn) = dur
-        Ok(dyn)
+        let NativeDuration(value) = dur
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(NativeDuration(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(NativeDuration(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError("Expected a native integer duration"))
+        }
+      },
     )
   let mono_field =
     fields.field(
       mono_key,
       fn(time) {
-        let MonotonicTime(dyn) = time
-        Ok(dyn)
+        let MonotonicTime(value) = time
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(MonotonicTime(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(MonotonicTime(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError(
+              "Expected a native integer monotonic_time",
+            ))
+        }
+      },
     )
   let assert Ok(timing) = fields.pair(dur_field, mono_field)
   let assert Ok(all) = fields.pair(timing, extra)
@@ -330,19 +445,33 @@ fn exception_measurement_fields() -> fields.Fields(ExceptionMeasurements) {
     fields.field(
       dur_key,
       fn(dur) {
-        let NativeDuration(dyn) = dur
-        Ok(dyn)
+        let NativeDuration(value) = dur
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(NativeDuration(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(NativeDuration(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError("Expected a native integer duration"))
+        }
+      },
     )
   let mono_field =
     fields.field(
       mono_key,
       fn(time) {
-        let MonotonicTime(dyn) = time
-        Ok(dyn)
+        let MonotonicTime(value) = time
+        Ok(ffi.to_dynamic(value))
       },
-      fn(dyn) { Ok(MonotonicTime(dyn)) },
+      fn(dyn) {
+        case decode.run(dyn, decode.int) {
+          Ok(value) -> Ok(MonotonicTime(value))
+          Error(_) ->
+            Error(fields.FieldDecodeError(
+              "Expected a native integer monotonic_time",
+            ))
+        }
+      },
     )
   let assert Ok(timing) = fields.pair(dur_field, mono_field)
   fields.imap(

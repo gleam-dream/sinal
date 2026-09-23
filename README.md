@@ -130,6 +130,8 @@ pub fn http_request_event() -> Result(
       fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
     )
 
+  let method_field = fields.string(atom.create("method"))
+
   let route_field =
     fields.field(
       atom.create("route"),
@@ -154,12 +156,16 @@ pub fn http_request_event() -> Result(
       },
     )
 
-  let assert Ok(meta_pair) = fields.pair(route_field, status_field)
+  let assert Ok(method_route) = fields.pair(method_field, route_field)
+  let assert Ok(meta_triple) = fields.pair(method_route, status_field)
   let meta_fields =
     fields.imap(
-      meta_pair,
-      fn(p) { HttpMetadata(method: "GET", route: p.0, status: p.1) },
-      fn(m: HttpMetadata) { #(m.route, m.status) },
+      meta_triple,
+      fn(p) {
+        let #(#(method, route), status) = p
+        HttpMetadata(method: method, route: route, status: status)
+      },
+      fn(m: HttpMetadata) { #(#(m.method, m.route), m.status) },
     )
 
   sinal.event(
@@ -180,7 +186,6 @@ pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
   case sinal.emit(ev, meas, meta) {
     Ok(Nil) -> Nil
     Error(sinal.EncodingFailed(fields.FieldEncodeError(msg))) -> panic as msg
-    Error(sinal.BackendFailed(msg)) -> panic as msg
   }
 }
 ```
@@ -213,40 +218,39 @@ pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
 }
 ```
 
-### 4. Scoped Attachments (`with_attachments`)
+### 4. Scoped Subscriptions
 
-Attach temporary handlers for the duration of a callback, with cleanup attempted on normal return or catchable BEAM exception (error, exit, throw) and original exception preservation (uncatchable termination such as `kill` bypasses cleanup):
+Bind an event and observer as a pure `Subscription`, then run with any mix of
+measurement and metadata types. Acquisition is sequential, so concurrent
+emitters can observe a partial set while it is being installed. On acquisition
+failure, work is skipped and earlier registrations are detached. Cleanup runs
+on normal return or catchable BEAM exception (error, exit, throw), preserving
+the original exception. Uncatchable termination such as `kill` bypasses cleanup.
 
 ```gleam
 pub fn scoped_metrics_example(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
-) -> Result(sinal.ScopedCompletion(Int), sinal.AttachError) {
-  let handler = fn(
-    _event,
-    _measurements: HttpMeasurements,
-    _metadata: HttpMetadata,
-  ) {
-    Ok(Nil)
-  }
+) -> Result(sinal.SubscriptionCompletion(Int), sinal.SubscriptionScopeError) {
+  let observer = sinal.subscription(event, fn(_measurements, _metadata) { Nil })
 
-  let on_attach_failure = fn(_event, _err) { Nil }
-  let on_cleanup_failure = fn(_err) { Nil }
-
-  sinal.with_attachments(
-    event,
-    [],
-    handler,
-    on_attach_failure,
-    on_cleanup_failure,
-    fn() {
-      // Work runs with attachments active.
-      // Detach runs on normal return or catchable error, exit, or throw.
-      // Original error/exit/throw is re-raised with exact origin stacktrace.
-      42
-    },
-  )
+  sinal.with_subscriptions(sinal.subscriptions([observer]), fn() {
+    // Work runs with attachments active.
+    // Detach runs on normal return or catchable error, exit, or throw.
+    // Original error/exit/throw is re-raised with exact origin stacktrace.
+    42
+  })
 }
 ```
+
+`handler_subscription(id, event, handler, on_failure)` retains a typed handler
+error and lets the application choose a handler ID. `with_subscriptions` reports
+the zero-based index of an acquisition failure and any rollback failures; a
+successful run carries its work result and indexed cleanup failures. A raised
+acquisition exception also rolls back prior registrations before it is
+re-raised. Use `with_exception_cleanup_reporter(plan, reporter)` if cleanup
+failures during exception unwinding need separate reporting. `attach_many` and
+`with_attachments` remain the native same-shaped
+grouping path when one registration must cover multiple event names.
 
 ### 5. Native Telemetry Spans (`sinal/span`)
 
@@ -297,6 +301,19 @@ pub fn execute_traced_query(query_str: String) -> String {
   })
 }
 ```
+
+`run_span_result` returns `SpanCompleted(result)`, `StartEncodingFailed(error)`,
+or `CompletionEncodingFailed(result, error)`. A start encoding failure runs no
+work and emits no event. A completion encoding failure retains the completed
+business result and delegates to native telemetry to emit an exception event
+whose structured reason identifies the instrumentation failure; the result is
+kept private from that event. It emits no stop event. Catchable work exceptions
+follow native telemetry's exception path and retain their original class,
+reason, and stacktrace. `run_span` is the distinct raising policy for encoding
+failures. Use `duration_in(duration, Millisecond)`,
+`system_time_in(time, Second)`, or `monotonic_time_in(time, Native)` to read
+timing values in an explicit `TimeUnit`. All native timing fields must decode
+as integers before their opaque wrappers are constructed.
 
 ---
 

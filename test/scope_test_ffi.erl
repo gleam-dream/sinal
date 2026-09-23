@@ -10,6 +10,10 @@
     is_callback_failure_reason/2,
     is_panic_reason/2,
     term_equals/2,
+    is_span_instrumentation_reason/2,
+    has_span_result_slot/0,
+    native_to_milliseconds/1,
+    native_to_nanoseconds/1,
     telemetry_persist/0,
     sleep/1,
     is_native_integer/1,
@@ -84,6 +88,25 @@ is_panic_reason(_, _) ->
 
 term_equals(A, B) ->
     A =:= B.
+
+is_span_instrumentation_reason(
+    {sinal_completion_encoding_failed, Token, Error}, ExpectedError
+) ->
+    is_reference(Token) andalso Error =:= ExpectedError;
+is_span_instrumentation_reason(_, _) ->
+    false.
+
+has_span_result_slot() ->
+    lists:any(fun({Key, Value}) ->
+        is_reference(Key) andalso is_tuple(Value) andalso
+        tuple_size(Value) =:= 2 andalso element(1, Value) =:= stored_result
+    end, erlang:get()).
+
+native_to_milliseconds(Value) ->
+    erlang:convert_time_unit(Value, native, millisecond).
+
+native_to_nanoseconds(Value) ->
+    erlang:convert_time_unit(Value, native, nanosecond).
 
 telemetry_persist() ->
     telemetry:persist().

@@ -2,9 +2,47 @@
 
 -export([
     with_scope/3,
+    with_subscription_scope/3,
+    cleanup_subscriptions/1,
+    acquire_subscription/1,
+    cleanup_and_reraise/3,
     reraise/1,
     exception_class/1
 ]).
+
+acquire_subscription(Acquire) ->
+    case capture_work(Acquire) of
+        {returned, Result} -> {acquired, Result};
+        {raised, Exception} -> {acquisition_raised, Exception}
+    end.
+
+cleanup_and_reraise(Cleanups, OnCleanupFailure, Exception) ->
+    Failures = cleanup_subscriptions(Cleanups),
+    lists:foreach(fun(Failure) -> safely_notify(OnCleanupFailure, Failure) end, Failures),
+    reraise(Exception).
+
+with_subscription_scope(Work, Cleanups, OnCleanupFailure) ->
+    case capture_work(Work) of
+        {returned, WorkResult} ->
+            {subscription_completion, WorkResult, cleanup_subscriptions(Cleanups)};
+        {raised, WorkException} ->
+            Failures = cleanup_subscriptions(Cleanups),
+            lists:foreach(fun(Failure) -> safely_notify(OnCleanupFailure, Failure) end, Failures),
+            reraise(WorkException)
+    end.
+
+cleanup_subscriptions(Cleanups) ->
+    lists:reverse(lists:foldl(fun({Index, Cleanup}, Failures) ->
+        case attempt_cleanup(Cleanup) of
+            {returned, {ok, nil}} -> Failures;
+            {returned, {error, DetachError}} ->
+                [{subscription_cleanup_failure, Index,
+                  {detach_returned_error, DetachError}} | Failures];
+            {raised, Exception} ->
+                [{subscription_cleanup_failure, Index,
+                  {detach_raised_exception, Exception}} | Failures]
+        end
+    end, [], Cleanups)).
 
 with_scope(Work, Cleanup, OnCleanupFailure) ->
     case capture_work(Work) of

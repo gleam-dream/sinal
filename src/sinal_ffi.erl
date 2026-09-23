@@ -11,6 +11,8 @@
     telemetry_execute/3,
     raise_callback_failure/1,
     telemetry_span/3,
+    telemetry_span_outcome/3,
+    convert_native_time/2,
     identity/1
 ]).
 
@@ -61,3 +63,25 @@ raise_callback_failure(Reason) ->
 
 telemetry_span(EventPrefix, StartMetadata, SpanFun) ->
     telemetry:span(EventPrefix, StartMetadata, SpanFun).
+
+convert_native_time(Value, Unit) -> erlang:convert_time_unit(Value, native, Unit).
+
+telemetry_span_outcome(EventPrefix, StartMetadata, SpanFun) ->
+    Token = erlang:make_ref(),
+    try telemetry:span(EventPrefix, StartMetadata, fun() ->
+        case SpanFun() of
+            {encoded_completion, Result, ExtraMeasurements, StopMetadata} ->
+                {Result, ExtraMeasurements, StopMetadata};
+            {unencoded_completion, Result, EncodeError} ->
+                erlang:put(Token, {stored_result, Result}),
+                erlang:error({sinal_completion_encoding_failed, Token, EncodeError})
+        end
+    end) of
+        Result -> {span_completed, Result}
+    catch
+        error:{sinal_completion_encoding_failed, Token, EncodeError}:_Stacktrace ->
+            {stored_result, Result} = erlang:get(Token),
+            {completion_encoding_failed, Result, EncodeError}
+    after
+        erlang:erase(Token)
+    end.

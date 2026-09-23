@@ -79,7 +79,6 @@ pub type DetachError {
 
 pub type EmitError {
   EncodingFailed(FieldEncodeError)
-  BackendFailed(String)
 }
 
 pub type HandlerFailure(e) {
@@ -98,6 +97,88 @@ pub type ScopedCompletion(a) {
     work_result: a,
     cleanup_result: Result(Nil, ScopeCleanupFailure),
   )
+}
+
+/// A pure description of one independently registered typed observer. The
+/// event and callbacks are bound before the runner erases their type parameters.
+pub opaque type Subscription {
+  Subscription(acquire: fn() -> Result(Attachment, AttachError))
+}
+
+/// A pure plan for a heterogeneous scope. The default exception-cleanup
+/// reporter is silent; normal cleanup failures remain in the result.
+pub opaque type SubscriptionPlan {
+  SubscriptionPlan(
+    entries: List(Subscription),
+    exception_cleanup_reporter: fn(SubscriptionCleanupFailure) -> Nil,
+  )
+}
+
+pub type SubscriptionCleanupFailure {
+  SubscriptionCleanupFailure(index: Int, failure: ScopeCleanupFailure)
+}
+
+pub type SubscriptionScopeError {
+  SubscriptionAttachFailed(
+    index: Int,
+    error: AttachError,
+    rollback_failures: List(SubscriptionCleanupFailure),
+  )
+}
+
+pub type SubscriptionCompletion(a) {
+  SubscriptionCompletion(
+    work_result: a,
+    cleanup_failures: List(SubscriptionCleanupFailure),
+  )
+}
+
+type Acquisition(a) {
+  Acquired(a)
+  AcquisitionRaised(BeamException)
+}
+
+@external(erlang, "sinal_scope_ffi", "acquire_subscription")
+fn ffi_acquire_subscription(
+  acquire: fn() -> Result(Attachment, AttachError),
+) -> Acquisition(Result(Attachment, AttachError))
+
+@external(erlang, "sinal_scope_ffi", "cleanup_and_reraise")
+fn cleanup_and_reraise(
+  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  on_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
+  exception: BeamException,
+) -> a
+
+/// Binds a typed event and fallible handler for later scoped acquisition.
+/// The explicit ID permits application-owned handler identity.
+pub fn handler_subscription(
+  id: HandlerId,
+  event: Event(m, d),
+  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+) -> Subscription {
+  Subscription(fn() { attach(id, event, handler, on_failure) })
+}
+
+/// Binds an infallible typed observer for later scoped acquisition.
+pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
+  Subscription(fn() {
+    observe(ScopedHandlerId(fresh_scoped_handler_number()), event, run)
+  })
+}
+
+/// Builds a scope with no exception-cleanup reporting side effect.
+pub fn subscriptions(entries: List(Subscription)) -> SubscriptionPlan {
+  SubscriptionPlan(entries, fn(_) { Nil })
+}
+
+/// Reports cleanup failures that occur while an original exception is raised.
+pub fn with_exception_cleanup_reporter(
+  plan: SubscriptionPlan,
+  reporter: fn(SubscriptionCleanupFailure) -> Nil,
+) -> SubscriptionPlan {
+  SubscriptionPlan(..plan, exception_cleanup_reporter: reporter)
 }
 
 /// Detaches an installed handler using its originating detach callback.
@@ -306,5 +387,72 @@ pub fn with_attachments(
         }
       }
     }
+  }
+}
+
+@external(erlang, "sinal_scope_ffi", "cleanup_subscriptions")
+fn cleanup_subscriptions(
+  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+) -> List(SubscriptionCleanupFailure)
+
+@external(erlang, "sinal_scope_ffi", "with_subscription_scope")
+fn ffi_with_subscription_scope(
+  work: fn() -> a,
+  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  on_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
+) -> SubscriptionCompletion(a)
+
+/// Acquires independent subscriptions in order and releases them in reverse
+/// order. Acquisition is not atomically visible to concurrent emitters.
+/// On acquisition failure, work is skipped and prior registrations are removed.
+/// Every cleanup failure retains the subscription's zero-based list index.
+/// Catchable work exceptions are re-raised with their original class, reason,
+/// and stacktrace after all cleanup attempts.
+pub fn with_subscriptions(
+  plan: SubscriptionPlan,
+  run: fn() -> a,
+) -> Result(SubscriptionCompletion(a), SubscriptionScopeError) {
+  case
+    acquire_subscriptions(plan.entries, 0, [], plan.exception_cleanup_reporter)
+  {
+    Ok(cleanups) ->
+      Ok(ffi_with_subscription_scope(
+        run,
+        cleanups,
+        plan.exception_cleanup_reporter,
+      ))
+    Error(error) -> Error(error)
+  }
+}
+
+fn acquire_subscriptions(
+  subscriptions: List(Subscription),
+  index: Int,
+  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  on_exception_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
+) -> Result(
+  List(#(Int, fn() -> Result(Nil, DetachError))),
+  SubscriptionScopeError,
+) {
+  case subscriptions {
+    [] -> Ok(cleanups)
+    [Subscription(acquire), ..rest] ->
+      case ffi_acquire_subscription(acquire) {
+        Acquired(Ok(attachment)) ->
+          acquire_subscriptions(
+            rest,
+            index + 1,
+            [#(index, fn() { detach(attachment) }), ..cleanups],
+            on_exception_cleanup_failure,
+          )
+        Acquired(Error(error)) ->
+          Error(SubscriptionAttachFailed(
+            index,
+            error,
+            cleanup_subscriptions(cleanups),
+          ))
+        AcquisitionRaised(exception) ->
+          cleanup_and_reraise(cleanups, on_exception_cleanup_failure, exception)
+      }
   }
 }
