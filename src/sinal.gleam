@@ -1,6 +1,7 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/list
+import gleam/result
 import sinal/exception.{type BeamException}
 import sinal/fields.{type FieldEncodeError, type FieldError, type Fields}
 import sinal/internal/ffi
@@ -215,17 +216,36 @@ pub fn emit(
   measurements: m,
   metadata: d,
 ) -> Result(Nil, EmitError) {
-  case fields.encode(event.measurements, measurements) {
+  case encode_event(event, measurements, metadata) {
     Error(err) -> Error(EncodingFailed(err))
-    Ok(raw_measurements) ->
-      case fields.encode(event.metadata, metadata) {
-        Error(err) -> Error(EncodingFailed(err))
-        Ok(raw_metadata) -> {
-          ffi.telemetry_execute(event.name, raw_measurements, raw_metadata)
-          Ok(Nil)
-        }
-      }
+    Ok(#(name, raw_measurements, raw_metadata)) -> {
+      ffi.telemetry_execute(name, raw_measurements, raw_metadata)
+      Ok(Nil)
+    }
   }
+}
+
+/// Encodes measurements and metadata against an event's field contracts
+/// without executing native dispatch, exposing the event's trusted native
+/// atom name alongside the resulting encoded native maps.
+///
+/// `@internal`: this exists so package-internal adapters (such as the
+/// bounded forwarder) can encode once and dispatch out-of-band without
+/// duplicating `emit`'s encoding steps. It returns raw `Dynamic` native maps,
+/// which this package does not otherwise expose in its public API, so it is
+/// not part of the supported contract for other packages.
+@internal
+pub fn encode_event(
+  event: Event(m, d),
+  measurements: m,
+  metadata: d,
+) -> Result(#(List(Atom), Dynamic, Dynamic), FieldEncodeError) {
+  use raw_measurements <- result.try(fields.encode(
+    event.measurements,
+    measurements,
+  ))
+  use raw_metadata <- result.try(fields.encode(event.metadata, metadata))
+  Ok(#(event.name, raw_measurements, raw_metadata))
 }
 
 /// Attaches a typed handler to a single event descriptor.

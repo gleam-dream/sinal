@@ -2,12 +2,14 @@ import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import sinal/internal/ffi
 
 pub type FieldError {
   MissingField(name: String)
   DuplicateField(name: String)
   InvalidField(name: String, error: FieldDecodeError)
+  InvalidOptionalInner(names: List(String))
 }
 
 pub type FieldDecodeError {
@@ -108,6 +110,65 @@ pub fn bool(key: Atom) -> Fields(Bool) {
       Error(_) -> Error(FieldDecodeError("Expected a native BEAM boolean"))
     }
   })
+}
+
+/// Wraps a single-key field so its absence is a genuine option rather than a
+/// decode failure: a missing native key, or a present raw `nil`/`undefined`
+/// marker value at that key, decodes as `None`; any other present value
+/// decodes and encodes through `inner`. Encoding `None` omits the key
+/// entirely, so a foreign consumer sees no key rather than an explicit
+/// marker.
+///
+/// `inner` must declare exactly one native key, since presence is checked at
+/// that one key; an `inner` with zero or more than one key (`fields.empty()`,
+/// a `pair`, ...) is rejected with `InvalidOptionalInner` rather than
+/// silently doing the wrong thing.
+///
+/// This cannot distinguish a genuinely absent value from a present value
+/// that `inner` itself would encode as the atom `nil` or `undefined` — for
+/// example, wrapping Gleam's own `Nil` through `fields.field` as a
+/// legitimate non-absent payload. Do not compose `optional` with an `inner`
+/// whose valid encoded values include those two markers.
+pub fn optional(inner: Fields(a)) -> Result(Fields(Option(a)), FieldError) {
+  case inner.keys {
+    [key] -> Ok(build_optional(key, inner))
+    other -> Error(InvalidOptionalInner(list.map(other, atom.to_string)))
+  }
+}
+
+fn build_optional(key: Atom, inner: Fields(a)) -> Fields(Option(a)) {
+  let name = atom.to_string(key)
+  Fields(
+    keys: inner.keys,
+    encode_fn: fn(value) {
+      case value {
+        None -> Ok(ffi.empty_map())
+        Some(actual) -> inner.encode_fn(actual)
+      }
+    },
+    decode_fn: fn(raw_map) {
+      case ffi.is_map(raw_map) {
+        False ->
+          Error(InvalidField(
+            name,
+            FieldDecodeError("Expected a native BEAM map"),
+          ))
+        True ->
+          case ffi.map_get(raw_map, key) {
+            Error(Nil) -> Ok(None)
+            Ok(raw_val) ->
+              case ffi.is_missing_marker(raw_val) {
+                True -> Ok(None)
+                False ->
+                  case inner.decode_fn(raw_map) {
+                    Ok(value) -> Ok(Some(value))
+                    Error(err) -> Error(err)
+                  }
+              }
+          }
+      }
+    },
+  )
 }
 
 /// Composes two field specifications. Rejects duplicate declared native keys.

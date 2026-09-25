@@ -4,10 +4,12 @@ import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
+import gleam/otp/static_supervisor
 import gleam/string
 import gleeunit/should
 import sinal
 import sinal/fields
+import sinal/forwarder
 import sinal/span
 
 // --- Snippet 0: Ordinary observation ---
@@ -219,6 +221,31 @@ pub fn execute_traced_query(query_str: String) -> String {
   })
 }
 
+// --- Snippet 6: Forwarded Delivery (sinal/forwarder) ---
+
+pub fn build_supervisor(forwarder_name: process.Name(forwarder.Message)) {
+  let assert Ok(fwd) = forwarder.new(forwarder_name, 1024)
+  let assert Ok(_started) =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(forwarder.supervised(fwd))
+    |> static_supervisor.start
+  fwd
+}
+
+pub fn emit_via_forwarder(
+  fwd: forwarder.Forwarder,
+  ev,
+  measurements,
+  metadata,
+) {
+  case forwarder.emit(fwd, ev, measurements, metadata) {
+    Ok(Nil) -> Nil
+    Error(forwarder.ForwardEncodingFailed(_)) -> panic as "bad event shape"
+    Error(forwarder.CapacityExceeded) -> Nil
+    Error(forwarder.ForwarderUnavailable) -> Nil
+  }
+}
+
 // --- Runnable Tests ---
 
 pub fn readme_example_flow_test() {
@@ -253,11 +280,30 @@ pub fn readme_span_example_test() {
   res |> should.equal("result for: SELECT 1;")
 }
 
+pub fn readme_forwarder_example_test() {
+  let forwarder_name = process.new_name("readme-forwarder-example")
+  let fwd = build_supervisor(forwarder_name)
+
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("readme"), atom.create("forwarded")],
+      fields.int(atom.create("n")),
+      fields.empty(),
+    )
+  let assert Ok(id) = sinal.handler_id("readme-forwarder-observer")
+  let subject = process.new_subject()
+  let assert Ok(_attachment) =
+    sinal.observe(id, ev, fn(n, _) { process.send(subject, n) })
+
+  emit_via_forwarder(fwd, ev, 7, Nil)
+  process.receive(subject, 200) |> should.equal(Ok(7))
+}
+
 pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(6)
+  list.length(snippets) |> should.equal(7)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)

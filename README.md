@@ -46,9 +46,12 @@ Common imports used across examples:
 - `import sinal`
 - `import sinal/fields`
 - `import sinal/span`
+- `import sinal/forwarder`
 - `import gleam/erlang/atom`
+- `import gleam/erlang/process`
 - `import gleam/dynamic`
 - `import gleam/dynamic/decode`
+- `import gleam/otp/static_supervisor`
 
 For ordinary events, use `sinal.event` and the primitive `fields.string`,
 `fields.int`, and `fields.bool` constructors. Keys and event names must be
@@ -317,6 +320,78 @@ failures. Use `duration_in(duration, Millisecond)`,
 timing values in an explicit `TimeUnit`. All native timing fields must decode
 as integers before their opaque wrappers are constructed.
 
+### 6. Forwarded Delivery (`sinal/forwarder`)
+
+Every handler attached with `sinal.attach`/`sinal.observe` runs synchronously
+in the emitting process, so a slow or blocked handler stalls the producer.
+`sinal/forwarder` is an additive, opt-in hop: it hands an already-encoded
+event to a dedicated forwarder process before any handler runs, so a stalled
+handler blocks the forwarder instead of the producer. `sinal.emit` and
+`sinal.attach`/`sinal.observe` are unchanged for any caller that does not use
+it.
+
+```gleam
+pub fn build_supervisor(forwarder_name: process.Name(forwarder.Message)) {
+  let assert Ok(fwd) = forwarder.new(forwarder_name, 1024)
+  let assert Ok(_started) =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(forwarder.supervised(fwd))
+    |> static_supervisor.start
+  fwd
+}
+
+pub fn emit_via_forwarder(
+  fwd: forwarder.Forwarder,
+  ev,
+  measurements,
+  metadata,
+) {
+  case forwarder.emit(fwd, ev, measurements, metadata) {
+    Ok(Nil) -> Nil
+    Error(forwarder.ForwardEncodingFailed(_)) -> panic as "bad event shape"
+    Error(forwarder.CapacityExceeded) -> Nil
+    Error(forwarder.ForwarderUnavailable) -> Nil
+  }
+}
+```
+
+`forwarder.new(name, capacity)` allocates the forwarder's shared counters
+without starting a process; `capacity` must be positive. Pass a
+`process.Name` created once at application start, the same way any named
+`gleam_erlang` process is named — never inside a loop. `forwarder.supervised`
+turns the result into a `supervision.ChildSpecification(Nil)` for an OTP
+supervisor to own and restart.
+
+`forwarder.emit` encodes with the same `Fields` codecs as `sinal.emit`, then
+hands the event to the forwarder process, returning as soon as that hand-off
+completes without waiting for any attached handler:
+
+- `ForwardEncodingFailed(error)` — the same encoding failure `sinal.emit`
+  would report. It never reaches the capacity counters, so it never consumes
+  a slot.
+- `CapacityExceeded` — the forwarder already has `capacity` messages in
+  flight; this send is dropped and folded into the forwarder's own
+  `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`, carrying
+  `Dropped(rejected:, lost:)`), reported once per `ReportDrops` drain cycle
+  rather than once per drop.
+- `ForwarderUnavailable` — no process is currently registered under the
+  forwarder's name (not started yet, or between a crash and its next
+  supervised restart). Note that a concurrent emit can instead resolve to a
+  just-restarted incarnation and see `CapacityExceeded` if that incarnation
+  hasn't finished draining what it inherited yet; see the restart notes
+  below.
+
+Handlers attach exactly as before — same `sinal.attach`/`sinal.observe`, same
+native failure isolation for a handler that raises — except their `self()`
+is the forwarder process, not the original caller, and process-dictionary
+context from the caller is not carried across the hop. Unlike a raise, a
+handler's own _exit_ (from a link, or an untrappable `kill`) is not isolated
+by native telemetry and can take the forwarder process down. See "Operational
+Limits and Semantics" below for the forwarder's delivery, ordering, and
+restart guarantees. Constructing more than one `Forwarder` for the same
+`process.Name` gives each its own, unshared counters — use one `Forwarder`
+value per name.
+
 ---
 
 ## Operational Limits and Semantics
@@ -328,7 +403,13 @@ as integers before their opaque wrappers are constructed.
 - **Non-Quiescence on Detach**: Detaching a handler prevents it from being selected for subsequent event emissions. However, if a callback is already executing in flight in another process, detaching does not wait for or abort that in-flight execution.
 - **Uncatchable VM Exits**: Abrupt process exits or untrappable signals (`kill`) bypass cleanup hooks.
 - **Storage Migration**: Handlers initially live in ETS tables. Calling `:telemetry.persist/0` compiles them into `persistent_term` for read-optimized lookup without interrupting event delivery.
-- **No In-Core Export or Buffering**: `sinal` is an in-process telemetry delivery facade. Network export (OTLP, StatsD, Prometheus) and batch buffering belong in dedicated adapter processes.
+- **No Network Export or Unbounded Buffering**: `sinal` is an in-process telemetry delivery facade. Network export (OTLP, StatsD, Prometheus) and unbounded batch buffering belong in dedicated adapter processes. `sinal/forwarder` (above) is the one in-core exception, and it is deliberately narrow: a bounded, best-effort, in-process hop, not a queue, not export, and not a substitute for a real buffering adapter.
+- **Forwarder delivery is best-effort**: `forwarder.emit` never blocks and never retries. A send that would exceed capacity, or that targets a forwarder not currently running, is dropped and reported rather than queued.
+- **Forwarder ordering is per-producer, not global**: native BEAM message ordering guarantees a single producer's forwarded events are dispatched in the order it sent them. Interleaving across producers is unspecified, as it already is for native telemetry handler order.
+- **The forwarder is the handler's `self()`**: a handler attached to a forwarded event runs inside the forwarder process, not the original caller. Process-dictionary context from the producer is not carried across the hop, and a native telemetry span cannot be forwarded (its start and stop must share one process to measure duration).
+- **Forwarder shutdown does not drain**: messages still in flight when the forwarder process stops are lost, not delivered. A supervised restart drains and reports that loss once, as `Dropped(lost:)`, from the fresh incarnation's own first message.
+- **A forwarder's `lost` count is an approximate upper bound, not exact**: `gleam_otp` registers a restarting actor's name before its initialiser runs, so a concurrent `emit` can already resolve to the new incarnation and queue a real `Execute` message before that incarnation has drained the slot it inherited; such a message can be counted as `lost` even though it is still delivered. The in-flight counter itself is protected against going negative from this (a floored decrement), so this can only ever overcount `lost`, never let the live counter under-count what is truly in flight or silently raise capacity.
+- **Concurrent emitters may see a spurious, safe rejection near the capacity boundary**: admission is a single atomic increment-then-check, so it never over-admits, but under concurrent load at the boundary it can reject a send that would have fit under a different ordering. It never admits past capacity.
 
 ---
 

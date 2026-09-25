@@ -6,6 +6,7 @@
     map_get/2,
     map_merge/2,
     is_native_map/1,
+    is_missing_marker/1,
     telemetry_attach_many/4,
     telemetry_detach/1,
     telemetry_execute/3,
@@ -40,6 +41,10 @@ map_merge(_, _) ->
 
 is_native_map(Term) ->
     is_map(Term).
+
+is_missing_marker(nil) -> true;
+is_missing_marker(undefined) -> true;
+is_missing_marker(_) -> false.
 
 telemetry_attach_many(HandlerId, EventNames, Fun, Config) ->
     case telemetry:attach_many(HandlerId, EventNames, Fun, Config) of

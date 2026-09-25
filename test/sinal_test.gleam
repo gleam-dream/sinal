@@ -3,6 +3,7 @@ import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
+import gleam/option.{None, Some}
 import gleeunit
 import gleeunit/should
 import sinal
@@ -250,6 +251,55 @@ pub fn empty_fields_rejects_non_map_boundary_test() {
       fields.FieldDecodeError("Expected a native BEAM map"),
     )),
   )
+}
+
+pub fn optional_field_round_trips_and_treats_absence_as_none_test() {
+  let key = atom.create("nickname")
+  let assert Ok(optional_string) = fields.optional(fields.string(key))
+
+  // Some encodes and decodes through the inner field.
+  let assert Ok(present_map) = fields.encode(optional_string, Some("Ada"))
+  fields.decode(optional_string, present_map) |> should.equal(Ok(Some("Ada")))
+
+  // None encodes by omitting the key entirely, producing an empty map.
+  let assert Ok(absent_map) = fields.encode(optional_string, None)
+  absent_map |> should.equal(ffi.empty_map())
+  fields.decode(optional_string, ffi.empty_map()) |> should.equal(Ok(None))
+  fields.decode(optional_string, absent_map) |> should.equal(Ok(None))
+
+  // A present, non-marker value decodes through `inner` even when it is
+  // itself falsy-looking (an empty string), proving decoding is driven by
+  // the marker check, not by the decoded value.
+  fields.decode(optional_string, ffi.map_from_pair(key, dynamic.string("")))
+  |> should.equal(Ok(Some("")))
+
+  // A raw `nil` or `undefined` marker at the key is also None, not a decode
+  // failure, matching a foreign producer that writes an explicit marker
+  // instead of omitting the key.
+  fields.decode(
+    optional_string,
+    ffi.map_from_pair(key, ffi.to_dynamic(atom.create("nil"))),
+  )
+  |> should.equal(Ok(None))
+  fields.decode(
+    optional_string,
+    ffi.map_from_pair(key, ffi.to_dynamic(atom.create("undefined"))),
+  )
+  |> should.equal(Ok(None))
+
+  // A present, non-marker value that fails the inner decode still fails.
+  fields.decode(optional_string, ffi.map_from_pair(key, dynamic.int(1)))
+  |> should.be_error()
+}
+
+pub fn optional_rejects_inner_with_other_than_one_key_test() {
+  fields.optional(fields.empty())
+  |> should.equal(Error(fields.InvalidOptionalInner([])))
+
+  let assert Ok(two_keys) =
+    fields.pair(fields.int(atom.create("a")), fields.int(atom.create("b")))
+  fields.optional(two_keys)
+  |> should.equal(Error(fields.InvalidOptionalInner(["a", "b"])))
 }
 
 pub fn attach_many_duplicate_native_event_rejection_test() {

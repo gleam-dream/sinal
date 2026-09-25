@@ -19,6 +19,11 @@ pub fn map_merge(map_a: Dynamic, map_b: Dynamic) -> Dynamic
 @external(erlang, "sinal_ffi", "is_native_map")
 pub fn is_map(term: Dynamic) -> Bool
 
+/// True for the native BEAM markers a foreign producer may use in place of
+/// omitting an optional field: the atoms `nil` and `undefined`.
+@external(erlang, "sinal_ffi", "is_missing_marker")
+pub fn is_missing_marker(term: Dynamic) -> Bool
+
 pub type NativeAttachError {
   NativeAlreadyExists
   NativeAttachOther(Dynamic)
