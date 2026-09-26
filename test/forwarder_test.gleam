@@ -21,6 +21,9 @@ fn test_add_get(counters: TestCounters, index: Int, delta: Int) -> Int
 @external(erlang, "sinal_forwarder_ffi", "decrement_floor")
 fn test_decrement_floor(counters: TestCounters, index: Int) -> Int
 
+@external(erlang, "forwarder_test_ffi", "message_queue_len")
+fn message_queue_len(pid: process.Pid) -> Int
+
 // (a) A handler's `self()` is the forwarder pid, not the caller's. If `emit`
 // executed the handler directly in the caller instead of forwarding it, the
 // observed pid would equal the test process's own pid rather than the
@@ -331,6 +334,82 @@ pub fn concurrent_drops_coalesce_into_one_dropped_event_test() {
   process.receive(dropped_subject, 100) |> should.be_error()
 }
 
+// (d3) The two guards against duplicate drop reports are independently
+// observable. `report_drop` only sends `ReportDrops` on the sender whose
+// increment causes the drop slot's 0→1 transition; `handle_message`'s
+// `ReportDrops` branch separately re-checks `rejected > 0` before emitting.
+// The test above ((d2)) only watches the resulting `dropped_event`s, and
+// cannot tell the two guards apart: with only the receiver-side recheck
+// removed, (d2) still passes, because the sender-side guard alone already
+// keeps every drop-storm down to one `ReportDrops` message, so there is
+// never a second, already-drained read for the recheck to have to swallow.
+// And with only the sender-side guard removed, (d2) *also* still passes,
+// because the receiver-side recheck swallows every `ReportDrops` beyond the
+// first (each of the extras finds the drop slot already back at 0 and skips
+// emitting) — the emitted events are identical either way. So this test
+// reads the forwarder's own mailbox length before anything is processed,
+// which is where the sender-side guard's effect actually lives: five
+// concurrent overflow attempts against a single occupied slot must leave
+// exactly one queued message, not five. Removing only the receiver-side
+// recheck cannot change this count (it only affects processing, not
+// sending), so this test isolates the sender-side guard specifically.
+pub fn concurrent_drops_queue_single_report_message_test() {
+  let name = process.new_name("forwarder-mailbox")
+  let assert Ok(fwd) = forwarder.new(name, 1)
+  let spec = forwarder.supervised(fwd)
+  let assert Ok(started) = spec.start()
+
+  let assert Ok(block_ev) =
+    sinal.event(
+      [atom.create("forwarder_test"), atom.create("mailbox_block")],
+      fields.empty(),
+      fields.empty(),
+    )
+  let assert Ok(block_hid) = sinal.handler_id("forwarder-mailbox-block")
+  // See the (b) test's note: the gate must be owned by the forwarder
+  // process, so the handler creates it and hands it back over `entered`.
+  let entered = process.new_subject()
+  let assert Ok(_block_attachment) =
+    sinal.observe(block_hid, block_ev, fn(_, _) {
+      let gate = process.new_subject()
+      process.send(entered, gate)
+      let assert Ok(Nil) = process.receive(gate, 2000)
+      Nil
+    })
+
+  // Occupies the sole slot and blocks the forwarder process mid-handler, so
+  // nothing sent afterwards is dequeued until the gate below is released.
+  forwarder.emit(fwd, block_ev, Nil, Nil) |> should.equal(Ok(Nil))
+  let assert Ok(gate) = process.receive(entered, 200)
+
+  // Five concurrent overflow attempts. Each one's `emit` call only returns
+  // after its own `report_drop` has already run to completion (the send, if
+  // any, happens synchronously inside `emit`), so collecting all five
+  // replies below guarantees every attempt has already had its chance to
+  // queue a message before the mailbox is inspected.
+  let done = process.new_subject()
+  list.each(one_to(5), fn(_) {
+    process.spawn_unlinked(fn() {
+      forwarder.emit(fwd, block_ev, Nil, Nil)
+      |> should.equal(Error(forwarder.CapacityExceeded))
+      process.send(done, Nil)
+    })
+    Nil
+  })
+  list.each(one_to(5), fn(_) {
+    process.receive(done, 500) |> should.equal(Ok(Nil))
+  })
+
+  // The forwarder is still parked on the gate, so nothing has been dequeued:
+  // whatever is in its mailbox now is exactly what the five attempts above
+  // produced between them. A mutation that sends `ReportDrops` on every
+  // increment rather than only the 0→1 transition would leave five messages
+  // queued here instead of one.
+  message_queue_len(started.pid) |> should.equal(1)
+
+  process.send(gate, Nil)
+}
+
 // (e) A raising handler is detached by native telemetry's own failure
 // isolation; the forwarder process itself survives unchanged and keeps
 // draining later messages.
@@ -545,6 +624,21 @@ pub fn restart_drains_drop_slot_when_killed_before_report_drops_test() {
 // implementation (capacity is respected whether or not the window is hit),
 // and it raises the odds of catching a regression that removes the floored
 // decrement, without being able to guarantee it on any single run.
+//
+// A deterministic reproduction was considered and rejected. The window this
+// races against is entirely inside `gleam_otp`'s own `actor.start`: it
+// registers the restarting actor's name, then runs this module's
+// initialiser, and nothing in `sinal/forwarder` runs between those two
+// steps for a test to hook. The only way to widen the window on demand
+// would be to add a test-only delay inside the initialiser itself (a
+// production code path) purely so a test elsewhere could schedule a
+// concurrent `emit` into it — a permanent seam in shipped code for one
+// test's benefit, which this module avoids. `erlang:suspend_process`
+// cannot substitute for that seam either: there is no way to name the new
+// incarnation's pid until it has already registered, and by then the
+// initialiser is typically already running or done, so suspending it only
+// after the fact narrows nothing. Hammering many concurrent emitters
+// through several forced restarts, as below, is the practical alternative.
 pub fn restart_under_load_never_inflates_capacity_test() {
   let name = process.new_name("forwarder-race")
   let assert Ok(fwd) = forwarder.new(name, 3)
@@ -559,6 +653,25 @@ pub fn restart_under_load_never_inflates_capacity_test() {
     )
   let assert Ok(hid) = sinal.handler_id("forwarder-race-handler")
   let assert Ok(_attachment) = sinal.observe(hid, ev, fn(_, _) { Nil })
+
+  // Also watches every `dropped_event` emitted across the whole run. This is
+  // the same restart-registration-before-initialiser window that can inflate
+  // the in-flight counter (see the module doc and the test's main comment);
+  // it is also the only window in which `handle_message`'s `ReportDrops`
+  // branch can find `rejected` already back at 0 (drained concurrently by a
+  // restarting incarnation's own drain) and would, without its `rejected > 0`
+  // recheck, emit a spurious empty `Dropped(rejected: 0, lost: 0)`. Hitting
+  // that exact interleaving is exactly as non-deterministic as the capacity
+  // race below, so this assertion is best-effort in the same sense: it
+  // cannot go red on a correct implementation, and it raises (without
+  // guaranteeing) the odds of catching a regression that removes the
+  // recheck.
+  let assert Ok(dropped_hid) = sinal.handler_id("forwarder-race-dropped")
+  let dropped_subject = process.new_subject()
+  let assert Ok(_dropped_attachment) =
+    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+      process.send(dropped_subject, dropped)
+    })
 
   let done = process.new_subject()
   let hammer = fn() {
@@ -604,6 +717,24 @@ pub fn restart_under_load_never_inflates_capacity_test() {
   |> should.equal(Error(forwarder.CapacityExceeded))
 
   process.send(gate, Nil)
+
+  // Drain whatever `dropped_event`s the run produced (real drops from the
+  // hammering above are expected and fine) and confirm none of them is the
+  // spurious empty report the receiver-side recheck exists to prevent.
+  drain_dropped(dropped_subject, [])
+  |> list.each(fn(dropped) {
+    { dropped.rejected == 0 && dropped.lost == 0 } |> should.equal(False)
+  })
+}
+
+fn drain_dropped(
+  subject: process.Subject(forwarder.Dropped),
+  acc: List(forwarder.Dropped),
+) -> List(forwarder.Dropped) {
+  case process.receive(subject, 50) {
+    Ok(dropped) -> drain_dropped(subject, [dropped, ..acc])
+    Error(Nil) -> acc
+  }
 }
 
 fn restart_forwarder_a_few_times(

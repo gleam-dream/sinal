@@ -178,6 +178,15 @@ fn handle_message(
     }
     ReportDrops -> {
       let rejected = exchange(state.counters, drop_index, 0)
+      // Guards against a spurious empty `Dropped(0, 0)`: normally this
+      // message is only ever sent after `report_drop`'s own 0→1 transition,
+      // so `rejected` is always positive here. The one exception is a
+      // restart racing this exact send (see the module doc's registration-
+      // before-initialiser note and `restart_under_load_never_inflates_
+      // capacity_test`'s dropped-event assertion): a fresh incarnation's own
+      // startup drain can read and reset this slot before a `ReportDrops`
+      // sent to the old incarnation's name resolves to the new one and is
+      // processed there, leaving nothing left to report.
       case rejected > 0 {
         True -> emit_dropped(state, rejected, 0)
         False -> Nil
@@ -281,6 +290,17 @@ pub fn emit(
 /// the forwarder reports one coalesced `dropped_event` per cycle rather than
 /// one per drop. This send is best-effort and uncounted: it never touches the
 /// in-flight slot or reports its own failure.
+///
+/// This guard and `handle_message`'s `ReportDrops` recheck both sit between
+/// a drop storm and a duplicate report, but they protect different things:
+/// this one bounds how many `ReportDrops` messages a drop storm ever queues
+/// on the forwarder (`concurrent_drops_queue_single_report_message_test`
+/// reads the mailbox directly to prove it); the receiver-side recheck
+/// guards a single, separate race (see its own comment). Removing either one
+/// alone does not change any emitted `dropped_event`'s content under normal
+/// operation, because the other keeps the emitted stream correct on its
+/// own — the mailbox-length test above is what makes this guard's own
+/// contribution observable.
 fn report_drop(forwarder: Forwarder) -> Nil {
   case add_get(forwarder.counters, drop_index, 1) {
     1 -> {
