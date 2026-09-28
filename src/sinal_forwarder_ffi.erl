@@ -5,7 +5,10 @@
     add_get/3,
     exchange/3,
     decrement_floor/2,
-    try_send/1
+    try_send/1,
+    put_route/2,
+    erase_route/1,
+    find_route/1
 ]).
 
 %% Two lock-free signed slots shared across a forwarder's lifetime, including
@@ -61,4 +64,51 @@ try_send(Thunk) ->
         _ -> {ok, nil}
     catch
         _:_ -> {error, nil}
+    end.
+
+%% The node's routes live in one `persistent_term` value: a list of
+%% {Prefix, Forwarder} sorted longest prefix first, so a lookup on the emit
+%% path takes no lock, copies nothing, allocates nothing, and returns at once
+%% when nothing is routed. Writing the value is expensive (it can trigger a
+%% global scan of processes still referencing the old one), which is why
+%% routes are application setup, not something to change per event. Writers
+%% serialise through a node-local `global` lock so concurrent `route` and
+%% `unroute` calls never lose each other's change.
+-define(ROUTES, sinal_forwarder_routes).
+
+put_route(Prefix, Forwarder) ->
+    update_routes(fun(Routes) ->
+        [{Prefix, Forwarder} | lists:keydelete(Prefix, 1, Routes)]
+    end).
+
+erase_route(Prefix) ->
+    update_routes(fun(Routes) -> lists:keydelete(Prefix, 1, Routes) end).
+
+update_routes(Change) ->
+    global:trans(
+        {?ROUTES, self()},
+        fun() ->
+            Routes = lists:sort(
+                fun({A, _}, {B, _}) -> length(A) >= length(B) end,
+                Change(persistent_term:get(?ROUTES, []))
+            ),
+            case Routes of
+                [] -> persistent_term:erase(?ROUTES);
+                _ -> persistent_term:put(?ROUTES, Routes)
+            end
+        end,
+        [node()]
+    ),
+    nil.
+
+%% Finds the forwarder of the longest routed prefix of Name.
+find_route(Name) ->
+    find_route(Name, persistent_term:get(?ROUTES, [])).
+
+find_route(_Name, []) ->
+    {error, nil};
+find_route(Name, [{Prefix, Forwarder} | Rest]) ->
+    case lists:prefix(Prefix, Name) of
+        true -> {ok, Forwarder};
+        false -> find_route(Name, Rest)
     end.

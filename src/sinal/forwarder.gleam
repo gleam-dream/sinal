@@ -5,6 +5,15 @@
 //// `sinal.emit` and `sinal.attach`/`sinal.observe` are unaffected by this
 //// module; a forwarder is an explicit, additive hop a producer opts into.
 ////
+//// ## Routing
+////
+//// A library that emits observations but does not own a forwarder calls
+//// `emit_routed`. The application decides, per event-name prefix, whether
+//// those events go through a forwarder (`route`) or stay synchronous (the
+//// default, and what `unroute` restores). The library never chooses at the
+//// call site, and an application that routes nothing keeps exactly
+//// `sinal.emit` behaviour.
+////
 //// ## Operational limits
 ////
 //// - **Best-effort delivery.** A capacity-exceeding `emit` is rejected with
@@ -49,6 +58,15 @@
 ////   so it never over-admits; under concurrent load at the boundary it can
 ////   reject a send that would have fit had it been ordered differently. It
 ////   never admits past capacity.
+//// - **Routed ordering holds per route.** A producer's `emit_routed` events
+////   that resolve to the same forwarder are dispatched in the order it sent
+////   them, and so are its unrouted ones. Events split across two routes, or
+////   across a route change, have no relative order; after an `unroute`, a
+////   later synchronous event can run before an earlier forwarded one.
+//// - **Routes are node-global, set-up-time values.** They live in
+////   `persistent_term`: an emit reads them without locking, and a node with
+////   no routes pays one lookup per `emit_routed`. Changing a route is
+////   expensive and should happen at application start or shutdown.
 //// - **Drop reporting is coalesced, not exhaustive.** Concurrent drops within
 ////   one `ReportDrops` drain cycle fold into a single `dropped_event`
 ////   describing how many were rejected, rather than one event per drop.
@@ -115,6 +133,15 @@ fn decrement_floor(counters: Counters, index: Int) -> Int
 
 @external(erlang, "sinal_forwarder_ffi", "try_send")
 fn try_send_thunk(thunk: fn() -> Nil) -> Result(Nil, Nil)
+
+@external(erlang, "sinal_forwarder_ffi", "put_route")
+fn put_route(prefix: List(Atom), forwarder: Forwarder) -> Nil
+
+@external(erlang, "sinal_forwarder_ffi", "erase_route")
+fn erase_route(prefix: List(Atom)) -> Nil
+
+@external(erlang, "sinal_forwarder_ffi", "find_route")
+fn find_route(name: List(Atom)) -> Result(Forwarder, Nil)
 
 @external(erlang, "erlang", "atom_to_binary")
 fn name_to_string(name: process.Name(a)) -> String
@@ -259,6 +286,74 @@ pub fn emit(
     sinal.encode_event(event, measurements, metadata)
     |> result.map_error(ForwardEncodingFailed),
   )
+  forward(forwarder, name, raw_measurements, raw_metadata)
+}
+
+/// Routes every `emit_routed` event whose name starts with `prefix` through
+/// `forwarder`, for the whole node. The empty prefix matches every event;
+/// when several routed prefixes match, the longest wins. Routing a prefix
+/// again replaces its forwarder.
+///
+/// This is application setup, like attaching a handler: call it once the
+/// forwarder is supervised and before the routed library emits. Changing a
+/// route is expensive (routes live in `persistent_term`), so do not route
+/// per request. `sinal.emit` and `forwarder.emit` never consult routes.
+pub fn route(prefix: List(Atom), forwarder: Forwarder) -> Nil {
+  put_route(prefix, forwarder)
+}
+
+/// Removes the route of exactly `prefix`, if there is one. Events it
+/// matched fall back to a shorter routed prefix, or to synchronous
+/// delivery. Events already handed to its forwarder are still delivered
+/// there, so they can run after later, now synchronous, events of the same
+/// producer.
+pub fn unroute(prefix: List(Atom)) -> Nil {
+  erase_route(prefix)
+}
+
+/// Emits an event the way the application routed its name: through the
+/// forwarder of the longest routed prefix (exactly `emit`), or, when no route
+/// matches, synchronously in the caller (exactly `sinal.emit`).
+///
+/// This is the call for a library that emits observations but does not own
+/// the forwarder. By using it, the library accepts that its handlers may run
+/// in another process: it must not rely on the caller's process dictionary,
+/// and it cannot carry a native span.
+///
+/// A routed event is never delivered inline as a fallback. When its
+/// forwarder is full (`CapacityExceeded`, counted in `dropped_event`) or not
+/// running (`ForwarderUnavailable`, reported only in this result), the event
+/// is dropped and the caller continues. `ForwardEncodingFailed` is returned
+/// on either path, and no handler runs.
+///
+/// Handler failures never reach the caller on either path: native telemetry
+/// detaches a handler that raises, and a handler exit that takes the
+/// forwarder down loses its in-flight events, which the restarted forwarder
+/// reports as `Dropped(lost:)`.
+pub fn emit_routed(
+  event: Event(m, d),
+  measurements: m,
+  metadata: d,
+) -> Result(Nil, ForwardError) {
+  use #(name, raw_measurements, raw_metadata) <- result.try(
+    sinal.encode_event(event, measurements, metadata)
+    |> result.map_error(ForwardEncodingFailed),
+  )
+  case find_route(name) {
+    Ok(forwarder) -> forward(forwarder, name, raw_measurements, raw_metadata)
+    Error(Nil) -> {
+      ffi.telemetry_execute(name, raw_measurements, raw_metadata)
+      Ok(Nil)
+    }
+  }
+}
+
+fn forward(
+  forwarder: Forwarder,
+  name: List(Atom),
+  raw_measurements: Dynamic,
+  raw_metadata: Dynamic,
+) -> Result(Nil, ForwardError) {
   let in_flight = add_get(forwarder.counters, in_flight_index, 1)
   case in_flight > forwarder.capacity {
     True -> {

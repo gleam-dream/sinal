@@ -37,7 +37,7 @@ sinal = ">= 0.1.0 and < 1.0.0"
 
 ## Usage Examples
 
-Register long-lived handlers during application startup, before events are emitted, and retain each `Attachment` for shutdown cleanup. A public `HandlerId` must be unique among currently attached native telemetry handlers; an occupied ID returns `AlreadyExists`. `sinal` has no global configuration step. Define event names and field keys as trusted atoms in application code, and attach the resulting descriptors where their lifecycle is owned. Temporary observers can use `with_subscriptions`; its acquisition is sequential and visible to concurrent emitters.
+Register long-lived handlers during application startup, before events are emitted, and retain each `Attachment` for shutdown cleanup. A public `HandlerId` must be unique among currently attached native telemetry handlers; an occupied ID returns `AlreadyExists`. `sinal` needs no global configuration step; its only node-wide setting is an optional forwarder route (see section 7). Define event names and field keys as trusted atoms in application code, and attach the resulting descriptors where their lifecycle is owned. Temporary observers can use `with_subscriptions`; its acquisition is sequential and visible to concurrent emitters.
 
 The examples are exercised against BEAM `:telemetry` in `test/sinal_test.gleam` and `test/readme_example_test.gleam`.
 
@@ -392,6 +392,50 @@ restart guarantees. Constructing more than one `Forwarder` for the same
 `process.Name` gives each its own, unshared counters — use one `Forwarder`
 value per name.
 
+### 7. Routing a Library's Events (`sinal/forwarder`)
+
+A library that emits observations cannot know whether its application wants
+them synchronous or forwarded, and should not own a forwarder's name and
+capacity. It calls `forwarder.emit_routed`; the application decides with
+`forwarder.route(prefix, forwarder)`, once, at startup.
+
+```gleam
+pub fn route_library_events(fwd: forwarder.Forwarder) -> Nil {
+  // Application start, after the forwarder is supervised.
+  forwarder.route([atom.create("my_library")], fwd)
+}
+
+pub fn library_observe(ev, measurements, metadata) -> Nil {
+  // Library code: forwarded if the application routed this name,
+  // synchronous otherwise. Drops are the forwarder's to report.
+  let _ = forwarder.emit_routed(ev, measurements, metadata)
+  Nil
+}
+```
+
+- **No route: synchronous.** An `emit_routed` event whose name has no routed
+  prefix is exactly `sinal.emit`: handlers run in the caller and finish before
+  it returns. An application that routes nothing changes nothing.
+- **Longest prefix wins.** A route covers every event whose name starts with
+  its prefix; `[]` covers every routed event. Routing a prefix again replaces
+  its forwarder; `forwarder.unroute(prefix)` removes it.
+- **A routed event never blocks and never falls back inline.** It behaves
+  exactly as `forwarder.emit` to that forwarder: over capacity it is dropped,
+  returns `CapacityExceeded`, and is counted in the forwarder's
+  `[sinal, forwarder, dropped]` report; with the forwarder not running it is
+  dropped and returns `ForwarderUnavailable`, which is not counted. There is
+  no backpressure: the emitter is never slowed.
+- **Handler failures stay off the emitter.** A raising handler is detached by
+  native telemetry on either path. Behind a route, a handler exit that stops
+  the forwarder loses its in-flight events, which the restarted forwarder
+  reports as `Dropped(lost:)`.
+- **The library accepts a different `self()`.** A library that emits through
+  `emit_routed` must not rely on its caller's process dictionary in handlers,
+  and cannot route a native span.
+
+`sinal.emit` and `forwarder.emit` never consult routes, and a forwarder
+emits its own `dropped_event` directly, so a route cannot loop.
+
 ---
 
 ## Operational Limits and Semantics
@@ -407,6 +451,8 @@ value per name.
 - **Forwarder delivery is best-effort**: `forwarder.emit` never blocks and never retries. A send that would exceed capacity, or that targets a forwarder not currently running, is dropped and reported rather than queued.
 - **Forwarder ordering is per-producer, not global**: native BEAM message ordering guarantees a single producer's forwarded events are dispatched in the order it sent them. Interleaving across producers is unspecified, as it already is for native telemetry handler order.
 - **The forwarder is the handler's `self()`**: a handler attached to a forwarded event runs inside the forwarder process, not the original caller. Process-dictionary context from the producer is not carried across the hop, and a native telemetry span cannot be forwarded (its start and stop must share one process to measure duration).
+- **Routed ordering holds per route**: a producer's `emit_routed` events that resolve to the same forwarder, or that are all unrouted, keep its send order. Events split across routes, or across a route change, have no relative order; after an `unroute`, a later synchronous event can run before an earlier forwarded one.
+- **Routes are node-global setup values**: they live in `persistent_term`, so `emit_routed` reads them without a lock (with no routes, it costs one lookup over `sinal.emit`; see the benchmark), while `route` and `unroute` are expensive and belong at application start and shutdown. Unroute before stopping a routed forwarder, or its events are dropped as unavailable.
 - **Forwarder shutdown does not drain**: messages still in flight when the forwarder process stops are lost, not delivered. A supervised restart drains and reports that loss once, as `Dropped(lost:)`, from the fresh incarnation's own first message.
 - **A forwarder's `lost` count is an approximate upper bound, not exact**: `gleam_otp` registers a restarting actor's name before its initialiser runs, so a concurrent `emit` can already resolve to the new incarnation and queue a real `Execute` message before that incarnation has drained the slot it inherited; such a message can be counted as `lost` even though it is still delivered. The in-flight counter itself is protected against going negative from this (a floored decrement), so this can only ever overcount `lost`, never let the live counter under-count what is truly in flight or silently raise capacity.
 - **Concurrent emitters may see a spurious, safe rejection near the capacity boundary**: admission is a single atomic increment-then-check, so it never over-admits, but under concurrent load at the boundary it can reject a send that would have fit under a different ordering. It never admits past capacity.

@@ -248,6 +248,20 @@ pub fn emit_via_forwarder(
 
 // --- Runnable Tests ---
 
+// --- Snippet 7: Routing a library's events (sinal/forwarder) ---
+
+pub fn route_library_events(fwd: forwarder.Forwarder) -> Nil {
+  // Application start, after the forwarder is supervised.
+  forwarder.route([atom.create("my_library")], fwd)
+}
+
+pub fn library_observe(ev, measurements, metadata) -> Nil {
+  // Library code: forwarded if the application routed this name,
+  // synchronous otherwise. Drops are the forwarder's to report.
+  let _ = forwarder.emit_routed(ev, measurements, metadata)
+  Nil
+}
+
 pub fn readme_example_flow_test() {
   let assert Ok(ev) = http_request_event()
   setup_metrics(ev)
@@ -299,11 +313,37 @@ pub fn readme_forwarder_example_test() {
   process.receive(subject, 200) |> should.equal(Ok(7))
 }
 
+pub fn readme_routing_example_test() {
+  let fwd = build_supervisor(process.new_name("readme-routing-example"))
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("my_library"), atom.create("request")],
+      fields.empty(),
+      fields.empty(),
+    )
+  let assert Ok(id) = sinal.handler_id("readme-routing-observer")
+  let subject = process.new_subject()
+  let assert Ok(attachment) =
+    sinal.observe(id, ev, fn(_, _) { process.send(subject, process.self()) })
+
+  library_observe(ev, Nil, Nil)
+  let assert Ok(synchronous) = process.receive(subject, 0)
+  synchronous |> should.equal(process.self())
+
+  route_library_events(fwd)
+  library_observe(ev, Nil, Nil)
+  let assert Ok(forwarded) = process.receive(subject, 200)
+  { forwarded == process.self() } |> should.equal(False)
+
+  forwarder.unroute([atom.create("my_library")])
+  let assert Ok(Nil) = sinal.detach(attachment)
+}
+
 pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(7)
+  list.length(snippets) |> should.equal(8)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)
