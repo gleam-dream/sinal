@@ -202,26 +202,81 @@ pub fn routed_overflow_is_rejected_and_reported_as_dropped_test() {
 
   process.send(gate, Nil)
   process.receive(dropped, 500)
-  |> should.equal(Ok(#(forwarder.Dropped(rejected: 2, lost: 0), fwd_pid)))
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 2, lost: 0, unavailable: 0), fwd_pid)),
+  )
 
   let assert Ok(Nil) = sinal.detach(dropped_attachment)
   forwarder.unroute(prefix)
 }
 
 // A route whose forwarder is not running drops the event; it never falls
-// back to running the handler in the emitter.
+// back to running the handler in the emitter. The drop is counted, not
+// silent: the emitter reports nothing itself, and the forwarder's first
+// incarnation reports it as `unavailable` from its own process.
 pub fn route_to_a_stopped_forwarder_drops_instead_of_running_inline_test() {
   let prefix = [atom.create("route_test_stopped")]
   let assert Ok(fwd) = forwarder.new(process.new_name("route-stopped"), 4)
   forwarder.route(prefix, fwd)
+  let dropped = observe_dropped("route-stopped-dropped", "route-stopped")
 
   let ev = empty_event(list.append(prefix, [atom.create("e")]))
   let seen = report_pid("route-stopped", ev)
   forwarder.emit_routed(ev, Nil, Nil)
   |> should.equal(Error(forwarder.ForwarderUnavailable))
   process.receive(seen, 50) |> should.be_error()
+  process.receive(dropped.1, 0) |> should.be_error()
 
+  let assert Ok(started) = forwarder.supervised(fwd).start()
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 0, lost: 0, unavailable: 1), started.pid)),
+  )
+
+  let assert Ok(Nil) = sinal.detach(dropped.0)
   forwarder.unroute(prefix)
+}
+
+// A forwarder's drop report is never routed, so counting unavailable drops
+// cannot feed itself: with the empty prefix sending every routed event to a
+// forwarder that is down, its report still runs once in its own process when
+// it starts, and produces no further drop or report.
+pub fn drop_report_is_never_routed_even_by_the_empty_prefix_test() {
+  let assert Ok(fwd) = forwarder.new(process.new_name("route-no-loop"), 4)
+  forwarder.route([], fwd)
+  let dropped = observe_dropped("route-no-loop-dropped", "route-no-loop")
+
+  let ev = empty_event([atom.create("route_test_no_loop"), atom.create("e")])
+  forwarder.emit_routed(ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+
+  let assert Ok(started) = forwarder.supervised(fwd).start()
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 0, lost: 0, unavailable: 1), started.pid)),
+  )
+  process.receive(dropped.1, 100) |> should.be_error()
+
+  let assert Ok(Nil) = sinal.detach(dropped.0)
+  forwarder.unroute([])
+}
+
+// Observes `dropped_event` for the forwarder whose name starts with
+// `forwarder_name`, recording each report with the pid that emitted it.
+fn observe_dropped(
+  id: String,
+  forwarder_name: String,
+) -> #(sinal.Attachment, process.Subject(#(forwarder.Dropped, process.Pid))) {
+  let assert Ok(hid) = sinal.handler_id(id)
+  let subject = process.new_subject()
+  let assert Ok(attachment) =
+    sinal.observe(hid, forwarder.dropped_event(), fn(report, meta) {
+      case string.starts_with(meta.forwarder, forwarder_name) {
+        True -> process.send(subject, #(report, process.self()))
+        False -> Nil
+      }
+    })
+  #(attachment, subject)
 }
 
 // A handler that raises behind a route is isolated by native telemetry in

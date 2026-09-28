@@ -370,16 +370,17 @@ completes without waiting for any attached handler:
   would report. It never reaches the capacity counters, so it never consumes
   a slot.
 - `CapacityExceeded` — the forwarder already has `capacity` messages in
-  flight; this send is dropped and folded into the forwarder's own
-  `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`, carrying
-  `Dropped(rejected:, lost:)`), reported once per `ReportDrops` drain cycle
-  rather than once per drop.
+  flight; this send is dropped and counted as `rejected` in the forwarder's
+  own `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`,
+  carrying `Dropped(rejected:, lost:, unavailable:)`), reported once per
+  `ReportDrops` drain cycle rather than once per drop.
 - `ForwarderUnavailable` — no process is currently registered under the
   forwarder's name (not started yet, or between a crash and its next
-  supervised restart). Note that a concurrent emit can instead resolve to a
-  just-restarted incarnation and see `CapacityExceeded` if that incarnation
-  hasn't finished draining what it inherited yet; see the restart notes
-  below.
+  supervised restart). This send is dropped and counted as `unavailable`;
+  the forwarder's next incarnation reports the count when it starts. Note
+  that a concurrent emit can instead resolve to a just-restarted incarnation
+  and see `CapacityExceeded` if that incarnation hasn't finished draining
+  what it inherited yet; see the restart notes below.
 
 Handlers attach exactly as before — same `sinal.attach`/`sinal.observe`, same
 native failure isolation for a handler that raises — except their `self()`
@@ -421,10 +422,12 @@ pub fn library_observe(ev, measurements, metadata) -> Nil {
   its forwarder; `forwarder.unroute(prefix)` removes it.
 - **A routed event never blocks and never falls back inline.** It behaves
   exactly as `forwarder.emit` to that forwarder: over capacity it is dropped,
-  returns `CapacityExceeded`, and is counted in the forwarder's
+  returns `CapacityExceeded`, and is counted as `rejected` in the forwarder's
   `[sinal, forwarder, dropped]` report; with the forwarder not running it is
-  dropped and returns `ForwarderUnavailable`, which is not counted. There is
-  no backpressure: the emitter is never slowed.
+  dropped, returns `ForwarderUnavailable`, and is counted as `unavailable` in
+  the report its next incarnation makes when it starts. A library can
+  therefore ignore the result without hiding a loss. There is no
+  backpressure: the emitter is never slowed.
 - **Handler failures stay off the emitter.** A raising handler is detached by
   native telemetry on either path. Behind a route, a handler exit that stops
   the forwarder loses its in-flight events, which the restarted forwarder
@@ -434,7 +437,8 @@ pub fn library_observe(ev, measurements, metadata) -> Nil {
   and cannot route a native span.
 
 `sinal.emit` and `forwarder.emit` never consult routes, and a forwarder
-emits its own `dropped_event` directly, so a route cannot loop.
+emits its own `dropped_event` directly with `sinal.emit`, so a route (even
+`[]`) cannot loop, and reporting a drop never causes another drop.
 
 ---
 
@@ -452,8 +456,9 @@ emits its own `dropped_event` directly, so a route cannot loop.
 - **Forwarder ordering is per-producer, not global**: native BEAM message ordering guarantees a single producer's forwarded events are dispatched in the order it sent them. Interleaving across producers is unspecified, as it already is for native telemetry handler order.
 - **The forwarder is the handler's `self()`**: a handler attached to a forwarded event runs inside the forwarder process, not the original caller. Process-dictionary context from the producer is not carried across the hop, and a native telemetry span cannot be forwarded (its start and stop must share one process to measure duration).
 - **Routed ordering holds per route**: a producer's `emit_routed` events that resolve to the same forwarder, or that are all unrouted, keep its send order. Events split across routes, or across a route change, have no relative order; after an `unroute`, a later synchronous event can run before an earlier forwarded one.
-- **Routes are node-global setup values**: they live in `persistent_term`, so `emit_routed` reads them without a lock (with no routes, it costs one lookup over `sinal.emit`; see the benchmark), while `route` and `unroute` are expensive and belong at application start and shutdown. Unroute before stopping a routed forwarder, or its events are dropped as unavailable.
+- **Routes are node-global setup values**: they live in `persistent_term`, so `emit_routed` reads them without a lock (with no routes, it costs one lookup over `sinal.emit`; see the benchmark), while `route` and `unroute` are expensive and belong at application start and shutdown. Unroute before stopping a routed forwarder, or its events are dropped as unavailable (counted, but reported only if that forwarder starts again).
 - **Forwarder shutdown does not drain**: messages still in flight when the forwarder process stops are lost, not delivered. A supervised restart drains and reports that loss once, as `Dropped(lost:)`, from the fresh incarnation's own first message.
+- **Every drop is counted; only a running forwarder reports**: the three `Dropped` counts never overlap. `rejected` counts `CapacityExceeded`, `lost` counts admitted messages a stopped incarnation never handled, and `unavailable` counts `ForwarderUnavailable` sends. The counts belong to the `Forwarder` value, so they survive restarts. A starting incarnation reports all three once as its first message; while it runs, the next drop report also carries any `unavailable` drop that raced its start. Each report resets what it carries. If no incarnation of that `Forwarder` ever starts again, its counts are never reported, and the `ForwarderUnavailable` result is the only signal; a start report is also lost if its incarnation stops before handling it.
 - **A forwarder's `lost` count is an approximate upper bound, not exact**: `gleam_otp` registers a restarting actor's name before its initialiser runs, so a concurrent `emit` can already resolve to the new incarnation and queue a real `Execute` message before that incarnation has drained the slot it inherited; such a message can be counted as `lost` even though it is still delivered. The in-flight counter itself is protected against going negative from this (a floored decrement), so this can only ever overcount `lost`, never let the live counter under-count what is truly in flight or silently raise capacity.
 - **Concurrent emitters may see a spurious, safe rejection near the capacity boundary**: admission is a single atomic increment-then-check, so it never over-admits, but under concurrent load at the boundary it can reject a send that would have fit under a different ordering. It never admits past capacity.
 

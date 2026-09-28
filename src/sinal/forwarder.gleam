@@ -17,9 +17,10 @@
 //// ## Operational limits
 ////
 //// - **Best-effort delivery.** A capacity-exceeding `emit` is rejected with
-////   `CapacityExceeded` and counted as a drop. A forwarder that is not
+////   `CapacityExceeded` and counted as `rejected`. A forwarder that is not
 ////   running (not yet started, or mid-restart) rejects with
-////   `ForwarderUnavailable`. Neither case blocks or retries.
+////   `ForwarderUnavailable`, counted as `unavailable`. Neither case blocks or
+////   retries.
 //// - **Per-producer FIFO, no global order.** Native BEAM message ordering
 ////   guarantees a single producer's forwarded events are dispatched in the
 ////   order it sent them. Interleaving across producers is unspecified, as it
@@ -70,6 +71,34 @@
 //// - **Drop reporting is coalesced, not exhaustive.** Concurrent drops within
 ////   one `ReportDrops` drain cycle fold into a single `dropped_event`
 ////   describing how many were rejected, rather than one event per drop.
+////
+//// ## When drops are reported
+////
+//// A `Forwarder`'s three counts live in atomics owned by the `Forwarder`
+//// value, not by its process, so they survive every incarnation. Only a
+//// running incarnation reports them, as `dropped_event` from its own process,
+//// and each report resets exactly the counts it carries:
+////
+//// - **When an incarnation starts** (first start or supervised restart), it
+////   drains all three counts and reports them as its first message, if any
+////   is nonzero. Unavailable drops made while it was down arrive here.
+//// - **After a drop while it runs**, the next `ReportDrops` drain reports
+////   `rejected` and `unavailable` together (`lost` is zero outside a start).
+////   An unavailable drop that raced a restart lands here instead of waiting
+////   for the next restart.
+//// - **If no incarnation ever starts again** (never supervised, or its
+////   supervisor gave up), the counts are never reported; they stay in the
+////   `Forwarder` value until it is garbage collected, and a later
+////   `supervised` start of the same value reports them then. The
+////   `ForwarderUnavailable` result is the only signal in the meantime.
+//// - **A report can be lost with its incarnation.** The start report is
+////   queued before the incarnation handles any message; if that incarnation
+////   is stopped before handling it, its counts were already reset and are
+////   not reported again.
+//// - **Reports never loop.** A drop report is emitted with `sinal.emit`, so
+////   no route, not even `[]`, sends it through a forwarder, and reporting a
+////   drop never causes one. The emitter never reports a drop itself; it only
+////   counts it.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
@@ -92,7 +121,7 @@ pub opaque type Forwarder {
 pub opaque type Message {
   Execute(name: List(Atom), measurements: Dynamic, metadata: Dynamic)
   ReportDrops
-  ReportLoss(rejected: Int, lost: Int)
+  ReportStartDrops(Dropped)
 }
 
 pub type ConfigError {
@@ -105,12 +134,17 @@ pub type ForwardError {
   ForwarderUnavailable
 }
 
-/// Reported once per drain: `rejected` counts capacity drops folded together
-/// since the last report, `lost` counts in-flight messages that were still
-/// outstanding when the previous incarnation stopped (zero outside of a
-/// restart report).
+/// One drop report. Every count covers the drops since the previous report
+/// of the same `Forwarder`, and no send is counted in two of them.
+///
+/// - `rejected`: sends refused with `CapacityExceeded`.
+/// - `lost`: admitted sends still in flight when the previous incarnation
+///   stopped (zero outside a report made when an incarnation starts; an
+///   approximate upper bound, see the module doc).
+/// - `unavailable`: sends refused with `ForwarderUnavailable` because no
+///   incarnation was running. They took no capacity.
 pub type Dropped {
-  Dropped(rejected: Int, lost: Int)
+  Dropped(rejected: Int, lost: Int, unavailable: Int)
 }
 
 pub type DroppedMetadata {
@@ -150,6 +184,8 @@ const in_flight_index = 1
 
 const drop_index = 2
 
+const unavailable_index = 3
+
 /// Allocates a forwarder's shared counters. Starts no process; pair the
 /// result with `supervised` to run it.
 pub fn new(
@@ -169,7 +205,7 @@ pub fn supervised(forwarder: Forwarder) -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() { start_forwarder(forwarder) })
 }
 
-/// Drains both counters and, if either held anything, queues the report as
+/// Drains all three counters and, if any held anything, queues the report as
 /// the incarnation's own first message rather than emitting it here. Native
 /// telemetry handlers for `dropped_event` run synchronously and are
 /// arbitrary application code; running them inside the initialiser would
@@ -182,8 +218,13 @@ fn start_forwarder(
   actor.new_with_initialiser(1000, fn(subject) {
     let lost = exchange(forwarder.counters, in_flight_index, 0)
     let rejected = exchange(forwarder.counters, drop_index, 0)
-    case lost > 0 || rejected > 0 {
-      True -> process.send(subject, ReportLoss(rejected, lost))
+    let unavailable = exchange(forwarder.counters, unavailable_index, 0)
+    case lost > 0 || rejected > 0 || unavailable > 0 {
+      True ->
+        process.send(
+          subject,
+          ReportStartDrops(Dropped(rejected:, lost:, unavailable:)),
+        )
       False -> Nil
     }
     actor.initialised(forwarder) |> actor.returning(Nil) |> Ok
@@ -205,40 +246,49 @@ fn handle_message(
     }
     ReportDrops -> {
       let rejected = exchange(state.counters, drop_index, 0)
-      // Guards against a spurious empty `Dropped(0, 0)`: normally this
-      // message is only ever sent after `report_drop`'s own 0→1 transition,
-      // so `rejected` is always positive here. The one exception is a
-      // restart racing this exact send (see the module doc's registration-
-      // before-initialiser note and `restart_under_load_never_inflates_
-      // capacity_test`'s dropped-event assertion): a fresh incarnation's own
-      // startup drain can read and reset this slot before a `ReportDrops`
-      // sent to the old incarnation's name resolves to the new one and is
-      // processed there, leaving nothing left to report.
-      case rejected > 0 {
-        True -> emit_dropped(state, rejected, 0)
+      let unavailable = exchange(state.counters, unavailable_index, 0)
+      // Guards against a spurious empty `Dropped(0, 0, 0)`: normally this
+      // message is only ever sent after `report_drop`'s own 0→1 transition
+      // of one of the two slots, so one of them is positive here. The
+      // exceptions are a restart racing this exact send (see the module
+      // doc's registration-before-initialiser note and
+      // `restart_under_load_never_inflates_capacity_test`'s dropped-event
+      // assertion), where a fresh incarnation's own startup drain reads and
+      // resets the slots before a `ReportDrops` sent to the old
+      // incarnation's name is processed by the new one, and a second
+      // `ReportDrops` queued by the other slot's transition in the same
+      // cycle, which finds both slots already drained by the first.
+      case rejected > 0 || unavailable > 0 {
+        True -> emit_dropped(state, Dropped(rejected:, lost: 0, unavailable:))
         False -> Nil
       }
       actor.continue(state)
     }
-    ReportLoss(rejected, lost) -> {
-      emit_dropped(state, rejected, lost)
+    ReportStartDrops(dropped) -> {
+      emit_dropped(state, dropped)
       actor.continue(state)
     }
   }
 }
 
-fn emit_dropped(forwarder: Forwarder, rejected: Int, lost: Int) -> Nil {
+/// Emits with `sinal.emit`, never `emit_routed`: a drop report is not
+/// routable, so no route (not even `[]`) can send it back through a
+/// forwarder, and reporting a drop can never cause another drop.
+fn emit_dropped(forwarder: Forwarder, dropped: Dropped) -> Nil {
   let assert Ok(Nil) =
     sinal.emit(
       dropped_event(),
-      Dropped(rejected:, lost:),
+      dropped,
       DroppedMetadata(forwarder: name_to_string(forwarder.name)),
     )
   Nil
 }
 
 /// The `[sinal, forwarder, dropped]` event a forwarder emits, from its own
-/// process, whenever a drain finds a nonzero rejected or lost count.
+/// process, whenever a drain finds a nonzero rejected, lost, or unavailable
+/// count. Its measurements are the integer keys `rejected`, `lost`, and
+/// `unavailable`; its metadata is the forwarder's name. It is emitted
+/// synchronously and is never routed.
 pub fn dropped_event() -> Event(Dropped, DroppedMetadata) {
   let assert Ok(ev) =
     sinal.event(
@@ -250,12 +300,18 @@ pub fn dropped_event() -> Event(Dropped, DroppedMetadata) {
 }
 
 fn dropped_measurements_fields() -> fields.Fields(Dropped) {
-  let assert Ok(pair) =
+  let assert Ok(rejected_lost) =
     fields.pair(
       fields.int(atom.create("rejected")),
       fields.int(atom.create("lost")),
     )
-  fields.imap(pair, fn(p) { Dropped(p.0, p.1) }, fn(d) { #(d.rejected, d.lost) })
+  let assert Ok(all) =
+    fields.pair(rejected_lost, fields.int(atom.create("unavailable")))
+  fields.imap(
+    all,
+    fn(p) { Dropped(rejected: p.0.0, lost: p.0.1, unavailable: p.1) },
+    fn(d) { #(#(d.rejected, d.lost), d.unavailable) },
+  )
 }
 
 fn dropped_metadata_fields() -> fields.Fields(DroppedMetadata) {
@@ -272,10 +328,11 @@ fn dropped_metadata_fields() -> fields.Fields(DroppedMetadata) {
 ///
 /// Encoding happens before any capacity check, so a rejected encoding never
 /// consumes a capacity slot. A capacity-exceeding send is rolled back
-/// immediately and folded into the forwarder's next `dropped_event`. A send
-/// to a forwarder that is not currently running (not started, or between a
-/// crash and its next incarnation) is rescued and reported as
-/// `ForwarderUnavailable` rather than propagating a panic.
+/// immediately and folded into the forwarder's next `dropped_event` as
+/// `rejected`. A send to a forwarder that is not currently running (not
+/// started, or between a crash and its next incarnation) is rescued, returned
+/// as `ForwarderUnavailable` rather than propagating a panic, and counted as
+/// `unavailable` in the report of the forwarder's next incarnation.
 pub fn emit(
   forwarder: Forwarder,
   event: Event(m, d),
@@ -321,10 +378,12 @@ pub fn unroute(prefix: List(Atom)) -> Nil {
 /// and it cannot carry a native span.
 ///
 /// A routed event is never delivered inline as a fallback. When its
-/// forwarder is full (`CapacityExceeded`, counted in `dropped_event`) or not
-/// running (`ForwarderUnavailable`, reported only in this result), the event
-/// is dropped and the caller continues. `ForwardEncodingFailed` is returned
-/// on either path, and no handler runs.
+/// forwarder is full (`CapacityExceeded`, counted as `rejected`) or not
+/// running (`ForwarderUnavailable`, counted as `unavailable`), the event is
+/// dropped, the caller continues, and the forwarder reports the count in its
+/// `dropped_event`, so a caller may ignore this result without hiding the
+/// loss. `ForwardEncodingFailed` is returned on either path, is not counted,
+/// and no handler runs.
 ///
 /// Handler failures never reach the caller on either path: native telemetry
 /// detaches a handler that raises, and a handler exit that takes the
@@ -358,7 +417,7 @@ fn forward(
   case in_flight > forwarder.capacity {
     True -> {
       let _ = decrement_floor(forwarder.counters, in_flight_index)
-      report_drop(forwarder)
+      report_drop(forwarder, drop_index)
       Error(CapacityExceeded)
     }
     False ->
@@ -373,18 +432,28 @@ fn forward(
         Ok(Nil) -> Ok(Nil)
         Error(Nil) -> {
           let _ = decrement_floor(forwarder.counters, in_flight_index)
+          report_drop(forwarder, unavailable_index)
           Error(ForwarderUnavailable)
         }
       }
   }
 }
 
-/// Increments the drop slot and, only for the sender whose increment moved it
-/// from 0 to 1, notifies the forwarder once. Concurrent drops within the same
-/// drain cycle accumulate on the counter without sending a second message, so
-/// the forwarder reports one coalesced `dropped_event` per cycle rather than
-/// one per drop. This send is best-effort and uncounted: it never touches the
-/// in-flight slot or reports its own failure.
+/// Increments a drop slot (`drop_index` or `unavailable_index`) and, only for
+/// the sender whose increment moved it from 0 to 1, notifies the forwarder
+/// once. Concurrent drops within the same drain cycle accumulate on the
+/// counter without sending a second message, so the forwarder reports one
+/// coalesced `dropped_event` per cycle rather than one per drop. This send is
+/// best-effort and uncounted: it never touches the in-flight slot or reports
+/// its own failure.
+///
+/// For an unavailable drop the notification usually fails too (the forwarder
+/// is down), and the count waits in the slot for the next incarnation's start
+/// drain. The notification matters when the send lost a race with a restart:
+/// the name failed to resolve, the new incarnation registered and drained,
+/// and only then did this increment land. It then reaches the new
+/// incarnation, which reports the count instead of holding it until another
+/// drop or restart.
 ///
 /// This guard and `handle_message`'s `ReportDrops` recheck both sit between
 /// a drop storm and a duplicate report, but they protect different things:
@@ -396,8 +465,8 @@ fn forward(
 /// operation, because the other keeps the emitted stream correct on its
 /// own — the mailbox-length test above is what makes this guard's own
 /// contribution observable.
-fn report_drop(forwarder: Forwarder) -> Nil {
-  case add_get(forwarder.counters, drop_index, 1) {
+fn report_drop(forwarder: Forwarder, index: Int) -> Nil {
+  case add_get(forwarder.counters, index, 1) {
     1 -> {
       let _ =
         try_send_thunk(fn() {

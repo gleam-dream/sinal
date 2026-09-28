@@ -102,8 +102,17 @@ pub fn emit_before_start_reports_unavailable_then_rolls_back_test() {
   forwarder.emit(fwd, ev, Nil, Nil)
   |> should.equal(Error(forwarder.ForwarderUnavailable))
 
+  // Both drops are counted, and the first incarnation reports them from its
+  // own process as `unavailable`, never as `rejected`: they took no capacity.
+  let dropped = observe_dropped("forwarder-unavailable-dropped", name)
   let spec = forwarder.supervised(fwd)
-  let assert Ok(_started) = spec.start()
+  let assert Ok(started) = spec.start()
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 0, lost: 0, unavailable: 2), started.pid)),
+  )
+  process.receive(dropped.1, 100) |> should.be_error()
+  let assert Ok(Nil) = sinal.detach(dropped.0)
   let assert Ok(hid) = sinal.handler_id("forwarder-unavailable-handler")
   let subject = process.new_subject()
   let assert Ok(_attachment) =
@@ -273,7 +282,8 @@ pub fn capacity_exceeded_emits_single_dropped_event_from_forwarder_test() {
 
   let assert Ok(#(dropped, reporter_pid)) =
     process.receive(dropped_subject, 200)
-  dropped |> should.equal(forwarder.Dropped(rejected: 1, lost: 0))
+  dropped
+  |> should.equal(forwarder.Dropped(rejected: 1, lost: 0, unavailable: 0))
   reporter_pid |> should.equal(started.pid)
 
   process.receive(dropped_subject, 100) |> should.be_error()
@@ -328,7 +338,8 @@ pub fn concurrent_drops_coalesce_into_one_dropped_event_test() {
 
   let assert Ok(#(dropped, reporter_pid)) =
     process.receive(dropped_subject, 200)
-  dropped |> should.equal(forwarder.Dropped(rejected: 2, lost: 0))
+  dropped
+  |> should.equal(forwarder.Dropped(rejected: 2, lost: 0, unavailable: 0))
   reporter_pid |> should.equal(started.pid)
 
   process.receive(dropped_subject, 100) |> should.be_error()
@@ -531,7 +542,8 @@ pub fn killed_incarnation_reports_lost_and_resets_counter_test() {
   started2.pid |> should.not_equal(started1.pid)
 
   let assert Ok(dropped) = process.receive(dropped_subject, 200)
-  dropped |> should.equal(forwarder.Dropped(rejected: 0, lost: 2))
+  dropped
+  |> should.equal(forwarder.Dropped(rejected: 0, lost: 2, unavailable: 0))
 
   // The counter is reset: a fresh send is admitted rather than rejected.
   let assert Ok(sentinel_ev) =
@@ -660,7 +672,7 @@ pub fn restart_under_load_never_inflates_capacity_test() {
   // it is also the only window in which `handle_message`'s `ReportDrops`
   // branch can find `rejected` already back at 0 (drained concurrently by a
   // restarting incarnation's own drain) and would, without its `rejected > 0`
-  // recheck, emit a spurious empty `Dropped(rejected: 0, lost: 0)`. Hitting
+  // recheck, emit a spurious empty `Dropped(0, 0, 0)`. Hitting
   // that exact interleaving is exactly as non-deterministic as the capacity
   // race below, so this assertion is best-effort in the same sense: it
   // cannot go red on a correct implementation, and it raises (without
@@ -723,7 +735,8 @@ pub fn restart_under_load_never_inflates_capacity_test() {
   // spurious empty report the receiver-side recheck exists to prevent.
   drain_dropped(dropped_subject, [])
   |> list.each(fn(dropped) {
-    { dropped.rejected == 0 && dropped.lost == 0 } |> should.equal(False)
+    { dropped.rejected == 0 && dropped.lost == 0 && dropped.unavailable == 0 }
+    |> should.equal(False)
   })
 }
 
@@ -869,3 +882,136 @@ pub fn non_positive_capacity_is_rejected_test() {
   forwarder.new(name, 0) |> should.equal(Error(forwarder.InvalidCapacity))
   forwarder.new(name, -3) |> should.equal(Error(forwarder.InvalidCapacity))
 }
+
+// Observes `dropped_event` for one forwarder only, recording each report with
+// the pid of the process that emitted it. Filtering by the forwarder's name
+// keeps a report from another test's forwarder out of this test's mailbox.
+fn observe_dropped(
+  id: String,
+  name: process.Name(forwarder.Message),
+) -> #(sinal.Attachment, process.Subject(#(forwarder.Dropped, process.Pid))) {
+  let assert Ok(hid) = sinal.handler_id(id)
+  let subject = process.new_subject()
+  let wanted = atom.to_string(name_to_atom(name))
+  let assert Ok(attachment) =
+    sinal.observe(hid, forwarder.dropped_event(), fn(dropped, meta) {
+      case meta.forwarder == wanted {
+        True -> process.send(subject, #(dropped, process.self()))
+        False -> Nil
+      }
+    })
+  #(attachment, subject)
+}
+
+@external(erlang, "forwarder_test_ffi", "identity")
+fn name_to_atom(name: process.Name(a)) -> atom.Atom
+
+fn kill_and_wait(pid: process.Pid) -> Nil {
+  let monitor = process.monitor(pid)
+  process.unlink(pid)
+  process.kill(pid)
+  let selector =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(down) { down })
+  let assert Ok(_down) = process.selector_receive(selector, 500)
+  Nil
+}
+
+// (h) Sends that find a crashed forwarder down are counted, and the next
+// incarnation started from the same `Forwarder` reports them once as
+// `unavailable`. They never took an in-flight slot, so they appear neither
+// as `lost` nor as `rejected`, and the report resets the count: a later
+// restart with no new unavailable drops reports nothing.
+pub fn unavailable_drops_while_down_are_reported_by_the_next_incarnation_test() {
+  let name = process.new_name("forwarder-down")
+  let assert Ok(fwd) = forwarder.new(name, 1)
+  let spec = forwarder.supervised(fwd)
+  let assert Ok(started1) = spec.start()
+  let assert Ok(ev) =
+    sinal.event(
+      [atom.create("forwarder_test"), atom.create("down")],
+      fields.empty(),
+      fields.empty(),
+    )
+  let dropped = observe_dropped("forwarder-down-dropped", name)
+
+  kill_and_wait(started1.pid)
+  forwarder.emit(fwd, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+  forwarder.emit(fwd, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+  forwarder.emit(fwd, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+  // Nothing is reported while no incarnation runs: no process can emit it,
+  // and the emitter never reports on its own.
+  process.receive(dropped.1, 50) |> should.be_error()
+
+  let assert Ok(started2) = spec.start()
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 0, lost: 0, unavailable: 3), started2.pid)),
+  )
+  process.receive(dropped.1, 100) |> should.be_error()
+
+  // The count was reset by that report, and capacity is untouched: the one
+  // slot still admits a send. Waiting for its delivery before the kill keeps
+  // it from being reported as `lost` by the next incarnation.
+  let assert Ok(hid) = sinal.handler_id("forwarder-down-delivered")
+  let delivered = process.new_subject()
+  let assert Ok(delivered_attachment) =
+    sinal.observe(hid, ev, fn(_, _) { process.send(delivered, Nil) })
+  forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
+  process.receive(delivered, 200) |> should.equal(Ok(Nil))
+  let assert Ok(Nil) = sinal.detach(delivered_attachment)
+  kill_and_wait(started2.pid)
+  let assert Ok(_started3) = spec.start()
+  process.receive(dropped.1, 100) |> should.be_error()
+
+  let assert Ok(Nil) = sinal.detach(dropped.0)
+}
+
+// (h2) An unavailable drop that lands after an incarnation has already
+// drained its counts (a send that failed to resolve the name just before the
+// incarnation registered it) is not held until the next restart: it rides on
+// that incarnation's next drop report. No public call can place a drop in
+// that window on demand, so this test adds it to the forwarder's own
+// unavailable slot directly, then causes a capacity drop.
+pub fn late_unavailable_drop_rides_on_the_next_drop_report_test() {
+  let name = process.new_name("forwarder-late-unavailable")
+  let assert Ok(fwd) = forwarder.new(name, 1)
+  let spec = forwarder.supervised(fwd)
+  let assert Ok(started) = spec.start()
+  let assert Ok(block_ev) =
+    sinal.event(
+      [atom.create("forwarder_test"), atom.create("late_unavailable")],
+      fields.empty(),
+      fields.empty(),
+    )
+  let assert Ok(block_hid) = sinal.handler_id("forwarder-late-unavailable")
+  let entered = process.new_subject()
+  let assert Ok(_block_attachment) =
+    sinal.observe(block_hid, block_ev, fn(_, _) {
+      let gate = process.new_subject()
+      process.send(entered, gate)
+      let assert Ok(Nil) = process.receive(gate, 2000)
+      Nil
+    })
+  let dropped = observe_dropped("forwarder-late-unavailable-dropped", name)
+
+  test_add_get(forwarder_counters(fwd), 3, 1) |> should.equal(1)
+  forwarder.emit(fwd, block_ev, Nil, Nil) |> should.equal(Ok(Nil))
+  let assert Ok(gate) = process.receive(entered, 200)
+  forwarder.emit(fwd, block_ev, Nil, Nil)
+  |> should.equal(Error(forwarder.CapacityExceeded))
+  process.send(gate, Nil)
+
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 1, lost: 0, unavailable: 1), started.pid)),
+  )
+  process.receive(dropped.1, 100) |> should.be_error()
+  let assert Ok(Nil) = sinal.detach(dropped.0)
+}
+
+@external(erlang, "forwarder_test_ffi", "forwarder_counters")
+fn forwarder_counters(forwarder: forwarder.Forwarder) -> TestCounters

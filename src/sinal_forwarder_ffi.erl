@@ -11,13 +11,17 @@
     find_route/1
 ]).
 
-%% Two lock-free signed slots shared across a forwarder's lifetime, including
-%% across a supervisor restart of the process that drains them:
+%% Three lock-free signed slots shared across a forwarder's lifetime,
+%% including across a supervisor restart of the process that drains them.
+%% They belong to the `Forwarder` value, not to any process, so they outlive
+%% every incarnation for as long as that value is referenced:
 %%   index 1 - in-flight Execute messages sent but not yet drained (`lost` on
 %%             a fresh incarnation is this slot's leftover value).
-%%   index 2 - accumulated drop count since the last drain (`rejected`).
+%%   index 2 - capacity drops since the last drain (`rejected`).
+%%   index 3 - sends that found no running incarnation since the last drain
+%%             (`unavailable`).
 new_counters() ->
-    atomics:new(2, [{signed, true}]).
+    atomics:new(3, [{signed, true}]).
 
 add_get(Ref, Index, Delta) ->
     atomics:add_get(Ref, Index, Delta).
