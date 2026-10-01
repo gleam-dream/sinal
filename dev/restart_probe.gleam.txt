@@ -1,0 +1,163 @@
+import gleam/erlang/atom
+import gleam/erlang/process
+import gleam/io
+import gleam/string
+import sinal
+import sinal/fields
+import sinal/forwarder
+
+@external(erlang, "restart_probe_ffi", "set_start_gate")
+fn set_start_gate(gate: fn() -> Nil) -> Nil
+
+@external(erlang, "restart_probe_ffi", "set_send_gate")
+fn set_send_gate(gate: fn() -> Nil) -> Nil
+
+@external(erlang, "restart_probe_ffi", "message_queue_len")
+fn message_queue_len(pid: process.Pid) -> Int
+
+pub fn main() {
+  startup()
+  delayed_sender()
+  delayed_drop()
+}
+
+fn stop(pid: process.Pid) {
+  let monitor = process.monitor(pid)
+  process.unlink(pid)
+  process.kill(pid)
+  let selector = process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(down) { down })
+  let assert Ok(_) = process.selector_receive(selector, 1000)
+  Nil
+}
+
+fn startup() {
+  let initialising = process.new_subject()
+  let started = process.new_subject()
+  let entered = process.new_subject()
+  let assert Ok(fwd) = forwarder.new(process.new_name("startup_probe"), 1)
+  let assert Ok(event) = sinal.event([atom.create("startup_probe")], fields.empty(), fields.empty())
+  let assert Ok(id) = sinal.handler_id("startup-probe-handler")
+  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+    let release = process.new_subject()
+    process.send(entered, release)
+    process.receive_forever(release)
+  })
+  set_start_gate(fn() {
+    let release = process.new_subject()
+    process.send(initialising, release)
+    process.receive_forever(release)
+  })
+  let launcher = process.spawn_unlinked(fn() {
+    let spec = forwarder.supervised(fwd)
+    let assert Ok(child) = spec.start()
+    process.send(started, child.pid)
+    let keep_alive = process.new_subject()
+    process.receive_forever(keep_alive)
+  })
+  let assert Ok(release_init) = process.receive(initialising, 1000)
+  let first = forwarder.emit(fwd, event, Nil, Nil)
+  process.send(release_init, Nil)
+  let assert Ok(pid) = process.receive(started, 1000)
+  case first {
+    Ok(Nil) -> Nil
+    Error(forwarder.ForwarderUnavailable) -> {
+      let assert Ok(Nil) = forwarder.emit(fwd, event, Nil, Nil)
+      Nil
+    }
+    other -> panic as string.inspect(other)
+  }
+  let assert Ok(_) = process.receive(entered, 1000)
+  let second = forwarder.emit(fwd, event, Nil, Nil)
+  io.println("Startup capacity=1: first=" <> string.inspect(first) <> ", second=" <> string.inspect(second))
+  let assert Error(forwarder.CapacityExceeded) = second
+  stop(pid)
+  stop(launcher)
+  let assert Ok(Nil) = sinal.detach(attachment)
+  set_start_gate(fn() { Nil })
+}
+
+fn delayed_sender() {
+  let sending = process.new_subject()
+  let done = process.new_subject()
+  let entered = process.new_subject()
+  let assert Ok(fwd) = forwarder.new(process.new_name("delayed_probe"), 1)
+  let spec = forwarder.supervised(fwd)
+  let assert Ok(first) = spec.start()
+  let assert Ok(event) = sinal.event([atom.create("delayed_probe")], fields.empty(), fields.empty())
+  let assert Ok(id) = sinal.handler_id("delayed-probe-handler")
+  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+    let release = process.new_subject()
+    process.send(entered, release)
+    process.receive_forever(release)
+  })
+  set_send_gate(fn() {
+    let release = process.new_subject()
+    process.send(sending, release)
+    process.receive_forever(release)
+  })
+  let _ = process.spawn_unlinked(fn() {
+    process.send(done, forwarder.emit(fwd, event, Nil, Nil))
+  })
+  let assert Ok(release_send) = process.receive(sending, 1000)
+  stop(first.pid)
+  set_send_gate(fn() { Nil })
+  let assert Ok(second) = spec.start()
+  let assert Ok(Nil) = forwarder.emit(fwd, event, Nil, Nil)
+  let assert Ok(_) = process.receive(entered, 1000)
+  let before = message_queue_len(second.pid)
+  process.send(release_send, Nil)
+  let assert Ok(_) = process.receive(done, 1000)
+  let after = message_queue_len(second.pid)
+  io.println("Delayed sender across restart: mailbox before=" <> string.inspect(before) <> ", after=" <> string.inspect(after))
+  let assert True = before == after
+  let assert Error(forwarder.CapacityExceeded) = forwarder.emit(fwd, event, Nil, Nil)
+  stop(second.pid)
+  let assert Ok(Nil) = sinal.detach(attachment)
+  Nil
+}
+
+@external(erlang, "restart_probe_ffi", "set_drop_gate")
+fn set_drop_gate(gate: fn() -> Nil) -> Nil
+
+fn delayed_drop() {
+  let sending = process.new_subject()
+  let done = process.new_subject()
+  let entered = process.new_subject()
+  let assert Ok(fwd) = forwarder.new(process.new_name("delayed_drop_probe"), 1)
+  let spec = forwarder.supervised(fwd)
+  let assert Ok(first) = spec.start()
+  let assert Ok(event) = sinal.event([atom.create("delayed_drop_probe")], fields.empty(), fields.empty())
+  let assert Ok(id) = sinal.handler_id("delayed-drop-handler")
+  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+    let release = process.new_subject()
+    process.send(entered, release)
+    process.receive_forever(release)
+  })
+  let assert Ok(Nil) = forwarder.emit(fwd, event, Nil, Nil)
+  let assert Ok(_) = process.receive(entered, 1000)
+  set_drop_gate(fn() {
+    let release = process.new_subject()
+    process.send(sending, release)
+    process.receive_forever(release)
+  })
+  let _ = process.spawn_unlinked(fn() {
+    process.send(done, forwarder.emit(fwd, event, Nil, Nil))
+  })
+  let assert Ok(release_send) = process.receive(sending, 1000)
+  stop(first.pid)
+  set_drop_gate(fn() { Nil })
+  let assert Ok(second) = spec.start()
+  let assert Ok(Nil) = forwarder.emit(fwd, event, Nil, Nil)
+  let assert Ok(_) = process.receive(entered, 1000)
+  let before = message_queue_len(second.pid)
+  process.send(release_send, Nil)
+  let assert Ok(_) = process.receive(done, 1000)
+  let after = message_queue_len(second.pid)
+  io.println("Delayed drop notice across restart: mailbox before=" <> string.inspect(before) <> ", after=" <> string.inspect(after))
+  let assert True = before == after
+  let assert Error(forwarder.CapacityExceeded) = forwarder.emit(fwd, event, Nil, Nil)
+  stop(second.pid)
+  let assert Ok(Nil) = sinal.detach(attachment)
+  Nil
+}

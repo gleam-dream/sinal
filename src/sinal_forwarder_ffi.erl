@@ -1,17 +1,19 @@
 -module(sinal_forwarder_ffi).
 
 -export([
+    publish_target/2,
+    find_target/1,
     new_counters/0,
     add_get/3,
     exchange/3,
     decrement_floor/2,
-    try_send/1,
     put_route/2,
     erase_route/1,
     find_route/1
 ]).
 
-%% Three lock-free signed slots shared across a forwarder's lifetime,
+%% Three lock-free signed slots used for diagnostic counts or local admission.
+%% Diagnostic slots are shared across a forwarder's lifetime,
 %% including across a supervisor restart of the process that drains them.
 %% They belong to the `Forwarder` value, not to any process, so they outlive
 %% every incarnation for as long as that value is referenced:
@@ -31,21 +33,9 @@ add_get(Ref, Index, Delta) ->
 exchange(Ref, Index, Value) ->
     atomics:exchange(Ref, Index, Value).
 
-%% Decrements a slot but never past 0, via a compare-and-swap retry loop.
-%%
-%% A restarting forwarder is registered under its name before its own
-%% initialiser runs (an `actor.start`/`gleam_otp` ordering, not something
-%% this module controls), so a concurrent `emit` can resolve the name to the
-%% new incarnation and queue an Execute message before that incarnation has
-%% drained the slot it inherited from the one that crashed. The queued
-%% message is real and will still be processed, but the drain can already
-%% have counted it (or count towards it) as `lost`. Without a floor, the
-%% later post-execute decrement for that same message would then take the
-%% freshly-reset counter negative, permanently and silently raising the
-%% effective capacity for the rest of that incarnation's life. Flooring at 0
-%% cannot make the counter under-count a message still genuinely in flight
-%% (the increment that admitted it already happened), so it only ever
-%% removes a spurious negative, never a real one.
+%% Floored decrement is also used by best-effort diagnostic counters that
+%% may be drained across a restart. Admission uses separate counters belonging
+%% exclusively to one incarnation; those are never reset while it is alive.
 decrement_floor(Ref, Index) ->
     decrement_floor(Ref, Index, atomics:get(Ref, Index)).
 
@@ -56,18 +46,6 @@ decrement_floor(Ref, Index, Current) ->
     case atomics:compare_exchange(Ref, Index, Current, Next) of
         ok -> Next;
         Actual -> decrement_floor(Ref, Index, Actual)
-    end.
-
-%% Runs Thunk, rescuing any raised class so a send to an unregistered or
-%% unavailable named process is reported rather than propagated. `gleam_erlang`
-%% panics when `process.send/2` targets a named subject with no registered
-%% process, so this is the only safe way to send best-effort to a forwarder
-%% that may not be running.
-try_send(Thunk) ->
-    try Thunk() of
-        _ -> {ok, nil}
-    catch
-        _:_ -> {error, nil}
     end.
 
 %% The node's routes live in one `persistent_term` value: a list of
@@ -115,4 +93,22 @@ find_route(Name, [{Prefix, Forwarder} | Rest]) ->
     case lists:prefix(Prefix, Name) of
         true -> {ok, Forwarder};
         false -> find_route(Name, Rest)
+    end.
+
+%% The table belongs to this actor incarnation and disappears on its death.
+%% Its single typed row couples a direct subject to that incarnation's slots.
+%% Concurrent producers cannot see the target before it is fully initialised.
+publish_target(Name, Target) ->
+    try
+        Table = ets:new(Name, [named_table, protected, {read_concurrency, true}]),
+        true = ets:insert(Table, {target, Target}),
+        {ok, nil}
+    catch error:badarg -> {error, nil}
+    end.
+
+find_target(Name) ->
+    try ets:lookup(Name, target) of
+        [{target, Target}] -> {ok, Target};
+        [] -> {error, nil}
+    catch error:badarg -> {error, nil}
     end.

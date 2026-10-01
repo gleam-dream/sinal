@@ -619,38 +619,9 @@ pub fn restart_drains_drop_slot_when_killed_before_report_drops_test() {
   { dropped.rejected > 0 } |> should.equal(True)
 }
 
-// (race) Restart racing concurrent emitters must never leave the in-flight
-// counter negative, which would silently raise the effective capacity for
-// the rest of that incarnation's life. `gleam_otp` registers a restarting
-// actor's name before its initialiser runs, so a concurrent emit can land an
-// Execute message in the new incarnation's mailbox before that incarnation's
-// own reset-to-0 has run (see the module doc and `decrement_floor_never_
-// goes_negative_test` above, which is what actually prevents the negative
-// value). This test drives many concurrent emitters through several forced
-// restarts and then checks capacity is still exactly enforced on whichever
-// incarnation is left running, without an intervening "clean" restart that
-// would mask the leak by resetting the counter again.
-//
-// This is a best-effort stress test, not a guaranteed reproduction: hitting
-// the exact race window is not deterministic. It cannot go red on a correct
-// implementation (capacity is respected whether or not the window is hit),
-// and it raises the odds of catching a regression that removes the floored
-// decrement, without being able to guarantee it on any single run.
-//
-// A deterministic reproduction was considered and rejected. The window this
-// races against is entirely inside `gleam_otp`'s own `actor.start`: it
-// registers the restarting actor's name, then runs this module's
-// initialiser, and nothing in `sinal/forwarder` runs between those two
-// steps for a test to hook. The only way to widen the window on demand
-// would be to add a test-only delay inside the initialiser itself (a
-// production code path) purely so a test elsewhere could schedule a
-// concurrent `emit` into it — a permanent seam in shipped code for one
-// test's benefit, which this module avoids. `erlang:suspend_process`
-// cannot substitute for that seam either: there is no way to name the new
-// incarnation's pid until it has already registered, and by then the
-// initialiser is typically already running or done, so suspending it only
-// after the fact narrows nothing. Hammering many concurrent emitters
-// through several forced restarts, as below, is the practical alternative.
+// Smoke-test restarts under concurrent production. A separate synchronized
+// temporary-copy probe covers publication during startup and stale senders.
+// Capacity belongs to the current incarnation, never the diagnostic counter.
 pub fn restart_under_load_never_inflates_capacity_test() {
   let name = process.new_name("forwarder-race")
   let assert Ok(fwd) = forwarder.new(name, 3)

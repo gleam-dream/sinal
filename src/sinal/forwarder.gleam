@@ -30,21 +30,21 @@
 ////   context on the producer is not carried across the hop, and a native
 ////   telemetry span cannot be forwarded (its start and stop must share one
 ////   process to measure duration).
-//// - **Shutdown does not drain.** Messages still in flight when the
-////   forwarder process stops are lost, not delivered. A supervised restart
-////   reports that loss: the leftover in-flight count inherited from the
-////   previous incarnation is read and reset once the new incarnation starts
-////   handling messages, and reported through `dropped_event`.
-//// - **`lost` is an approximate upper bound, not an exact count.** `gleam_otp`
-////   registers a restarting actor's name before its initialiser runs, so a
-////   concurrent `emit` can already resolve to the new incarnation and queue
-////   a real Execute message before that incarnation drains the slot it
-////   inherited; such a message can be counted as `lost` even though it is
-////   still delivered. A kill between a handler finishing and its decrement
-////   running has the same effect. The in-flight counter itself never goes
-////   negative from this (a floored decrement), so it cannot silently raise
-////   capacity — only `lost` can overcount, never the live counter undercount
-////   what is truly in flight.
+//// - **Shutdown does not drain.** Pending events are lost when the process
+////   stops. A restart takes a best-effort snapshot of the shared diagnostic
+////   count and reports it as `lost`. This count is not a delivery receipt:
+////   producers racing termination and handler completion can make it over-
+////   or under-count. It never controls admission.
+//// - **Capacity belongs to one incarnation.** Each running actor owns a
+////   single-row named ETS table pairing its direct subject with fresh slot
+////   counters. It publishes that row only after initialisation. Before that,
+////   producers receive `ForwarderUnavailable`. A delayed producer keeps the
+////   old subject and counters; it cannot enqueue into the replacement actor.
+////   The table disappears automatically when its owner dies. Its name is the
+////   forwarder's process name in the separate ETS namespace; a pre-existing
+////   ETS table of that name makes startup fail with a typed InitFailed error.
+////   Capacity counts queued Execute messages plus the executing handler;
+////   coalesced control messages are additional, bounded bookkeeping.
 //// - **One `Forwarder` per name.** Each call to `new` allocates its own,
 ////   independent counters; constructing two `Forwarder` values for the same
 ////   `process.Name` does not share capacity accounting between them.
@@ -80,7 +80,7 @@
 //// and each report resets exactly the counts it carries:
 ////
 //// - **When an incarnation starts** (first start or supervised restart), it
-////   drains all three counts and reports them as its first message, if any
+////   drains all three counts and schedules a report during initialisation, if any
 ////   is nonzero. Unavailable drops made while it was down arrive here.
 //// - **After a drop while it runs**, the next `ReportDrops` drain reports
 ////   `rejected` and `unavailable` together (`lost` is zero outside a start).
@@ -111,7 +111,7 @@ import sinal/fields.{type FieldEncodeError}
 import sinal/internal/ffi
 
 /// A bounded forwarding target: a process name to dispatch to and the shared
-/// atomics counters tracking in-flight and dropped messages across restarts.
+/// diagnostic counters surviving restarts. Admission belongs to each actor.
 pub opaque type Forwarder {
   Forwarder(name: process.Name(Message), capacity: Int, counters: Counters)
 }
@@ -134,13 +134,13 @@ pub type ForwardError {
   ForwarderUnavailable
 }
 
-/// One drop report. Every count covers the drops since the previous report
-/// of the same `Forwarder`, and no send is counted in two of them.
+/// One best-effort diagnostic report. Refusal counters cover increments
+/// since their preceding drain. `lost` is a snapshot, not exact accounting.
 ///
 /// - `rejected`: sends refused with `CapacityExceeded`.
 /// - `lost`: admitted sends still in flight when the previous incarnation
-///   stopped (zero outside a report made when an incarnation starts; an
-///   approximate upper bound, see the module doc).
+///   stopped (zero outside a report made when an incarnation starts; a
+///   best-effort diagnostic snapshot, see the module doc).
 /// - `unavailable`: sends refused with `ForwarderUnavailable` because no
 ///   incarnation was running. They took no capacity.
 pub type Dropped {
@@ -153,6 +153,23 @@ pub type DroppedMetadata {
 
 type Counters
 
+type Target {
+  Target(subject: process.Subject(Message), slots: Counters)
+}
+
+type Running {
+  Running(forwarder: Forwarder, slots: Counters)
+}
+
+@external(erlang, "sinal_forwarder_ffi", "publish_target")
+fn publish_target(
+  name: process.Name(Message),
+  target: Target,
+) -> Result(Nil, Nil)
+
+@external(erlang, "sinal_forwarder_ffi", "find_target")
+fn find_target(name: process.Name(Message)) -> Result(Target, Nil)
+
 @external(erlang, "sinal_forwarder_ffi", "new_counters")
 fn new_counters() -> Counters
 
@@ -164,9 +181,6 @@ fn exchange(counters: Counters, index: Int, value: Int) -> Int
 
 @external(erlang, "sinal_forwarder_ffi", "decrement_floor")
 fn decrement_floor(counters: Counters, index: Int) -> Int
-
-@external(erlang, "sinal_forwarder_ffi", "try_send")
-fn try_send_thunk(thunk: fn() -> Nil) -> Result(Nil, Nil)
 
 @external(erlang, "sinal_forwarder_ffi", "put_route")
 fn put_route(prefix: List(Atom), forwarder: Forwarder) -> Nil
@@ -198,27 +212,27 @@ pub fn new(
   }
 }
 
-/// Describes the forwarder's process for an OTP supervisor. Restarting under
-/// this specification reuses the same counters, so a fresh incarnation can
-/// report what the previous one lost.
+/// Describes the forwarder's process for an OTP supervisor. Drop diagnostics
+/// survive a restart; admission counters and the direct event subject do not.
 pub fn supervised(forwarder: Forwarder) -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() { start_forwarder(forwarder) })
 }
 
-/// Drains all three counters and, if any held anything, queues the report as
-/// the incarnation's own first message rather than emitting it here. Native
-/// telemetry handlers for `dropped_event` run synchronously and are
-/// arbitrary application code; running them inside the initialiser would
-/// count against the 1000ms initialisation timeout and could fail the whole
-/// restart. Draining now and reporting from `handle_message` keeps the
-/// timeout bounded to the drain itself.
+/// Initialise diagnostics and fresh admission slots before publishing a target.
+/// User handlers run only from handle_message, outside actor initialisation.
 fn start_forwarder(
   forwarder: Forwarder,
 ) -> Result(actor.Started(Nil), actor.StartError) {
   actor.new_with_initialiser(1000, fn(subject) {
+    let slots = new_counters()
+    let events = process.new_subject()
     let lost = exchange(forwarder.counters, in_flight_index, 0)
     let rejected = exchange(forwarder.counters, drop_index, 0)
     let unavailable = exchange(forwarder.counters, unavailable_index, 0)
+    use Nil <- result.try(
+      publish_target(forwarder.name, Target(events, slots))
+      |> result.map_error(fn(_) { "forwarder target table already exists" }),
+    )
     case lost > 0 || rejected > 0 || unavailable > 0 {
       True ->
         process.send(
@@ -227,7 +241,14 @@ fn start_forwarder(
         )
       False -> Nil
     }
-    actor.initialised(forwarder) |> actor.returning(Nil) |> Ok
+    actor.initialised(Running(forwarder, slots))
+    |> actor.selecting(
+      process.new_selector()
+      |> process.select(subject)
+      |> process.select(events),
+    )
+    |> actor.returning(Nil)
+    |> Ok
   })
   |> actor.named(forwarder.name)
   |> actor.on_message(handle_message)
@@ -235,37 +256,30 @@ fn start_forwarder(
 }
 
 fn handle_message(
-  state: Forwarder,
+  state: Running,
   message: Message,
-) -> actor.Next(Forwarder, Message) {
+) -> actor.Next(Running, Message) {
+  let forwarder = state.forwarder
   case message {
     Execute(name, measurements, metadata) -> {
       ffi.telemetry_execute(name, measurements, metadata)
-      let _ = decrement_floor(state.counters, in_flight_index)
+      let _ = decrement_floor(state.slots, in_flight_index)
+      let _ = decrement_floor(forwarder.counters, in_flight_index)
       actor.continue(state)
     }
     ReportDrops -> {
-      let rejected = exchange(state.counters, drop_index, 0)
-      let unavailable = exchange(state.counters, unavailable_index, 0)
-      // Guards against a spurious empty `Dropped(0, 0, 0)`: normally this
-      // message is only ever sent after `report_drop`'s own 0→1 transition
-      // of one of the two slots, so one of them is positive here. The
-      // exceptions are a restart racing this exact send (see the module
-      // doc's registration-before-initialiser note and
-      // `restart_under_load_never_inflates_capacity_test`'s dropped-event
-      // assertion), where a fresh incarnation's own startup drain reads and
-      // resets the slots before a `ReportDrops` sent to the old
-      // incarnation's name is processed by the new one, and a second
-      // `ReportDrops` queued by the other slot's transition in the same
-      // cycle, which finds both slots already drained by the first.
+      let _ = exchange(state.slots, drop_index, 0)
+      let rejected = exchange(forwarder.counters, drop_index, 0)
+      let unavailable = exchange(forwarder.counters, unavailable_index, 0)
       case rejected > 0 || unavailable > 0 {
-        True -> emit_dropped(state, Dropped(rejected:, lost: 0, unavailable:))
+        True ->
+          emit_dropped(forwarder, Dropped(rejected:, lost: 0, unavailable:))
         False -> Nil
       }
       actor.continue(state)
     }
     ReportStartDrops(dropped) -> {
-      emit_dropped(state, dropped)
+      emit_dropped(forwarder, dropped)
       actor.continue(state)
     }
   }
@@ -413,67 +427,44 @@ fn forward(
   raw_measurements: Dynamic,
   raw_metadata: Dynamic,
 ) -> Result(Nil, ForwardError) {
-  let in_flight = add_get(forwarder.counters, in_flight_index, 1)
+  use target <- result.try(
+    find_target(forwarder.name)
+    |> result.map_error(fn(_) {
+      report_drop(forwarder, unavailable_index)
+      ForwarderUnavailable
+    }),
+  )
+  let in_flight = add_get(target.slots, in_flight_index, 1)
   case in_flight > forwarder.capacity {
     True -> {
-      let _ = decrement_floor(forwarder.counters, in_flight_index)
+      let _ = decrement_floor(target.slots, in_flight_index)
       report_drop(forwarder, drop_index)
       Error(CapacityExceeded)
     }
-    False ->
-      case
-        try_send_thunk(fn() {
-          process.send(
-            process.named_subject(forwarder.name),
-            Execute(name, raw_measurements, raw_metadata),
-          )
-        })
-      {
-        Ok(Nil) -> Ok(Nil)
-        Error(Nil) -> {
-          let _ = decrement_floor(forwarder.counters, in_flight_index)
-          report_drop(forwarder, unavailable_index)
-          Error(ForwarderUnavailable)
-        }
-      }
+    False -> {
+      let _ = add_get(forwarder.counters, in_flight_index, 1)
+      process.send(
+        target.subject,
+        Execute(name, raw_measurements, raw_metadata),
+      )
+      Ok(Nil)
+    }
   }
 }
 
-/// Increments a drop slot (`drop_index` or `unavailable_index`) and, only for
-/// the sender whose increment moved it from 0 to 1, notifies the forwarder
-/// once. Concurrent drops within the same drain cycle accumulate on the
-/// counter without sending a second message, so the forwarder reports one
-/// coalesced `dropped_event` per cycle rather than one per drop. This send is
-/// best-effort and uncounted: it never touches the in-flight slot or reports
-/// its own failure.
-///
-/// For an unavailable drop the notification usually fails too (the forwarder
-/// is down), and the count waits in the slot for the next incarnation's start
-/// drain. The notification matters when the send lost a race with a restart:
-/// the name failed to resolve, the new incarnation registered and drained,
-/// and only then did this increment land. It then reaches the new
-/// incarnation, which reports the count instead of holding it until another
-/// drop or restart.
-///
-/// This guard and `handle_message`'s `ReportDrops` recheck both sit between
-/// a drop storm and a duplicate report, but they protect different things:
-/// this one bounds how many `ReportDrops` messages a drop storm ever queues
-/// on the forwarder (`concurrent_drops_queue_single_report_message_test`
-/// reads the mailbox directly to prove it); the receiver-side recheck
-/// guards a single, separate race (see its own comment). Removing either one
-/// alone does not change any emitted `dropped_event`'s content under normal
-/// operation, because the other keeps the emitted stream correct on its
-/// own — the mailbox-length test above is what makes this guard's own
-/// contribution observable.
+/// Increments a drop slot and coalesces one notice per running incarnation.
+/// The flag is cleared before draining counts, so racing drops can schedule the
+/// next notice. The direct subject and flag belong to the same incarnation:
+/// delayed notifications cannot cross a restart or accumulate in its successor.
+/// Without a published target the counters remain for a subsequent drain.
 fn report_drop(forwarder: Forwarder, index: Int) -> Nil {
-  case add_get(forwarder.counters, index, 1) {
-    1 -> {
-      let _ =
-        try_send_thunk(fn() {
-          process.send(process.named_subject(forwarder.name), ReportDrops)
-        })
-      Nil
-    }
-    _ -> Nil
+  let _ = add_get(forwarder.counters, index, 1)
+  case find_target(forwarder.name) {
+    Error(Nil) -> Nil
+    Ok(target) ->
+      case exchange(target.slots, drop_index, 1) {
+        0 -> process.send(target.subject, ReportDrops)
+        _ -> Nil
+      }
   }
 }
