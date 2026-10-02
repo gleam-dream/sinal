@@ -1,4 +1,4 @@
--module(module_docs_ffi).
+-module(sinal_module_docs_ffi).
 -export([public_sources/0]).
 
 %% Every public module's source path, with its text. Modules under
