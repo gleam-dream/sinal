@@ -674,5 +674,9 @@ fields.record({
 |> fields.build
 ```
 
-http_gun replaces `telemetry.Id` as the cross-package key with
-`Correlation` (HTTPGUN-R8) and keeps its per-invocation `request_id`.
+No sibling package carries `Correlation` yet. Each adopts it in its own
+release wave: http_gun in wave 3 (HTTPGUN-R8), when `Correlation` replaces
+`telemetry.Id` as the cross-package key and http_gun keeps its per-invocation
+`request_id`. Until then, an application can use `Correlation` for its own
+events and validate an untrusted id with `correlation.from_string` where the
+id enters the application.
