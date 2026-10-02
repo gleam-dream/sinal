@@ -29,7 +29,7 @@ change.
 | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
 | `sinal.handler_id` (95), `sinal.HandlerId` (2)                                                                                 | Delete; ids are automatic. `with_id` for a stable native id             |
 | `sinal.observe(id, event, run)` (92)                                                                                           | `sinal.observe(event, run)`, returns `Attachment`                       |
-| `fields.pair` (81), `fields.imap` (91)                                                                                         | `fields.record` / `parameter` / `and` / `build`                         |
+| `fields.pair` (81), `fields.imap` (91)                                                                                         | `use x <- fields.include(..)` … `fields.success(..)`                    |
 | `sinal.detach` (72)                                                                                                            | Same call; the error is now `Error(Nil)`                                |
 | `fields.int` / `string` / `bool` / `empty`                                                                                     | Same, with a `String` key                                               |
 | `sinal.emit` (23)                                                                                                              | Same call; returns `Nil`, follows routes                                |
@@ -337,8 +337,9 @@ fields.int("status")
 
 ### `pair`, `imap`
 
-Removed. Use the record builder; only the first getter needs a type
-annotation.
+Removed. Use the record builder (the `use`/`include` form from
+[Follow-up: record builder](#follow-up-record-builder); the first wave 2
+release had `record`/`parameter`/`and`/`build`).
 
 ```gleam
 // Before (http_gun/telemetry.gleam style)
@@ -347,14 +348,9 @@ let assert Ok(p) =
 fields.imap(p, fn(p) { Request(p.0, p.1) }, fn(r: Request) { #(r.method, r.status) })
 
 // After
-fields.record({
-  use method <- fields.parameter
-  use status <- fields.parameter
-  Request(method:, status:)
-})
-|> fields.and(fields.string("method"), fn(r: Request) { r.method })
-|> fields.and(fields.int("status"), fn(r) { r.status })
-|> fields.build
+use method <- fields.include(fields.string("method"), get: fn(r) { r.method })
+use status <- fields.include(fields.int("status"), get: fn(r) { r.status })
+fields.success(Request(method:, status:))
 ```
 
 Nested pairs flatten into one builder:
@@ -366,16 +362,10 @@ let assert Ok(abc) = fields.pair(ab, c_field)
 fields.imap(abc, fn(t) { let #(#(a, b), c) = t  R(a, b, c) }, fn(r: R) { #(#(r.a, r.b), r.c) })
 
 // After
-fields.record({
-  use a <- fields.parameter
-  use b <- fields.parameter
-  use c <- fields.parameter
-  R(a:, b:, c:)
-})
-|> fields.and(a_field, fn(r: R) { r.a })
-|> fields.and(b_field, fn(r) { r.b })
-|> fields.and(c_field, fn(r) { r.c })
-|> fields.build
+use a <- fields.include(a_field, get: fn(r) { r.a })
+use b <- fields.include(b_field, get: fn(r) { r.b })
+use c <- fields.include(c_field, get: fn(r) { r.c })
+fields.success(R(a:, b:, c:))
 ```
 
 A one-field wrapper (`imap` over a single field) becomes a one-field record,
@@ -389,7 +379,7 @@ fields.imap(fields.string(atom.create(name)), Id, fn(id) { id.value })
 fields.field(name, fn(id: Id) { dynamic.string(id.value) }, decode.string |> decode.map(Id))
 ```
 
-A duplicate key panics in `and`; `DuplicateField` is removed.
+A duplicate key panics in `include`; `DuplicateField` is removed.
 
 ### `field`, `FieldDecodeError`, `FieldEncodeError`
 
@@ -697,14 +687,11 @@ work-scoped events add `correlation: Option(Correlation)` to their metadata
 records and encode it with `correlation.field()`:
 
 ```gleam
-fields.record({
-  use route <- fields.parameter
-  use correlation <- fields.parameter
-  RequestMetadata(route:, correlation:)
+use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+use correlation <- fields.include(correlation.field(), get: fn(m) {
+  m.correlation
 })
-|> fields.and(fields.string("route"), fn(m: RequestMetadata) { m.route })
-|> fields.and(correlation.field(), fn(m) { m.correlation })
-|> fields.build
+fields.success(RequestMetadata(route:, correlation:))
 ```
 
 No sibling package carries `Correlation` yet. Each adopts it in its own
@@ -757,7 +744,7 @@ existing `field()` is unchanged.
 pub type TicketMetadata {
   TicketMetadata(ticket: Option(Correlation), queue: String)
 }
-|> fields.and(correlation.field(), fn(m: TicketMetadata) { m.ticket })
+use ticket <- fields.include(correlation.field(), get: fn(m) { m.ticket })
 sinal.emit(event, Nil, TicketMetadata(ticket: Some(id), queue:))
 // ... and at the reader: case m.ticket { Some(id) -> .. None -> Nil }
 
@@ -765,7 +752,9 @@ sinal.emit(event, Nil, TicketMetadata(ticket: Some(id), queue:))
 pub type TicketMetadata {
   TicketMetadata(ticket: Correlation, queue: String)
 }
-|> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
+use ticket <- fields.include(correlation.required_field(), get: fn(m) {
+  m.ticket
+})
 sinal.emit(event, Nil, TicketMetadata(ticket: id, queue:))
 ```
 
@@ -796,3 +785,123 @@ and can switch:
 when the id is too long.
 
 No package under `/code/gleam-dream/*/src` uses `correlation.field()`.
+
+## Follow-up: record builder
+
+The record builder now has the shape of `json/blueprint/codec`'s `field` and
+`success`, so the ecosystem has one builder style. The old builder bound each
+`fields.and` to the next constructor parameter by position: two fields of one
+type listed in another order than the constructor's swapped silently, and the
+first getter needed a type annotation. Now each field binds its value by name
+in a `use` block, and the getter, passed as `get:` after the rest of the
+block, needs no annotation.
+
+| Item                                            | Before                                    | After                                                  |
+| ----------------------------------------------- | ----------------------------------------- | ------------------------------------------------------ |
+| `fields.record`, `fields.parameter`             | `record({ use x <- parameter ... Ctor })` | Removed; the `use` block is the record                 |
+| `fields.and`                                    | `\|> and(field, getter)`                  | `use x <- fields.include(field, get: getter)`          |
+| `fields.build`                                  | `\|> build`                               | `fields.success(Ctor(..))` ends the block              |
+| `fields.Record` (type)                          | `Record(record, constructor)`             | Removed; every step is a `Fields(r)`                   |
+| `fields.include(field, then:, get:)` (new)      |                                           | Adds one field; `field` can be a nested record         |
+| `fields.success(value)` (new)                   |                                           | Ends a record; alone it declares no keys, like `empty` |
+| `fields.empty`, `keys`, `encode`, `decode`, ... |                                           | Unchanged; `empty()` is `success(Nil)`                 |
+
+```gleam
+// Before
+pub fn request_metadata() -> fields.Fields(RequestMetadata) {
+  fields.record({
+    use route <- fields.parameter
+    use correlation <- fields.parameter
+    RequestMetadata(route:, correlation:)
+  })
+  |> fields.and(fields.string("route"), fn(m: RequestMetadata) { m.route })
+  |> fields.and(correlation.field(), fn(m) { m.correlation })
+  |> fields.build
+}
+
+// After
+pub fn request_metadata() -> fields.Fields(RequestMetadata) {
+  use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+  use correlation <- fields.include(correlation.field(), get: fn(m) {
+    m.correlation
+  })
+  fields.success(RequestMetadata(route:, correlation:))
+}
+```
+
+A record in argument or `let` position becomes a block:
+
+```gleam
+// Before
+sinal.event(
+  ["shop", "checkout"],
+  fields.empty(),
+  fields.record({
+    use cart <- fields.parameter
+    Checkout(cart:)
+  })
+    |> fields.and(fields.string("cart"), fn(m: Checkout) { m.cart })
+    |> fields.build,
+)
+
+// After
+sinal.event(["shop", "checkout"], fields.empty(), {
+  use cart <- fields.include(fields.string("cart"), get: fn(m) { m.cart })
+  fields.success(Checkout(cart:))
+})
+```
+
+A one-field record built from a bare constructor
+(`fields.record(Ctor) |> fields.and(field, getter) |> fields.build`) becomes
+`use x <- fields.include(field, get: getter)` and `fields.success(Ctor(x))`.
+A nested record is a field like any other:
+`use context <- fields.include(attempt_context_fields(), get: fn(m) { m.context })`.
+
+**Mechanical rule.** For each `fields.record({ use a <- fields.parameter ...
+BODY }) |> fields.and(F1, G1) ... |> fields.build`, write
+`use a <- fields.include(F1, get: G1)` for the n-th parameter and n-th `and`,
+then `fields.success(BODY)`; wrap the result in `{ }` unless it is already
+the whole body of a function or block, and run `gleam format`. The getter's
+`fn(m: Type)` annotation can go. This keeps today's pairing, so check that
+each `use x` now sits next to the field and getter of `x`; a mismatch there
+was a silent swap before. In the dependents listed below every name already
+matches its getter. A getter passed without its `get:` label fills the
+`then` slot and the call fails to compile, so no site changes meaning
+silently.
+
+**Behaviour.** The wire output is unchanged: the same keys and values, the
+same key order from `fields.keys`, and the same first failing field, in
+declaration order, from `decode`. Changed:
+
+- A key declared twice panics with `sinal/fields.include: key "k" is declared
+twice in one record` (was `sinal/fields.and: ...`), still where the record
+  is defined.
+- The record's keys and encoder are fixed when the record is defined, by
+  running the `use` block once with placeholder values (each field's zero
+  value; `fields.field` runs its decoder against `nil` for it). Keep the block
+  to `include` calls and a `success` constructor, and do not choose a field
+  from a value bound before it. Decoding runs the block again with the
+  decoded values, so decoding a record builds its field codecs once more
+  (about 40 ns per field on OTP 28); encoding and emitting cost what they did.
+
+Dependents (every site fails to compile until migrated; line numbers are the
+`fields.record` calls at the time of the change):
+
+| Package        | Records | File and lines                                                                                                                               |
+| -------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| saga           | 10      | `src/saga/observation.gleam` 177, 186, 200, 215, 240, 249, 267, 305, 345, 368                                                                |
+| grind          | 29      | `src/grind/observation.gleam` (12) 506–696; `src/grind/diagnostic.gleam` (15) 300–558; `src/grind/internal/observation/wire.gleam` 43, 65    |
+| http_gun       | 2       | `src/http_gun/telemetry.gleam` 90, 97                                                                                                        |
+| warden         | 2       | `src/warden/observation.gleam` 49, 58                                                                                                        |
+| llm_wire       | 1       | `src/llm_wire/telemetry.gleam` 39                                                                                                            |
+| relay          | 8       | `src/relay/telemetry.gleam` 51, 66, 81, 101, 108, 125, 135, 150 (three are `fields.record(Ctor)` one-field records)                          |
+| fabric         | 21      | `src/fabric/observation.gleam` 299–821                                                                                                       |
+| oversight apps | 7       | support_desk `events.gleam` 34, 52; secure_mcp `telemetry.gleam` 48, 65; webhooks `telemetry.gleam` 60, 69; research_agent `events.gleam` 43 |
+
+No dependent uses the builder in `test/`, `integrations/` or `consumers/`.
+Prose mentions, not code: `oversight/apps/extractor/FEEDBACK.md`,
+`oversight/apps/webhooks/FEEDBACK.md` and
+`oversight/docs/release-api/sinal.md`. The rule above, applied to clones of
+saga, grind, http_gun, warden, llm_wire, relay and fabric at their current
+heads, and of the four apps against the wave 2 heads, compiles with
+`--warnings-as-errors`, and every test suite passes unchanged.
