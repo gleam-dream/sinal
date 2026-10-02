@@ -2,6 +2,28 @@
 
 ## Unreleased — initial release
 
+### Release API redesign
+
+These changes break the pre-release API. [docs/migration-wave-2.md](docs/migration-wave-2.md) lists every removed or changed item with its replacement.
+
+- **Breaking:** event names and field keys are `String`. Sinal checks each segment and key against `[a-z][a-z0-9_]{0,62}` before it creates the atom, so a value built from input fails at definition instead of growing the atom table. Names must still come from source code.
+- **Breaking:** definitions are total. `sinal.event(name, measurements, metadata)`, `span.define(name, start_metadata:, stop_measurements:, stop_metadata:)`, `fields.optional`, `fields.enum`, the record builder and `forwarder.new` return the value; a definition bug (invalid name or key, empty name, duplicate key, `optional` over other than one key, reserved span key, empty `with_id`, an event listed twice) panics with a message naming it. `EventError`, `IdentityError`, `PrefixError`, `SpanDefinitionError`, `ConfigError` and `InvalidOptionalInner` are removed.
+- **Breaking:** encoding cannot fail. `fields.field(key, encode, decoder)` takes a `fn(a) -> Dynamic` and a `gleam/dynamic/decode` decoder. `FieldError` is `NotAMap | MissingField(key) | InvalidField(key, errors)`. `FieldEncodeError`, `FieldDecodeError`, `EmitError`, `ForwardEncodingFailed`, `SpanOutcome`, `CompletionEncodeError`, `run_span_result` and the panicking `run_span` are removed; `span.run` replaces both runners.
+- **Breaking:** `fields.record`, `fields.parameter`, `fields.and` and `fields.build` replace `fields.pair` and `fields.imap`. Add `fields.float` (which also reads an integer), `fields.enum`, `fields.keys` (replacing `declared_keys` and `declared_native_keys`) and `fields.describe_error`.
+- **Breaking:** one emission path for libraries. `sinal.emit` returns `Nil` and follows forwarder routes; `forwarder.emit_routed` is removed. `forwarder.emit` stays the path for a package that owns its forwarder and returns the closed `Refusal`. Drop reports and spans ignore routes.
+- **Breaking:** handler ids are automatic. `observe(event, run)` returns the `Attachment`. `HandlerId`, `handler_id`, `attach_many`, `with_attachments`, `handler_subscription`, `ScopedCompletion` and `ScopeCleanupFailure` are removed; every registration is a `Subscription` built with `subscription`, `handler(events, run, on_failure)` and `with_id`, and `attach(subscription)` installs one. Handlers attach as the exported `sinal_ffi:handle/4`, so telemetry no longer logs a local-function warning per attachment.
+- **Breaking:** errors keep only what can happen. `AttachError` is `AlreadyExists(id)`; `detach` returns `Result(Nil, Nil)`; a scope reports `AlreadyDetached` or `DetachCrashed(description)` in `CleanupFailure`. Add `describe_attach_error`, `describe_handler_failure`, `describe_cleanup_failure`, `describe_scope_error` and `forwarder.describe_refusal`.
+- **Breaking:** `forwarder.new(name)` holds 1,024 events (`forwarder.default_capacity`); `forwarder.with_capacity` changes it and a value below 1 fails the start with `InitFailed`. `supervised` returns `ChildSpecification(Forwarder)`. Drop counters live in `persistent_term` under the forwarder's name, so every `Forwarder` of one name shares them. Routes take `List(String)` prefixes.
+- **Breaking:** `sinal/span` drops `EventPrefix`, `event_prefix`, `prefix_name`, `prefix_native_name` and the `*_to_dynamic` timing and context helpers; `exception_reason_to_dynamic` and `exception_stacktrace_to_dynamic` become `reason_to_dynamic` and `stacktrace_to_dynamic`. `sinal/exception` is removed.
+- **Breaking:** `sinal.event_name` and `sinal.event_native_name` become `sinal.name(event) -> List(String)`.
+- Add `sinal/correlation`: an opaque `Correlation` of 1 to 128 bytes with `from_string`, `unique` (128 random bits as 32 lowercase hex characters, the shape of a W3C trace id), `to_string`, `field()` (the shared `correlation` metadata key) and `describe_error`. A W3C trace id is a valid correlation. `crypto` joins `extra_applications`.
+- Fix: `attach`, `observe` and `with_subscriptions` start the `telemetry` OTP application when it is not running, instead of exiting the caller with `noproc`; `detach` returns `Error(Nil)` when the application is not running.
+- README: lead with the common path and a defaults table; document names as atoms, correlation, and how an application isolates a library with one supervised forwarder and one route.
+
+### Earlier pre-release changes
+
+The entries below describe the pre-release API that the redesign replaced.
+
 - Add BEAM-only typed events and field codecs backed by native `:telemetry` 1.4.2. Handlers receive decoded measurements and metadata synchronously; malformed input or handler failure follows native failure notification and detachment.
 - Add explicit attachments, same-shaped multi-event attachments, and scoped subscriptions. Subscriptions acquire sequentially, roll back earlier registrations on failure, and report cleanup failures while retaining successful work results. Catchable exceptions are re-raised with their original class, reason, and stacktrace.
 - Add native spans with typed start, stop, and exception descriptors. `run_span_result` retains a completed business result if completion instrumentation cannot be encoded; `run_span` uses a raising policy for encoding failures.
