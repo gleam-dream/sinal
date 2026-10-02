@@ -49,10 +49,11 @@
 ////
 //// ## The telemetry application
 ////
-//// The `telemetry` OTP application must be running before handlers are
-//// attached. `gleam run` and `gleam test` start it. Without it, `attach`,
-//// `observe` and `detach` exit the caller with `noproc`, and `emit`
-//// reaches no handler.
+//// Native `:telemetry` keeps handlers in a process of the `telemetry` OTP
+//// application. `attach`, `observe` and `with_subscriptions` start that
+//// application when it is not running, so a script or a release that
+//// does not list it still delivers. Without it, `emit` reaches no handler
+//// and `detach` returns `Error(Nil)`, because nothing can be attached.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
@@ -214,7 +215,8 @@ pub fn with_id(subscription: Subscription, id: String) -> Subscription {
   }
 }
 
-/// Installs a subscription until `detach`.
+/// Installs a subscription until `detach`. Starts the `telemetry`
+/// application when it is not running.
 pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
   let Subscription(id:, install:) = subscription
   let raw_id = case id {

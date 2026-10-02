@@ -9,7 +9,7 @@ A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead
 sinal = ">= 0.1.0 and < 1.0.0"
 ```
 
-`telemetry` (`>= 1.4.2 and < 2.0.0`) comes with sinal; an application does not declare it. The `telemetry` OTP application must be running before handlers are attached; `gleam run` and `gleam test` start it.
+`telemetry` (`>= 1.4.2 and < 2.0.0`) comes with sinal; an application does not declare it. `attach`, `observe` and `with_subscriptions` start the `telemetry` OTP application when it is not running.
 
 ## The common path
 

@@ -50,15 +50,35 @@ handle(EventName, Measurements, Metadata, Callback) ->
     Callback(EventName, Measurements, Metadata).
 
 telemetry_attach_many(HandlerId, EventNames, Callback) ->
+    ensure_telemetry_started(),
     case telemetry:attach_many(HandlerId, EventNames, fun ?MODULE:handle/4, Callback) of
         ok -> {ok, nil};
         {error, already_exists} -> {error, nil}
     end.
 
+%% The handler table process is registered under its module name. When it is
+%% missing, start the telemetry application (and anything it needs) instead
+%% of letting the attach call exit with noproc.
+ensure_telemetry_started() ->
+    case whereis(telemetry_handler_table) of
+        undefined ->
+            case application:ensure_all_started(telemetry) of
+                {ok, _} -> ok;
+                {error, Reason} -> erlang:error({sinal_telemetry_not_started, Reason})
+            end;
+        _ ->
+            ok
+    end.
+
 telemetry_detach(HandlerId) ->
-    case telemetry:detach(HandlerId) of
-        ok -> {ok, nil};
-        {error, not_found} -> {error, nil}
+    case whereis(telemetry_handler_table) of
+        undefined ->
+            {error, nil};
+        _ ->
+            case telemetry:detach(HandlerId) of
+                ok -> {ok, nil};
+                {error, not_found} -> {error, nil}
+            end
     end.
 
 telemetry_execute(EventName, Measurements, Metadata) ->
