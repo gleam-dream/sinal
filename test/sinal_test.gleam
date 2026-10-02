@@ -65,7 +65,7 @@ pub fn observe_runs_synchronously_and_detaches_test() {
   process.receive(subject, 50) |> should.be_error()
 }
 
-pub fn observe_malformed_native_map_keeps_failure_isolation_test() {
+pub fn observe_malformed_native_map_skips_one_invocation_test() {
   let key = "count"
   let ev_name = ["test", "observe_malformed"]
   let ev = sinal.event(ev_name, fields.int(key), fields.empty())
@@ -89,13 +89,12 @@ pub fn observe_malformed_native_map_keeps_failure_isolation_test() {
     native_map([]),
   )
   process.receive(subject, 50) |> should.be_error()
-  let assert Ok(failure) = process.receive(failure_subject, 100)
-  failure.event_name |> should.equal(["test", "observe_malformed"])
-  is_callback_failure_reason(failure.reason, "malformed_measurements")
-  |> should.equal(True)
-  failure.has_stacktrace |> should.equal(True)
+  // The skipped invocation is not a handler failure to telemetry.
+  process.receive(failure_subject, 50) |> should.be_error()
+  native_emit(ev_name, native_map([#(key, dynamic.int(1))]), native_map([]))
+  process.receive(subject, 100) |> should.equal(Ok(Nil))
   let _ = ffi.telemetry_detach(listener_id)
-  sinal.detach(attachment) |> should.equal(Error(Nil))
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
 pub fn observe_callback_panic_keeps_native_failure_isolation_test() {
@@ -520,7 +519,7 @@ pub fn emitted_maps_carry_exactly_the_encoded_keys_test() {
   let _ = ffi.telemetry_detach(listener_id)
 }
 
-pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test() {
+pub fn malformed_measurements_invokes_failure_observer_and_keeps_handler_test() {
   let key = "int_field"
   let int_field = fields.field(key, dynamic.int, decode.int)
   let ev_name = ["test", "malformed_meas"]
@@ -530,7 +529,11 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
   let on_failure = fn(selected_ev, failure) {
     process.send(failure_subject, #(sinal.name(selected_ev), failure))
   }
-  let handler = fn(_, _, _) { Ok(Nil) }
+  let runs = process.new_subject()
+  let handler = fn(_, _, _) {
+    process.send(runs, Nil)
+    Ok(Nil)
+  }
   let assert Ok(att) =
     sinal.attach(sinal.handler([ev], handler, on_failure) |> sinal.with_id(hid))
 
@@ -558,26 +561,17 @@ pub fn malformed_measurements_invokes_failure_observer_and_removes_handler_test(
     _ -> panic as "expected MalformedMeasurements"
   }
 
-  // Upstream failure event occurred with full contract payload
-  let assert Ok(#(actual_failure_ev_name, rec)) =
-    process.receive(telemetry_failure_subject, 100)
-  actual_failure_ev_name
-  |> should.equal(telemetry_failure_event())
-  rec.has_valid_times |> should.equal(True)
-  rec.event_name |> should.equal(["test", "malformed_meas"])
-  rec.kind |> should.equal("error")
-  is_callback_failure_reason(rec.reason, "malformed_measurements")
-  |> should.equal(True)
-  rec.has_stacktrace |> should.equal(True)
-  term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
-  is_function(rec.handler_config) |> should.equal(True)
+  // Telemetry saw no failing handler, so it removed nothing.
+  process.receive(telemetry_failure_subject, 50) |> should.be_error()
   let _ = ffi.telemetry_detach(listener_id)
 
-  // Handler is detached as consequence of failure
-  sinal.detach(att) |> should.equal(Error(Nil))
+  // The handler stays attached and runs on the next well-formed event.
+  native_emit(ev_name, native_map([#(key, dynamic.int(7))]), native_map([]))
+  process.receive(runs, 100) |> should.equal(Ok(Nil))
+  sinal.detach(att) |> should.equal(Ok(Nil))
 }
 
-pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
+pub fn malformed_metadata_invokes_failure_observer_and_keeps_handler_test() {
   let key = "str_meta"
   let str_field = fields.field(key, dynamic.string, decode.string)
   let ev_name = ["test", "malformed_meta"]
@@ -587,7 +581,11 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
   let on_failure = fn(selected_ev, failure) {
     process.send(failure_subject, #(sinal.name(selected_ev), failure))
   }
-  let handler = fn(_, _, _) { Ok(Nil) }
+  let runs = process.new_subject()
+  let handler = fn(_, _, _) {
+    process.send(runs, Nil)
+    Ok(Nil)
+  }
   let assert Ok(att) =
     sinal.attach(sinal.handler([ev], handler, on_failure) |> sinal.with_id(hid))
 
@@ -614,21 +612,18 @@ pub fn malformed_metadata_invokes_failure_observer_and_removes_handler_test() {
     _ -> panic as "expected MalformedMetadata"
   }
 
-  let assert Ok(#(actual_failure_ev_name, rec)) =
-    process.receive(telemetry_failure_subject, 100)
-  actual_failure_ev_name
-  |> should.equal(telemetry_failure_event())
-  rec.has_valid_times |> should.equal(True)
-  rec.event_name |> should.equal(["test", "malformed_meta"])
-  rec.kind |> should.equal("error")
-  is_callback_failure_reason(rec.reason, "malformed_metadata")
-  |> should.equal(True)
-  rec.has_stacktrace |> should.equal(True)
-  term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
-  is_function(rec.handler_config) |> should.equal(True)
+  // Telemetry saw no failing handler, so it removed nothing.
+  process.receive(telemetry_failure_subject, 50) |> should.be_error()
   let _ = ffi.telemetry_detach(listener_id)
 
-  sinal.detach(att) |> should.equal(Error(Nil))
+  // The handler stays attached and runs on the next well-formed event.
+  native_emit(
+    ev_name,
+    native_map([]),
+    native_map([#(key, dynamic.string("ok"))]),
+  )
+  process.receive(runs, 100) |> should.equal(Ok(Nil))
+  sinal.detach(att) |> should.equal(Ok(Nil))
 }
 
 pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test() {

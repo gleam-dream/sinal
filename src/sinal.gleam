@@ -25,9 +25,12 @@
 //// Handlers run synchronously in the emitting process, unless the
 //// application routed a prefix of the event's name to a forwarder with
 //// `sinal/forwarder.route`: then `emit` hands the event to that forwarder's
-//// process and returns at once. A malformed native map or a failing
-//// handler removes that handler and emits telemetry's standard
-//// `[telemetry, handler, failure]` event; the emitter does not crash.
+//// process and returns at once. The emitter never crashes. A native map
+//// that does not decode skips that one invocation: the handler's failure
+//// observer receives the typed `HandlerFailure` (`observe` logs it), and
+//// the handler stays attached. A handler that returns an error or crashes
+//// is removed, and telemetry emits its standard
+//// `[telemetry, handler, failure]` event.
 ////
 //// ## Registration
 ////
@@ -104,8 +107,20 @@ pub fn name(event: Event(m, d)) -> List(String) {
 /// running, the event is dropped and counted in the forwarder's
 /// `dropped_event`. Handler failures never reach the caller.
 pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
-  let raw_measurements = fields.encode(event.measurements, measurements)
-  let raw_metadata = fields.encode(event.metadata, metadata)
+  let raw_measurements =
+    fields.encode_for_emit(
+      event.measurements,
+      measurements,
+      caller: "sinal.emit",
+      event: fn() { name(event) },
+    )
+  let raw_metadata =
+    fields.encode_for_emit(
+      event.metadata,
+      metadata,
+      caller: "sinal.emit",
+      event: fn() { name(event) },
+    )
   case route.find(event.name) {
     Ok(send) -> send(event.name, raw_measurements, raw_metadata)
     Error(Nil) ->
@@ -148,8 +163,10 @@ pub opaque type Subscription {
 
 /// Attaches an infallible handler to one event and returns its attachment.
 /// The handler runs in the emitting process (or the forwarder's, for a
-/// routed event). A malformed native map or a handler crash removes it and
-/// emits telemetry's `[telemetry, handler, failure]` event.
+/// routed event). A native map that does not decode skips that one
+/// invocation and logs a warning; the handler stays attached. A handler
+/// crash removes it and emits telemetry's `[telemetry, handler, failure]`
+/// event.
 pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
   case attach(subscription(event, run)) {
     Ok(attachment) -> attachment
@@ -158,7 +175,9 @@ pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
   }
 }
 
-/// Describes an infallible handler of one event.
+/// Describes an infallible handler of one event. When a native map does
+/// not decode, the handler skips that one invocation, stays attached, and
+/// logs a warning that names the event and the `HandlerFailure`.
 pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
   handler(
     [event],
@@ -166,14 +185,27 @@ pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
       run(measurements, metadata)
       Ok(Nil)
     },
-    fn(_event, _failure) { Nil },
+    fn(event, failure) {
+      ffi.log_warning(
+        "sinal.observe: skipped one invocation of event "
+        <> string.inspect(name(event))
+        <> ": "
+        <> describe_handler_failure(failure, fn(_) { "" }),
+      )
+    },
   )
 }
 
 /// Describes one handler of several same-shaped events. `run` receives the
-/// event that fired. When a native map does not decode, or `run` returns
-/// an error, `on_failure` receives the typed failure, and telemetry then
-/// removes the handler and emits `[telemetry, handler, failure]`.
+/// event that fired.
+///
+/// - When a native map does not decode, `on_failure` receives
+///   `MalformedMeasurements` or `MalformedMetadata`, `run` is skipped for
+///   that one event, and the handler stays attached.
+/// - When `run` returns an error, `on_failure` receives `HandlerReturned`,
+///   and telemetry then removes the handler and emits
+///   `[telemetry, handler, failure]`. So does a crash in `run` or in
+///   `on_failure`.
 ///
 /// Panics when `events` is empty or names one event twice.
 pub fn handler(
@@ -405,17 +437,13 @@ fn dispatch(
   case list.find(events, fn(event) { event.name == event_name }) {
     Error(Nil) -> ffi.raise_callback_failure("unrecognized_event_descriptor")
     Ok(event) ->
+      // A decode failure skips this one invocation. Raising would make
+      // telemetry detach the handler for good, losing every later event.
       case fields.decode(event.measurements, raw_measurements) {
-        Error(error) -> {
-          on_failure(event, MalformedMeasurements(error))
-          ffi.raise_callback_failure("malformed_measurements")
-        }
+        Error(error) -> on_failure(event, MalformedMeasurements(error))
         Ok(measurements) ->
           case fields.decode(event.metadata, raw_metadata) {
-            Error(error) -> {
-              on_failure(event, MalformedMetadata(error))
-              ffi.raise_callback_failure("malformed_metadata")
-            }
+            Error(error) -> on_failure(event, MalformedMetadata(error))
             Ok(metadata) ->
               case run(event, measurements, metadata) {
                 Ok(Nil) -> Nil

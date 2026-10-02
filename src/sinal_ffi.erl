@@ -16,7 +16,8 @@
     unique_handler_id/0,
     unique_correlation/0,
     event_parts/1,
-    identity/1
+    identity/1,
+    log_warning/1
 ]).
 
 identity(X) ->
@@ -83,7 +84,8 @@ telemetry_detach(HandlerId) ->
     end.
 
 telemetry_execute(EventName, Measurements, Metadata) ->
-    telemetry:execute(EventName, Measurements, Metadata).
+    telemetry:execute(EventName, Measurements, Metadata),
+    nil.
 
 raise_callback_failure(Reason) ->
     erlang:error({sinal_callback_failure, Reason}).
@@ -108,3 +110,7 @@ unique_correlation() ->
 %% an event without going through `sinal.emit`'s routes.
 event_parts({event, Name, Measurements, Metadata}) ->
     {Name, Measurements, Metadata}.
+
+log_warning(Message) ->
+    logger:warning("~ts", [Message], #{domain => [sinal]}),
+    nil.

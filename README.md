@@ -33,7 +33,7 @@ pub fn observe_request_example() {
 }
 ```
 
-`sinal.event` takes the native event name and one codec for the measurements and one for the metadata. `observe` attaches a handler with a fresh handler id and returns its `Attachment`. `emit` encodes the values and runs every attached handler in the caller before it returns. A malformed native map or a crashing handler removes that handler and emits telemetry's `[telemetry, handler, failure]` event; it never crashes the emitter.
+`sinal.event` takes the native event name and one codec for the measurements and one for the metadata. `observe` attaches a handler with a fresh handler id and returns its `Attachment`. `emit` encodes the values and runs every attached handler in the caller before it returns. Nothing a handler does crashes the emitter. A native map that does not decode skips that one invocation and leaves the handler attached; `observe` logs a warning that names the event and the field. A crashing handler is removed, and telemetry emits its `[telemetry, handler, failure]` event.
 
 ## Defaults
 
@@ -51,6 +51,7 @@ pub fn observe_request_example() {
 | Event names and field keys                 | Atoms; each segment must match `[a-z][a-z0-9_]{0,62}`; a definition that breaks it panics               |
 | Correlation size                           | 1 to 128 bytes, checked by `correlation.from_string` and when the field decodes                         |
 | Decoding a native map                      | Reads declared keys only; other keys are ignored; no size bound                                         |
+| A native map that does not decode          | Skips that one invocation; the handler stays attached; `on_failure` gets it, `observe` logs a warning   |
 
 Synchronous dispatch is the only unbounded default, and sinal cannot bound it: native telemetry runs handlers inline. An application bounds it by routing a library's events to a forwarder (see [Isolating a library's events](#isolating-a-librarys-events)).
 
@@ -117,7 +118,9 @@ fn method_name(method: Method) -> String {
 }
 ```
 
-Only the first getter needs a type annotation, because the record type is not known until `build`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
+Only the first getter needs a type annotation, because the record type is not known until `build`.
+
+The compiler checks that `method_name` covers every `Method`, but not that the list `[Get, Post]` does. A constructor missing from the list compiles; when it is emitted, the emit call logs a warning naming the event and the value, and every sinal handler of the event reports `MalformedMetadata`, skips that event and stays attached. Keep the list next to the type, and test that each constructor round-trips through `fields.encode` and `fields.decode`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
 
 ## Correlation
 
@@ -155,7 +158,7 @@ pub fn checkout(cart: String, request_id: String) -> Nil {
 }
 ```
 
-Any application id works, and `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation. `correlation.field()` omits the key for `None`, and an Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary. A package with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
+Any application id of 1 to 128 bytes works; `from_string` returns `CorrelationTooLong` for a longer one, and `correlation.field()` refuses to decode one. Derive a longer id, such as one joined from publisher input, into a stable value that fits: a SHA-256 digest from `gleam_crypto` is 64 hexadecimal characters (see [the migration guide](docs/migration-wave-2.md#sinalcorrelation-new) for a snippet). `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation. `correlation.field()` omits the key for `None`, and an Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary. A package with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
 
 ## Handlers
 
@@ -175,8 +178,8 @@ pub fn attach_metrics(
         }
       },
       fn(_event, failure) {
-        // A malformed native map or an `Error` from the handler; telemetry
-        // then removes the handler.
+        // A malformed native map skips this one event and keeps the
+        // handler; after an `Error` from the handler, telemetry removes it.
         let _ = sinal.describe_handler_failure(failure, fn(e) { e })
         Nil
       },
@@ -188,9 +191,10 @@ pub fn attach_metrics(
 ```
 
 - `sinal.subscription(event, run)` is the `Subscription` form of `observe`.
-- `sinal.handler(events, run, on_failure)` registers one handler for several events of the same shape. `run` receives the event that fired and may return an error. `on_failure` receives a `HandlerFailure`: `MalformedMeasurements`, `MalformedMetadata` or `HandlerReturned`. Telemetry then removes the handler and emits `[telemetry, handler, failure]`.
+- `sinal.handler(events, run, on_failure)` registers one handler for several events of the same shape. `run` receives the event that fired and may return an error. `on_failure` receives a `HandlerFailure`. After `MalformedMeasurements` or `MalformedMetadata`, the handler skips that one event and stays attached. After `HandlerReturned`, or a crash, telemetry removes the handler and emits `[telemetry, handler, failure]`.
+- `sinal.subscription` and `observe` have no `on_failure`: they log a warning for a malformed native map, skip the event and stay attached.
 - `sinal.with_id(subscription, id)` replaces the fresh handler id with a stable binary id, so Erlang or Elixir code can detach it. `attach` returns `AlreadyExists(id)` while another handler holds the id.
-- `detach` returns `Error(Nil)` when the handler was no longer attached, for example because telemetry removed it after a failure.
+- `detach` returns `Error(Nil)` when the handler was no longer attached, for example because telemetry removed it after it crashed or returned an error.
 
 ## Scoped subscriptions
 

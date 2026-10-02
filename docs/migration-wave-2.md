@@ -301,6 +301,26 @@ Error(sinal.AlreadyExists("my-id"))
   application when it is not running. Applications that started it by hand
   (sso_portal) may keep or drop that call.
 
+### Decode failures keep the handler attached
+
+A native map that does not decode no longer detaches the handler. Before,
+`dispatch` called `on_failure` and then raised, so telemetry removed the
+handler for good and emitted `[telemetry, handler, failure]`; one bad event
+silenced every later event of that kind for that subscriber. Now the handler
+skips that one invocation and stays attached, in `observe`, `attach`,
+`with_subscriptions`, forwarder deliveries and span events alike:
+
+- `handler(events, run, on_failure)`: `on_failure` still receives
+  `MalformedMeasurements` or `MalformedMetadata`; telemetry no longer emits
+  `[telemetry, handler, failure]` for it.
+- `observe` and `subscription`: a `[sinal]`-domain warning names the event
+  and the field.
+- `HandlerReturned` and a crash in `run` or `on_failure` still remove the
+  handler, as before.
+
+Code that waited for a decode failure to detach a handler, or that expected
+`detach` to return `Error(Nil)` afterwards, now sees `Ok(Nil)`.
+
 ## `sinal/fields`
 
 ### Keys
@@ -483,6 +503,19 @@ let raw = fields.encode(codec, value)
 ### `declared_keys`, `declared_native_keys`
 
 Replaced by `keys(fields) -> List(String)`.
+
+### `enum` values missing from the list
+
+`enum(key, values, name)` cannot check `values` against the type: the
+compiler sees that `name` covers every constructor, not that the list does.
+A constructor missing from the list compiles and still encodes its name.
+`sinal.emit`, `forwarder.emit` and `span.run` then log a `[sinal]`-domain
+warning in the emitting process that names the event and the value, and
+every sinal handler of the event reports `MalformedMetadata` (or
+`MalformedMeasurements`), skips that event and stays attached. Before this
+fix the first such event detached every typed handler of the event. The
+signature is unchanged; keep the list next to the type and test that each
+constructor round-trips.
 
 ### New in `sinal/fields`
 
@@ -680,3 +713,33 @@ release wave: http_gun in wave 3 (HTTPGUN-R8), when `Correlation` replaces
 `request_id`. Until then, an application can use `Correlation` for its own
 events and validate an untrusted id with `correlation.from_string` where the
 id enters the application.
+
+`from_string` returns `CorrelationTooLong(bytes:, max_bytes: 128)` for an id
+over 128 bytes, and `correlation.field()` refuses to decode one. An id
+derived from input, such as `event_id <> ":" <> subscription_id`, can exceed
+it. Do not emit `None` for such work: derive a stable value that fits. A
+SHA-256 digest is 64 hexadecimal characters, and the same id always gives
+the same digest. With `gleam_crypto` in the application's dependencies
+(sinal does not depend on it):
+
+```gleam
+import gleam/bit_array
+import gleam/crypto
+import gleam/string
+import sinal/correlation.{type Correlation}
+
+/// The id itself when it fits, otherwise its SHA-256 digest as 64 lowercase
+/// hexadecimal characters. The same id always gives the same correlation.
+pub fn correlation_for(
+  id: String,
+) -> Result(Correlation, correlation.CorrelationError) {
+  case correlation.from_string(id) {
+    Error(correlation.CorrelationTooLong(..)) ->
+      crypto.hash(crypto.Sha256, bit_array.from_string(id))
+      |> bit_array.base16_encode
+      |> string.lowercase
+      |> correlation.from_string
+    result -> result
+  }
+}
+```

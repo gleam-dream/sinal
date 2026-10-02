@@ -355,8 +355,18 @@ pub fn emit(
   forward(
     forwarder,
     name,
-    fields.encode(measurement_fields, measurements),
-    fields.encode(metadata_fields, metadata),
+    fields.encode_for_emit(
+      measurement_fields,
+      measurements,
+      caller: "sinal/forwarder.emit",
+      event: fn() { list.map(name, atom.to_string) },
+    ),
+    fields.encode_for_emit(
+      metadata_fields,
+      metadata,
+      caller: "sinal/forwarder.emit",
+      event: fn() { list.map(name, atom.to_string) },
+    ),
   )
 }
 

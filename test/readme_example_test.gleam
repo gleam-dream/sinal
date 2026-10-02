@@ -97,8 +97,8 @@ pub fn attach_metrics(
         }
       },
       fn(_event, failure) {
-        // A malformed native map or an `Error` from the handler; telemetry
-        // then removes the handler.
+        // A malformed native map skips this one event and keeps the
+        // handler; after an `Error` from the handler, telemetry removes it.
         let _ = sinal.describe_handler_failure(failure, fn(e) { e })
         Nil
       },

@@ -44,7 +44,9 @@
 ////
 //// Decoding reads only the declared keys and ignores any others in the map.
 //// It fails with a `FieldError` when the term is not a map, a required key
-//// is missing, or a value does not decode. Encoding cannot fail.
+//// is missing, or a value does not decode. Encoding cannot fail; an `enum`
+//// value missing from its list is reported when it is emitted (see
+//// `enum`).
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
@@ -73,18 +75,24 @@ pub opaque type Fields(a) {
     keys: List(Atom),
     put: fn(a, Dynamic) -> Dynamic,
     decode: fn(Dynamic) -> Result(a, FieldError),
+    check: Option(fn(a) -> Result(Nil, FieldError)),
   )
 }
 
 /// Declares no keys. It decodes any map as `Nil` and rejects a term that is
 /// not a map.
 pub fn empty() -> Fields(Nil) {
-  Fields(keys: [], put: fn(_, map) { map }, decode: fn(raw) {
-    case ffi.is_map(raw) {
-      True -> Ok(Nil)
-      False -> Error(NotAMap)
-    }
-  })
+  Fields(
+    keys: [],
+    put: fn(_, map) { map },
+    decode: fn(raw) {
+      case ffi.is_map(raw) {
+        True -> Ok(Nil)
+        False -> Error(NotAMap)
+      }
+    },
+    check: None,
+  )
 }
 
 /// Declares one key whose value is written by `encode` and read by
@@ -132,6 +140,17 @@ pub fn bool(key: String) -> Fields(Bool) {
 /// `name(value)`. Decoding accepts that binary, or an atom with the same
 /// text, and fails on any other name.
 ///
+/// The compiler checks that `name` covers every constructor, but it cannot
+/// check `values`: a constructor missing from the list compiles. Encoding
+/// still writes its name, and every emit path (`sinal.emit`,
+/// `forwarder.emit`, `span.run`) logs a warning in the emitting process
+/// that names the event and the value. Every sinal handler of the event
+/// then fails to decode it, reports `MalformedMetadata` (or
+/// `MalformedMeasurements`) to its failure observer, skips that one
+/// invocation and stays attached. The event is lost to typed handlers
+/// until the list is fixed, so keep `values` next to the type and add a
+/// test that emits each constructor.
+///
 /// ```gleam
 /// pub type Method {
 ///   Get
@@ -168,6 +187,22 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
     Error(Nil) -> Nil
   }
   let expected = "one of " <> string.join(names, ", ")
+  let check = fn(value) {
+    let found = name(value)
+    case list.contains(names, found) {
+      True -> Ok(Nil)
+      False ->
+        Error(
+          InvalidField(key, [
+            decode.DecodeError(
+              expected:,
+              found: string.inspect(found),
+              path: [],
+            ),
+          ]),
+        )
+    }
+  }
   let decoder =
     decode.one_of(decode.string, [atom.decoder() |> decode.map(atom.to_string)])
     |> decode.then(fn(found) {
@@ -176,11 +211,14 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
         Error(Nil) -> decode.failure(first, expected)
       }
     })
-  single(
-    key,
-    "sinal/fields.enum",
-    fn(value) { dynamic.string(name(value)) },
-    decoder,
+  Fields(
+    ..single(
+      key,
+      "sinal/fields.enum",
+      fn(value) { dynamic.string(name(value)) },
+      decoder,
+    ),
+    check: Some(check),
   )
 }
 
@@ -225,6 +263,14 @@ pub fn optional(inner: Fields(a)) -> Fields(Option(a)) {
           }
       }
     },
+    check: option.map(inner.check, fn(check) {
+      fn(value) {
+        case value {
+          None -> Ok(Nil)
+          Some(actual) -> check(actual)
+        }
+      }
+    }),
   )
 }
 
@@ -235,18 +281,24 @@ pub opaque type Record(record, constructor) {
     keys: List(Atom),
     puts: List(fn(record, Dynamic) -> Dynamic),
     decode: fn(Dynamic) -> Result(constructor, FieldError),
+    checks: List(fn(record) -> Result(Nil, FieldError)),
   )
 }
 
 /// Starts a record codec from a curried constructor, usually written with
 /// `use x <- fields.parameter` for each field.
 pub fn record(constructor: constructor) -> Record(record, constructor) {
-  Record(keys: [], puts: [], decode: fn(raw) {
-    case ffi.is_map(raw) {
-      True -> Ok(constructor)
-      False -> Error(NotAMap)
-    }
-  })
+  Record(
+    keys: [],
+    puts: [],
+    decode: fn(raw) {
+      case ffi.is_map(raw) {
+        True -> Ok(constructor)
+        False -> Error(NotAMap)
+      }
+    },
+    checks: [],
+  )
 }
 
 /// Turns the rest of a `use` block into one parameter of a curried record
@@ -288,6 +340,10 @@ pub fn and(
           }
       }
     },
+    checks: case field.check {
+      None -> record.checks
+      Some(check) -> [fn(value) { check(get(value)) }, ..record.checks]
+    },
   )
 }
 
@@ -300,6 +356,11 @@ pub fn build(record: Record(record, record)) -> Fields(record) {
       list.fold(puts, map, fn(map, put) { put(value, map) })
     },
     decode: record.decode,
+    check: case list.reverse(record.checks) {
+      [] -> None
+      checks ->
+        Some(fn(value) { list.try_each(checks, fn(check) { check(value) }) })
+    },
   )
 }
 
@@ -310,7 +371,39 @@ pub fn keys(fields: Fields(a)) -> List(String) {
 
 /// Encodes `value` into the native map that `sinal.emit` would send. Use it
 /// to pin a package's wire format in tests or to hand a map to Erlang code.
+/// It writes an `enum` value missing from its list without complaint; the
+/// emit paths report it.
 pub fn encode(fields: Fields(a), value: a) -> Dynamic {
+  fields.put(value, ffi.empty_map())
+}
+
+/// Encodes `value` for an emit path. When an `enum` value is missing from
+/// its list, it logs a warning that names `caller` and the event (`event`
+/// runs only then), and still writes the name, so Erlang and Elixir
+/// handlers receive it.
+@internal
+pub fn encode_for_emit(
+  fields: Fields(a),
+  value: a,
+  caller caller: String,
+  event event: fn() -> List(String),
+) -> Dynamic {
+  case fields.check {
+    None -> Nil
+    Some(check) ->
+      case check(value) {
+        Ok(Nil) -> Nil
+        Error(error) ->
+          ffi.log_warning(
+            caller
+            <> ": event "
+            <> string.inspect(event())
+            <> " carries a value that its fields.enum list does not name ("
+            <> describe_error(error)
+            <> "); every sinal handler of the event will skip it as malformed",
+          )
+      }
+  }
   fields.put(value, ffi.empty_map())
 }
 
@@ -350,6 +443,7 @@ fn single(
 ) -> Fields(a) {
   let native_key = grammar.to_atom(key, caller:, what: "key")
   Fields(
+    check: None,
     keys: [native_key],
     put: fn(value, map) { ffi.map_put(map, native_key, encode(value)) },
     decode: fn(raw) {

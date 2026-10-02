@@ -71,6 +71,12 @@ pub type CorrelationError {
 }
 
 /// Accepts `value` as a correlation when it has 1 to 128 bytes.
+///
+/// An application id can be longer, for example one joined from publisher
+/// input. Derive a stable value that fits instead of dropping the
+/// correlation: the lowercase hexadecimal SHA-256 digest of the id (64
+/// characters, from `gleam_crypto`'s `crypto.hash(crypto.Sha256, ..)`)
+/// maps the same id to the same correlation.
 pub fn from_string(value: String) -> Result(Correlation, CorrelationError) {
   let bytes = string.byte_size(value)
   case bytes {

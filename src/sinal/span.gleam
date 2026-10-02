@@ -265,13 +265,28 @@ pub fn run(
 ) -> a {
   ffi.telemetry_span(
     list.map(span.name, atom.create),
-    fields.encode(span.start_metadata, start_metadata),
+    fields.encode_for_emit(
+      span.start_metadata,
+      start_metadata,
+      caller: "sinal/span.run",
+      event: fn() { list.append(span.name, ["start"]) },
+    ),
     fn() {
       let Completion(result:, measurements:, metadata:) = work()
       #(
         result,
-        fields.encode(span.stop_measurements, measurements),
-        fields.encode(span.stop_metadata, metadata),
+        fields.encode_for_emit(
+          span.stop_measurements,
+          measurements,
+          caller: "sinal/span.run",
+          event: fn() { list.append(span.name, ["stop"]) },
+        ),
+        fields.encode_for_emit(
+          span.stop_metadata,
+          metadata,
+          caller: "sinal/span.run",
+          event: fn() { list.append(span.name, ["stop"]) },
+        ),
       )
     },
   )

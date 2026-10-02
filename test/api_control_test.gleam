@@ -262,7 +262,8 @@ pub fn malformed_native_span_timing_reaches_typed_failure_test() {
     sinal.MalformedMeasurements(fields.InvalidField("system_time", _)) -> Nil
     _ -> panic as "expected rejected system_time"
   }
-  sinal.detach(attachment) |> should.equal(Error(Nil))
+  // A decode failure skips one invocation; the handler stays attached.
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
 pub fn span_duration_conversion_is_explicit_test() {
