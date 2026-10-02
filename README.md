@@ -2,13 +2,13 @@
 
 A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead of dynamic maps and atoms.
 
-`sinal` wraps native BEAM `:telemetry` 1.4.2 directly. It replaces untyped string/atom map lookups with type-safe generic codecs (`Fields(t)`), structured event descriptors (`Event(m, d)`), and typed span execution. Typed encoding and decoding execute directly at the callback boundary; the included microbenchmarks establish an empirical performance baseline.
+`sinal` wraps native BEAM `:telemetry` (1.4.2 or a later 1.x) directly. It replaces untyped string/atom map lookups with type-safe generic codecs (`Fields(t)`), structured event descriptors (`Event(m, d)`), and typed span execution. Typed encoding and decoding execute directly at the callback boundary; the included microbenchmarks establish an empirical performance baseline.
 
 ---
 
 ## Getting Started
 
-The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` 1.4.2 is a direct dependency; applications do not need to declare it separately. The dependency declaration below is for the planned initial release:
+The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` (`>= 1.4.2 and < 2.0.0`) is a direct dependency; applications do not need to declare it separately, and an Elixir or Erlang application can share any 1.x release from 1.4.2. `sinal` uses only telemetry's documented API. The dependency declaration below is for the planned initial release:
 
 ```toml
 [dependencies]
