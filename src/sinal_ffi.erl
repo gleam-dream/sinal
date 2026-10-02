@@ -14,6 +14,7 @@
     telemetry_span/3,
     convert_native_time/2,
     unique_handler_id/0,
+    unique_correlation/0,
     event_parts/1,
     identity/1
 ]).
@@ -94,6 +95,14 @@ convert_native_time(Value, Unit) -> erlang:convert_time_unit(Value, native, Unit
 
 unique_handler_id() ->
     {sinal_handler, erlang:unique_integer([positive])}.
+
+%% 128 random bits as 32 lowercase hex characters: the shape of a W3C trace
+%% id. All zeros is not a valid trace id, so it is redrawn.
+unique_correlation() ->
+    case crypto:strong_rand_bytes(16) of
+        <<0:128>> -> unique_correlation();
+        Bytes -> binary:encode_hex(Bytes, lowercase)
+    end.
 
 %% The name and codecs of a `sinal.Event`, for the forwarder, which encodes
 %% an event without going through `sinal.emit`'s routes.

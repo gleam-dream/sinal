@@ -1,10 +1,12 @@
 import gleam/bit_array
 import gleam/erlang/process
 import gleam/list
+import gleam/option.{type Option, Some}
 import gleam/otp/static_supervisor
 import gleam/string
 import gleeunit/should
 import sinal
+import sinal/correlation.{type Correlation}
 import sinal/fields
 import sinal/forwarder
 import sinal/span
@@ -165,6 +167,38 @@ pub fn emit_owned(
   }
 }
 
+// --- Snippet 7: Correlation ---
+
+pub type CheckoutMetadata {
+  CheckoutMetadata(cart: String, correlation: Option(Correlation))
+}
+
+pub fn checkout_event() -> sinal.Event(Nil, CheckoutMetadata) {
+  let metadata =
+    fields.record({
+      use cart <- fields.parameter
+      use correlation <- fields.parameter
+      CheckoutMetadata(cart:, correlation:)
+    })
+    |> fields.and(fields.string("cart"), fn(m: CheckoutMetadata) { m.cart })
+    |> fields.and(correlation.field(), fn(m) { m.correlation })
+    |> fields.build
+  sinal.event(["shop", "checkout"], fields.empty(), metadata)
+}
+
+pub fn checkout(cart: String, request_id: String) -> Nil {
+  // An id from an untrusted header: `from_string` bounds it to 128 bytes.
+  let correlation = case correlation.from_string(request_id) {
+    Ok(id) -> id
+    Error(_) -> correlation.unique()
+  }
+  sinal.emit(
+    checkout_event(),
+    Nil,
+    CheckoutMetadata(cart:, correlation: Some(correlation)),
+  )
+}
+
 // --- Runnable tests ---
 
 pub fn readme_common_path_test() {
@@ -261,7 +295,7 @@ pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(7)
+  list.length(snippets) |> should.equal(8)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)
@@ -301,3 +335,19 @@ fn extract_snippets_loop(remaining: String, acc: List(String)) -> List(String) {
 
 @external(erlang, "scope_test_ffi", "read_file")
 fn read_file(path: String) -> Result(BitArray, String)
+
+pub fn readme_correlation_test() {
+  let event = checkout_event()
+  let seen = process.new_subject()
+  let attachment =
+    sinal.observe(event, fn(_, metadata) { process.send(seen, metadata) })
+  checkout("cart-1", "req-77")
+  let assert Ok(CheckoutMetadata("cart-1", Some(id))) =
+    process.receive(seen, 100)
+  correlation.to_string(id) |> should.equal("req-77")
+  checkout("cart-2", "")
+  let assert Ok(CheckoutMetadata("cart-2", Some(fresh))) =
+    process.receive(seen, 100)
+  string.length(correlation.to_string(fresh)) |> should.equal(32)
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+}

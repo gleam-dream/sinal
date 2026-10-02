@@ -49,6 +49,7 @@ pub fn observe_request_example() {
 | `attach` / `observe` / `detach`            | A `gen_server` call to native telemetry with its default 5,000 ms timeout                               |
 | Handler ids                                | Fresh for every attachment; `with_id` sets a stable one                                                 |
 | Event names and field keys                 | Atoms; each segment must match `[a-z][a-z0-9_]{0,62}`; a definition that breaks it panics               |
+| Correlation size                           | 1 to 128 bytes, checked by `correlation.from_string` and when the field decodes                         |
 | Decoding a native map                      | Reads declared keys only; other keys are ignored; no size bound                                         |
 
 Synchronous dispatch is the only unbounded default, and sinal cannot bound it: native telemetry runs handlers inline. An application bounds it by routing a library's events to a forwarder (see [Isolating a library's events](#isolating-a-librarys-events)).
@@ -117,6 +118,44 @@ fn method_name(method: Method) -> String {
 ```
 
 Only the first getter needs a type annotation, because the record type is not known until `build`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
+
+## Correlation
+
+`sinal/correlation` defines the value that follows one unit of work across packages: an opaque string of 1 to 128 bytes, carried as the `correlation` key of event metadata.
+
+```gleam
+pub type CheckoutMetadata {
+  CheckoutMetadata(cart: String, correlation: Option(Correlation))
+}
+
+pub fn checkout_event() -> sinal.Event(Nil, CheckoutMetadata) {
+  let metadata =
+    fields.record({
+      use cart <- fields.parameter
+      use correlation <- fields.parameter
+      CheckoutMetadata(cart:, correlation:)
+    })
+    |> fields.and(fields.string("cart"), fn(m: CheckoutMetadata) { m.cart })
+    |> fields.and(correlation.field(), fn(m) { m.correlation })
+    |> fields.build
+  sinal.event(["shop", "checkout"], fields.empty(), metadata)
+}
+
+pub fn checkout(cart: String, request_id: String) -> Nil {
+  // An id from an untrusted header: `from_string` bounds it to 128 bytes.
+  let correlation = case correlation.from_string(request_id) {
+    Ok(id) -> id
+    Error(_) -> correlation.unique()
+  }
+  sinal.emit(
+    checkout_event(),
+    Nil,
+    CheckoutMetadata(cart:, correlation: Some(correlation)),
+  )
+}
+```
+
+Any application id works, and `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation. `correlation.field()` omits the key for `None`, and an Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary. A package with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
 
 ## Handlers
 
