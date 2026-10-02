@@ -1,8 +1,7 @@
-import gleam/dynamic
-import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
+import gleam/otp/actor
 import gleam/otp/supervision
 import gleeunit/should
 import sinal
@@ -30,20 +29,15 @@ fn message_queue_len(pid: process.Pid) -> Int
 // forwarder's.
 pub fn handler_executes_in_forwarder_process_not_caller_test() {
   let name = process.new_name("forwarder-self-pid")
-  let assert Ok(fwd) = forwarder.new(name, 4)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(4)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("self_pid")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(hid) = sinal.handler_id("forwarder-self-pid-handler")
+  let ev =
+    sinal.event(["forwarder_test", "self_pid"], fields.empty(), fields.empty())
   let subject = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(hid, ev, fn(_, _) { process.send(subject, process.self()) })
+  let _attachment =
+    sinal.observe(ev, fn(_, _) { process.send(subject, process.self()) })
 
   forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
   let assert Ok(handler_pid) = process.receive(subject, 200)
@@ -85,11 +79,11 @@ pub fn decrement_floor_never_goes_negative_test() {
 // healthy.
 pub fn emit_before_start_reports_unavailable_then_rolls_back_test() {
   let name = process.new_name("forwarder-unavailable")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
 
-  let assert Ok(ev) =
+  let ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("unavailable")],
+      ["forwarder_test", "unavailable"],
       fields.empty(),
       fields.empty(),
     )
@@ -113,10 +107,8 @@ pub fn emit_before_start_reports_unavailable_then_rolls_back_test() {
   )
   process.receive(dropped.1, 100) |> should.be_error()
   let assert Ok(Nil) = sinal.detach(dropped.0)
-  let assert Ok(hid) = sinal.handler_id("forwarder-unavailable-handler")
   let subject = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(hid, ev, fn(_, _) { process.send(subject, Nil) })
+  let _attachment = sinal.observe(ev, fn(_, _) { process.send(subject, Nil) })
   forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
   process.receive(subject, 200) |> should.equal(Ok(Nil))
 }
@@ -129,17 +121,12 @@ pub fn emit_before_start_reports_unavailable_then_rolls_back_test() {
 // test process until the test runner's own timeout fails it.
 pub fn emit_returns_before_blocked_handler_releases_test() {
   let name = process.new_name("forwarder-gate")
-  let assert Ok(fwd) = forwarder.new(name, 4)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(4)
   let spec = forwarder.supervised(fwd)
   let assert Ok(_started) = spec.start()
 
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("gate")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(hid) = sinal.handler_id("forwarder-gate-handler")
+  let ev =
+    sinal.event(["forwarder_test", "gate"], fields.empty(), fields.empty())
   // The gate must be a subject owned by the forwarder process (the process
   // that will call `receive` on it), not the test process: `process.receive`
   // only ever finds messages in the calling process's own mailbox, and
@@ -148,8 +135,8 @@ pub fn emit_returns_before_blocked_handler_releases_test() {
   // process) and hands it back to the test over `entered`.
   let entered = process.new_subject()
   let done = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(hid, ev, fn(_, _) {
+  let _attachment =
+    sinal.observe(ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       process.receive_forever(gate)
@@ -170,41 +157,37 @@ pub fn emit_returns_before_blocked_handler_releases_test() {
 // number of real in-flight messages and would surface here.
 pub fn capacity_exceeded_then_recovers_after_release_and_sentinel_test() {
   let name = process.new_name("forwarder-capacity")
-  let assert Ok(fwd) = forwarder.new(name, 2)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(2)
   let spec = forwarder.supervised(fwd)
   let assert Ok(_started) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("capacity_block")],
+      ["forwarder_test", "capacity_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(sentinel_ev) =
+  let sentinel_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("capacity_sentinel")],
+      ["forwarder_test", "capacity_sentinel"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-capacity-block")
-  let assert Ok(sentinel_hid) = sinal.handler_id("forwarder-capacity-sentinel")
 
   // The gate must be owned by the forwarder process (see the note in the
   // (b) test above), so the handler creates a fresh one on each invocation
   // and hands it back over `entered`.
   let entered = process.new_subject()
   let sentinel_subject = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)
       Nil
     })
-  let assert Ok(_sentinel_attachment) =
-    sinal.observe(sentinel_hid, sentinel_ev, fn(_, _) {
-      process.send(sentinel_subject, Nil)
-    })
+  let _sentinel_attachment =
+    sinal.observe(sentinel_ev, fn(_, _) { process.send(sentinel_subject, Nil) })
 
   // First emit occupies one of two slots and blocks the forwarder process.
   forwarder.emit(fwd, block_ev, Nil, Nil) |> should.equal(Ok(Nil))
@@ -241,32 +224,29 @@ pub fn capacity_exceeded_then_recovers_after_release_and_sentinel_test() {
 // subject.
 pub fn capacity_exceeded_emits_single_dropped_event_from_forwarder_test() {
   let name = process.new_name("forwarder-dropped")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("dropped_block")],
+      ["forwarder_test", "dropped_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-dropped-block")
   // See the (b) test's note: the gate must be owned by the forwarder
   // process, so the handler creates it and hands it back over `entered`.
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)
       Nil
     })
-
-  let assert Ok(dropped_hid) = sinal.handler_id("forwarder-dropped-observer")
   let dropped_subject = process.new_subject()
-  let assert Ok(_dropped_attachment) =
-    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+  let _dropped_attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, _meta) {
       process.send(dropped_subject, #(dropped, process.self()))
     })
 
@@ -296,30 +276,27 @@ pub fn capacity_exceeded_emits_single_dropped_event_from_forwarder_test() {
 // would instead deliver two events here.
 pub fn concurrent_drops_coalesce_into_one_dropped_event_test() {
   let name = process.new_name("forwarder-coalesce")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("coalesce_block")],
+      ["forwarder_test", "coalesce_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-coalesce-block")
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)
       Nil
     })
-
-  let assert Ok(dropped_hid) = sinal.handler_id("forwarder-coalesce-dropped")
   let dropped_subject = process.new_subject()
-  let assert Ok(_dropped_attachment) =
-    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+  let _dropped_attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, _meta) {
       process.send(dropped_subject, #(dropped, process.self()))
     })
 
@@ -366,22 +343,21 @@ pub fn concurrent_drops_coalesce_into_one_dropped_event_test() {
 // sending), so this test isolates the sender-side guard specifically.
 pub fn concurrent_drops_queue_single_report_message_test() {
   let name = process.new_name("forwarder-mailbox")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("mailbox_block")],
+      ["forwarder_test", "mailbox_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-mailbox-block")
   // See the (b) test's note: the gate must be owned by the forwarder
   // process, so the handler creates it and hands it back over `entered`.
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)
@@ -426,29 +402,21 @@ pub fn concurrent_drops_queue_single_report_message_test() {
 // draining later messages.
 pub fn raising_handler_is_detached_and_forwarder_survives_test() {
   let name = process.new_name("forwarder-raise")
-  let assert Ok(fwd) = forwarder.new(name, 4)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(4)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(raise_ev) =
+  let raise_ev =
+    sinal.event(["forwarder_test", "raise"], fields.empty(), fields.empty())
+  let sentinel_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("raise")],
+      ["forwarder_test", "raise_sentinel"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(sentinel_ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("raise_sentinel")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(raise_hid) = sinal.handler_id("forwarder-raise-handler")
-  let assert Ok(sentinel_hid) = sinal.handler_id("forwarder-raise-sentinel")
 
-  let assert Ok(_raise_attachment) =
-    sinal.observe(raise_hid, raise_ev, fn(_, _) {
-      panic as "forwarder handler panic"
-    })
+  let _raise_attachment =
+    sinal.observe(raise_ev, fn(_, _) { panic as "forwarder handler panic" })
 
   let failure_event = [
     atom.create("telemetry"),
@@ -459,16 +427,13 @@ pub fn raising_handler_is_detached_and_forwarder_survives_test() {
     ffi.to_dynamic(atom.create("forwarder_raise_failure_listener"))
   let failure_subject = process.new_subject()
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(
-      failure_listener_id,
-      [failure_event],
-      fn(_, _, _, _) { process.send(failure_subject, Nil) },
-      ffi.to_dynamic(Nil),
-    )
+    ffi.telemetry_attach_many(failure_listener_id, [failure_event], fn(_, _, _) {
+      process.send(failure_subject, Nil)
+    })
 
   let sentinel_subject = process.new_subject()
-  let assert Ok(_sentinel_attachment) =
-    sinal.observe(sentinel_hid, sentinel_ev, fn(_, _) {
+  let _sentinel_attachment =
+    sinal.observe(sentinel_ev, fn(_, _) {
       process.send(sentinel_subject, process.self())
     })
 
@@ -490,23 +455,22 @@ pub fn killed_incarnation_reports_lost_and_resets_counter_test() {
   // Capacity equals the lost count so a leftover, unreset ghost count would
   // immediately exhaust it: the closing admission below only succeeds if the
   // in-flight slot was truly reset to 0, not merely read.
-  let assert Ok(fwd) = forwarder.new(name, 2)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(2)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started1) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("kill_block")],
+      ["forwarder_test", "kill_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-kill-block")
   // See the (b) test's note: the gate must be owned by the forwarder
   // process, so the handler creates it and hands it back over `entered`.
   // It is never released here — the forwarder is killed while blocked.
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 5000)
@@ -529,12 +493,9 @@ pub fn killed_incarnation_reports_lost_and_resets_counter_test() {
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(down) { down })
   let assert Ok(_down) = process.selector_receive(selector, 500)
-
-  let assert Ok(dropped_hid) =
-    sinal.handler_id("forwarder-kill-dropped-observer")
   let dropped_subject = process.new_subject()
-  let assert Ok(_dropped_attachment) =
-    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+  let _dropped_attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, _meta) {
       process.send(dropped_subject, dropped)
     })
 
@@ -546,18 +507,15 @@ pub fn killed_incarnation_reports_lost_and_resets_counter_test() {
   |> should.equal(forwarder.Dropped(rejected: 0, lost: 2, unavailable: 0))
 
   // The counter is reset: a fresh send is admitted rather than rejected.
-  let assert Ok(sentinel_ev) =
+  let sentinel_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("kill_sentinel")],
+      ["forwarder_test", "kill_sentinel"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(sentinel_hid) = sinal.handler_id("forwarder-kill-sentinel")
   let sentinel_subject = process.new_subject()
-  let assert Ok(_sentinel_attachment) =
-    sinal.observe(sentinel_hid, sentinel_ev, fn(_, _) {
-      process.send(sentinel_subject, Nil)
-    })
+  let _sentinel_attachment =
+    sinal.observe(sentinel_ev, fn(_, _) { process.send(sentinel_subject, Nil) })
   forwarder.emit(fwd, sentinel_ev, Nil, Nil) |> should.equal(Ok(Nil))
   process.receive(sentinel_subject, 200) |> should.equal(Ok(Nil))
 }
@@ -569,20 +527,19 @@ pub fn killed_incarnation_reports_lost_and_resets_counter_test() {
 // count back up.
 pub fn restart_drains_drop_slot_when_killed_before_report_drops_test() {
   let name = process.new_name("forwarder-drop-restart")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started1) = spec.start()
 
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("drop_restart_block")],
+      ["forwarder_test", "drop_restart_block"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-drop-restart-block")
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 5000)
@@ -605,12 +562,9 @@ pub fn restart_drains_drop_slot_when_killed_before_report_drops_test() {
     process.new_selector()
     |> process.select_specific_monitor(monitor, fn(down) { down })
   let assert Ok(_down) = process.selector_receive(selector, 500)
-
-  let assert Ok(dropped_hid) =
-    sinal.handler_id("forwarder-drop-restart-dropped")
   let dropped_subject = process.new_subject()
-  let assert Ok(_dropped_attachment) =
-    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+  let _dropped_attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, _meta) {
       process.send(dropped_subject, dropped)
     })
 
@@ -624,18 +578,13 @@ pub fn restart_drains_drop_slot_when_killed_before_report_drops_test() {
 // Capacity belongs to the current incarnation, never the diagnostic counter.
 pub fn restart_under_load_never_inflates_capacity_test() {
   let name = process.new_name("forwarder-race")
-  let assert Ok(fwd) = forwarder.new(name, 3)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(3)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
 
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("race")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(hid) = sinal.handler_id("forwarder-race-handler")
-  let assert Ok(_attachment) = sinal.observe(hid, ev, fn(_, _) { Nil })
+  let ev =
+    sinal.event(["forwarder_test", "race"], fields.empty(), fields.empty())
+  let _attachment = sinal.observe(ev, fn(_, _) { Nil })
 
   // Also watches every `dropped_event` emitted across the whole run. This is
   // the same restart-registration-before-initialiser window that can inflate
@@ -649,10 +598,9 @@ pub fn restart_under_load_never_inflates_capacity_test() {
   // cannot go red on a correct implementation, and it raises (without
   // guaranteeing) the odds of catching a regression that removes the
   // recheck.
-  let assert Ok(dropped_hid) = sinal.handler_id("forwarder-race-dropped")
   let dropped_subject = process.new_subject()
-  let assert Ok(_dropped_attachment) =
-    sinal.observe(dropped_hid, forwarder.dropped_event(), fn(dropped, _meta) {
+  let _dropped_attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, _meta) {
       process.send(dropped_subject, dropped)
     })
 
@@ -682,10 +630,9 @@ pub fn restart_under_load_never_inflates_capacity_test() {
   // through the race above (no further restart here, which would reset the
   // counter and hide a leak). Capacity must still be exactly 3: three
   // concurrent sends admit, a fourth does not.
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-race-block")
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)
@@ -722,7 +669,7 @@ fn drain_dropped(
 }
 
 fn restart_forwarder_a_few_times(
-  spec: supervision.ChildSpecification(Nil),
+  spec: supervision.ChildSpecification(forwarder.Forwarder),
   current_pid: process.Pid,
   remaining: Int,
 ) -> Nil {
@@ -748,76 +695,18 @@ fn restart_forwarder_a_few_times(
   }
 }
 
-// (g) An encoding failure is reported without ever reaching the counters, so
-// it never consumes capacity.
-pub fn encoding_failure_does_not_consume_capacity_test() {
-  let name = process.new_name("forwarder-encode-fail")
-  let assert Ok(fwd) = forwarder.new(name, 1)
-  let spec = forwarder.supervised(fwd)
-  let assert Ok(_started) = spec.start()
-
-  let strict_field =
-    fields.field(
-      atom.create("value"),
-      fn(n: Int) {
-        case n >= 0 {
-          True -> Ok(dynamic.int(n))
-          False -> Error(fields.FieldEncodeError("negative prohibited"))
-        }
-      },
-      fn(raw) {
-        case decode.run(raw, decode.int) {
-          Ok(n) -> Ok(n)
-          Error(_) -> Error(fields.FieldDecodeError("expected int"))
-        }
-      },
-    )
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("encode_fail")],
-      strict_field,
-      fields.empty(),
-    )
-
-  forwarder.emit(fwd, ev, -1, Nil)
-  |> should.equal(
-    Error(
-      forwarder.ForwardEncodingFailed(fields.FieldEncodeError(
-        "negative prohibited",
-      )),
-    ),
-  )
-
-  // A full admission still succeeds: the rejected encode never touched the
-  // single-slot capacity.
-  let assert Ok(sentinel_hid) = sinal.handler_id("forwarder-encode-fail-ok")
-  let sentinel_subject = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(sentinel_hid, ev, fn(value, _) {
-      process.send(sentinel_subject, value)
-    })
-  forwarder.emit(fwd, ev, 5, Nil) |> should.equal(Ok(Nil))
-  process.receive(sentinel_subject, 200) |> should.equal(Ok(5))
-}
-
 // (h) 100 emits from one producer are dispatched in the order sent, per
 // native BEAM per-sender message ordering.
 pub fn hundred_emits_from_one_producer_arrive_in_order_test() {
   let name = process.new_name("forwarder-order")
-  let assert Ok(fwd) = forwarder.new(name, 200)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(200)
   let spec = forwarder.supervised(fwd)
   let assert Ok(_started) = spec.start()
 
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("order")],
-      fields.int(atom.create("n")),
-      fields.empty(),
-    )
-  let assert Ok(hid) = sinal.handler_id("forwarder-order-handler")
+  let ev =
+    sinal.event(["forwarder_test", "order"], fields.int("n"), fields.empty())
   let subject = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(hid, ev, fn(n, _) { process.send(subject, n) })
+  let _attachment = sinal.observe(ev, fn(n, _) { process.send(subject, n) })
 
   let sequence = one_to(100)
 
@@ -846,26 +735,101 @@ fn count_up(current: Int, stop: Int, acc: List(Int)) -> List(Int) {
   }
 }
 
-// (i) Zero and negative capacities are rejected without allocating anything
-// runnable.
-pub fn non_positive_capacity_is_rejected_test() {
+// (i) A capacity below 1 is a configuration error that the start reports
+// as `InitFailed`; no target is published, so a send is refused as
+// unavailable.
+pub fn non_positive_capacity_fails_the_start_test() {
   let name = process.new_name("forwarder-invalid-capacity")
-  forwarder.new(name, 0) |> should.equal(Error(forwarder.InvalidCapacity))
-  forwarder.new(name, -3) |> should.equal(Error(forwarder.InvalidCapacity))
+  let zero = forwarder.new(name) |> forwarder.with_capacity(0)
+  let assert Error(actor.InitFailed(message)) =
+    forwarder.supervised(zero).start()
+  message |> should.equal("sinal/forwarder: capacity must be at least 1, got 0")
+  let negative = forwarder.new(name) |> forwarder.with_capacity(-3)
+  let assert Error(actor.InitFailed(_)) = forwarder.supervised(negative).start()
+  let ev =
+    sinal.event(
+      ["forwarder_test", "invalid_capacity"],
+      fields.empty(),
+      fields.empty(),
+    )
+  forwarder.emit(zero, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+}
+
+// (j) `new` holds 1,024 events by default: with the handler blocked on the
+// first, 1,023 more are admitted and the next one is refused.
+pub fn default_capacity_is_1024_test() {
+  forwarder.default_capacity |> should.equal(1024)
+  let fwd = forwarder.new(process.new_name("forwarder-default-capacity"))
+  let assert Ok(_started) = forwarder.supervised(fwd).start()
+  let ev =
+    sinal.event(
+      ["forwarder_test", "default_capacity"],
+      fields.empty(),
+      fields.empty(),
+    )
+  let entered = process.new_subject()
+  let attachment =
+    sinal.observe(ev, fn(_, _) {
+      let gate = process.new_subject()
+      process.send(entered, gate)
+      let assert Ok(Nil) = process.receive(gate, 5000)
+      Nil
+    })
+  forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
+  let assert Ok(gate) = process.receive(entered, 200)
+  one_to(1023)
+  |> list.each(fn(_) {
+    forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
+  })
+  forwarder.emit(fwd, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.CapacityExceeded))
+  let assert Ok(Nil) = sinal.detach(attachment)
+  process.send(gate, Nil)
+}
+
+// (k) Every `Forwarder` built from one name shares its drop counters: drops
+// counted through one value are reported by an incarnation started from
+// another.
+pub fn forwarders_of_one_name_share_drop_counters_test() {
+  let name = process.new_name("forwarder-shared-counters")
+  let first = forwarder.new(name)
+  let second = forwarder.new(name) |> forwarder.with_capacity(4)
+  let ev =
+    sinal.event(
+      ["forwarder_test", "shared_counters"],
+      fields.empty(),
+      fields.empty(),
+    )
+  let dropped = observe_dropped("forwarder-shared-counters-dropped", name)
+  forwarder.emit(first, ev, Nil, Nil)
+  |> should.equal(Error(forwarder.ForwarderUnavailable))
+  let assert Ok(started) = forwarder.supervised(second).start()
+  process.receive(dropped.1, 200)
+  |> should.equal(
+    Ok(#(forwarder.Dropped(rejected: 0, lost: 0, unavailable: 1), started.pid)),
+  )
+  let assert Ok(Nil) = sinal.detach(dropped.0)
+}
+
+// (l) `supervised` hands the supervisor the `Forwarder` as the child's data.
+pub fn supervised_returns_the_forwarder_test() {
+  let fwd = forwarder.new(process.new_name("forwarder-child-data"))
+  let assert Ok(started) = forwarder.supervised(fwd).start()
+  started.data |> should.equal(fwd)
 }
 
 // Observes `dropped_event` for one forwarder only, recording each report with
 // the pid of the process that emitted it. Filtering by the forwarder's name
 // keeps a report from another test's forwarder out of this test's mailbox.
 fn observe_dropped(
-  id: String,
+  _id: String,
   name: process.Name(forwarder.Message),
 ) -> #(sinal.Attachment, process.Subject(#(forwarder.Dropped, process.Pid))) {
-  let assert Ok(hid) = sinal.handler_id(id)
   let subject = process.new_subject()
   let wanted = atom.to_string(name_to_atom(name))
-  let assert Ok(attachment) =
-    sinal.observe(hid, forwarder.dropped_event(), fn(dropped, meta) {
+  let attachment =
+    sinal.observe(forwarder.dropped_event(), fn(dropped, meta) {
       case meta.forwarder == wanted {
         True -> process.send(subject, #(dropped, process.self()))
         False -> Nil
@@ -895,15 +859,11 @@ fn kill_and_wait(pid: process.Pid) -> Nil {
 // restart with no new unavailable drops reports nothing.
 pub fn unavailable_drops_while_down_are_reported_by_the_next_incarnation_test() {
   let name = process.new_name("forwarder-down")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started1) = spec.start()
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("forwarder_test"), atom.create("down")],
-      fields.empty(),
-      fields.empty(),
-    )
+  let ev =
+    sinal.event(["forwarder_test", "down"], fields.empty(), fields.empty())
   let dropped = observe_dropped("forwarder-down-dropped", name)
 
   kill_and_wait(started1.pid)
@@ -927,10 +887,9 @@ pub fn unavailable_drops_while_down_are_reported_by_the_next_incarnation_test() 
   // The count was reset by that report, and capacity is untouched: the one
   // slot still admits a send. Waiting for its delivery before the kill keeps
   // it from being reported as `lost` by the next incarnation.
-  let assert Ok(hid) = sinal.handler_id("forwarder-down-delivered")
   let delivered = process.new_subject()
-  let assert Ok(delivered_attachment) =
-    sinal.observe(hid, ev, fn(_, _) { process.send(delivered, Nil) })
+  let delivered_attachment =
+    sinal.observe(ev, fn(_, _) { process.send(delivered, Nil) })
   forwarder.emit(fwd, ev, Nil, Nil) |> should.equal(Ok(Nil))
   process.receive(delivered, 200) |> should.equal(Ok(Nil))
   let assert Ok(Nil) = sinal.detach(delivered_attachment)
@@ -949,19 +908,18 @@ pub fn unavailable_drops_while_down_are_reported_by_the_next_incarnation_test() 
 // unavailable slot directly, then causes a capacity drop.
 pub fn late_unavailable_drop_rides_on_the_next_drop_report_test() {
   let name = process.new_name("forwarder-late-unavailable")
-  let assert Ok(fwd) = forwarder.new(name, 1)
+  let fwd = forwarder.new(name) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(started) = spec.start()
-  let assert Ok(block_ev) =
+  let block_ev =
     sinal.event(
-      [atom.create("forwarder_test"), atom.create("late_unavailable")],
+      ["forwarder_test", "late_unavailable"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(block_hid) = sinal.handler_id("forwarder-late-unavailable")
   let entered = process.new_subject()
-  let assert Ok(_block_attachment) =
-    sinal.observe(block_hid, block_ev, fn(_, _) {
+  let _block_attachment =
+    sinal.observe(block_ev, fn(_, _) {
       let gate = process.new_subject()
       process.send(entered, gate)
       let assert Ok(Nil) = process.receive(gate, 2000)

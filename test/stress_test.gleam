@@ -1,6 +1,5 @@
 import gleam/dynamic
 import gleam/dynamic/decode
-import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
 import gleam/list
@@ -23,73 +22,56 @@ fn range(start: Int, stop: Int) -> List(Int) {
 }
 
 pub fn repeated_attach_emit_detach_stress_test() {
-  let ev_name = [atom.create("stress"), atom.create("lifecycle_churn")]
-  let key = atom.create("iteration")
-  let iter_field =
-    fields.field(key, fn(i: Int) { Ok(dynamic.int(i)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(i) -> Ok(i)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
-    })
-  let assert Ok(ev) = sinal.event(ev_name, iter_field, fields.empty())
+  let iter_field = fields.field("iteration", dynamic.int, decode.int)
+  let ev =
+    sinal.event(["stress", "lifecycle_churn"], iter_field, fields.empty())
   let subject = process.new_subject()
 
   // 50 rapid sequential attach -> emit -> detach cycles with unique IDs
   list.each(range(1, 50), fn(i) {
-    let id_str = "stress-churn-handler-" <> int.to_string(i)
-    let assert Ok(hid) = sinal.handler_id(id_str)
     let handler = fn(_ev, iter: Int, _meta) {
       process.send(subject, iter)
       Ok(Nil)
     }
-    let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
+    let assert Ok(att) =
+      sinal.attach(
+        sinal.handler([ev], handler, fn(_, _) { Nil })
+        |> sinal.with_id("stress-churn-handler-" <> int.to_string(i)),
+      )
 
     // Emit and verify exact delivery
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
+    sinal.emit(ev, i, Nil)
     let assert Ok(received) = process.receive(subject, 100)
     received |> should.equal(i)
 
     // Detach and verify post-detach emission does not invoke handler
     let assert Ok(Nil) = sinal.detach(att)
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
+    sinal.emit(ev, i, Nil)
     process.receive(subject, 20) |> should.be_error()
 
-    // Repeated detach returns NotAttached
-    sinal.detach(att) |> should.equal(Error(sinal.NotAttached))
+    // Repeated detach reports the handler as not attached
+    sinal.detach(att) |> should.equal(Error(Nil))
   })
 }
 
 pub fn concurrent_emitters_high_throughput_stress_test() {
-  let ev_name = [atom.create("stress"), atom.create("concurrent_flood")]
-  let worker_key = atom.create("worker_id")
-  let seq_key = atom.create("seq")
-
-  let worker_field =
-    fields.field(worker_key, fn(w: Int) { Ok(dynamic.int(w)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(w) -> Ok(w)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
+  let meas_fields =
+    fields.record({
+      use worker_id <- fields.parameter
+      use seq <- fields.parameter
+      #(worker_id, seq)
     })
-  let seq_field =
-    fields.field(seq_key, fn(s: Int) { Ok(dynamic.int(s)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(s) -> Ok(s)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
-    })
-  let assert Ok(meas_fields) = fields.pair(worker_field, seq_field)
-  let assert Ok(ev) = sinal.event(ev_name, meas_fields, fields.empty())
+    |> fields.and(fields.int("worker_id"), fn(m: #(Int, Int)) { m.0 })
+    |> fields.and(fields.int("seq"), fn(m) { m.1 })
+    |> fields.build
+  let ev =
+    sinal.event(["stress", "concurrent_flood"], meas_fields, fields.empty())
 
-  let assert Ok(hid) = sinal.handler_id("stress-flood-handler")
   let collector_subject = process.new_subject()
-
-  let handler = fn(_ev, meas: #(Int, Int), _meta) {
-    process.send(collector_subject, meas)
-    Ok(Nil)
-  }
-  let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
+  let att =
+    sinal.observe(ev, fn(meas: #(Int, Int), _meta) {
+      process.send(collector_subject, meas)
+    })
 
   let num_workers = 10
   let events_per_worker = 50
@@ -99,8 +81,7 @@ pub fn concurrent_emitters_high_throughput_stress_test() {
   list.each(range(1, num_workers), fn(w) {
     process.spawn(fn() {
       list.each(range(1, events_per_worker), fn(s) {
-        let assert Ok(Nil) = sinal.emit(ev, #(w, s), Nil)
-        Nil
+        sinal.emit(ev, #(w, s), Nil)
       })
     })
   })
@@ -132,52 +113,45 @@ pub type StressSpanMeta {
 }
 
 pub fn concurrent_spans_stress_test() {
-  let prefix = [atom.create("stress_span"), atom.create("worker")]
-  let assert Ok(p) = span.event_prefix(prefix)
-
-  let worker_key = atom.create("worker")
   let worker_field =
     fields.field(
-      worker_key,
-      fn(m: StressSpanMeta) { Ok(dynamic.int(m.worker)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(w) -> Ok(StressSpanMeta(w))
-          Error(_) -> Error(fields.FieldDecodeError("expected int"))
-        }
-      },
+      "worker",
+      fn(m: StressSpanMeta) { dynamic.int(m.worker) },
+      decode.int |> decode.map(StressSpanMeta),
     )
 
-  let assert Ok(sp) =
-    span.define_span(p, worker_field, fields.empty(), worker_field)
+  let sp =
+    span.define(
+      ["stress_span", "worker"],
+      start_metadata: worker_field,
+      stop_measurements: fields.empty(),
+      stop_metadata: worker_field,
+    )
   let events = span.events(sp)
 
   let start_subject = process.new_subject()
   let stop_subject = process.new_subject()
 
-  let start_handler = fn(
-    _ev,
-    _meas: span.StartMeasurements,
-    meta: span.StartMetadata(StressSpanMeta),
-  ) {
-    process.send(start_subject, #(meta.metadata.worker, meta.context))
-    Ok(Nil)
-  }
-  let stop_handler = fn(
-    _ev,
-    _meas: span.StopMeasurements(Nil),
-    meta: span.StopMetadata(StressSpanMeta),
-  ) {
-    process.send(stop_subject, #(meta.metadata.worker, meta.context))
-    Ok(Nil)
-  }
-
-  let assert Ok(hid_start) = sinal.handler_id("stress-span-start")
-  let assert Ok(hid_stop) = sinal.handler_id("stress-span-stop")
-  let assert Ok(att_start) =
-    sinal.attach(hid_start, events.start, start_handler, fn(_, _) { Nil })
-  let assert Ok(att_stop) =
-    sinal.attach(hid_stop, events.stop, stop_handler, fn(_, _) { Nil })
+  let att_start =
+    sinal.observe(
+      events.start,
+      fn(
+        _meas: span.StartMeasurements,
+        meta: span.StartMetadata(StressSpanMeta),
+      ) {
+        process.send(start_subject, #(meta.metadata.worker, meta.context))
+      },
+    )
+  let att_stop =
+    sinal.observe(
+      events.stop,
+      fn(
+        _meas: span.StopMeasurements(Nil),
+        meta: span.StopMetadata(StressSpanMeta),
+      ) {
+        process.send(stop_subject, #(meta.metadata.worker, meta.context))
+      },
+    )
 
   let num_spans = 20
 
@@ -185,7 +159,7 @@ pub fn concurrent_spans_stress_test() {
   list.each(range(1, num_spans), fn(i) {
     process.spawn(fn() {
       let result =
-        span.run_span(sp, StressSpanMeta(worker: i), fn() {
+        span.run(sp, StressSpanMeta(worker: i), fn() {
           span.Completion(
             result: i * 10,
             measurements: Nil,
@@ -220,7 +194,7 @@ pub fn concurrent_spans_stress_test() {
     let assert Ok(#(_, stop_ctx)) =
       list.find(stops, fn(item: #(Int, span.SpanContext)) { item.0 == i })
     start_ctx |> should.equal(stop_ctx)
-    is_native_reference(span.span_context_to_dynamic(start_ctx))
+    is_native_reference(span_context_term(start_ctx))
     |> should.equal(True)
   })
 
@@ -245,6 +219,9 @@ pub fn concurrent_spans_stress_test() {
   sinal.detach(att_start) |> should.equal(Ok(Nil))
   sinal.detach(att_stop) |> should.equal(Ok(Nil))
 }
+
+@external(erlang, "scope_test_ffi", "span_context_term")
+fn span_context_term(context: span.SpanContext) -> dynamic.Dynamic
 
 @external(erlang, "scope_test_ffi", "is_native_reference")
 fn is_native_reference(term: dynamic.Dynamic) -> Bool

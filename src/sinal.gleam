@@ -1,51 +1,72 @@
 //// Defines typed telemetry events, attaches handlers to them, and emits
 //// them through native BEAM `:telemetry`.
 ////
-//// Use this module to describe an event once, as an `Event(measurements,
-//// metadata)` built from `sinal/fields` codecs, then `emit` it and
-//// `observe` or `attach` handlers to it. Handlers run synchronously in the
-//// emitting process. A malformed native map or a handler failure removes
-//// that handler and emits telemetry's standard
-//// `[telemetry, handler, failure]` event; the emitter does not crash.
-//// `with_subscriptions` attaches a group of handlers for the duration of
-//// one function call. `sinal/span` wraps work in start, stop and exception
-//// events, and `sinal/forwarder` moves handler execution off the emitting
-//// process.
-////
-//// The `telemetry` OTP application must be running before handlers are
-//// attached. `gleam run` and `gleam test` start it; otherwise start it
-//// with the application, for example by listing it among the release's
-//// applications. Without it, `attach`, `observe` and `detach` exit the
-//// caller with `noproc`, and `emit` reaches no handler.
+//// Describe an event once, as an `Event(measurements, metadata)` built
+//// from `sinal/fields` codecs, then `emit` it and `observe` it:
 ////
 //// ```gleam
-//// import gleam/erlang/atom
 //// import sinal
 //// import sinal/fields
 ////
-//// let assert Ok(finished) =
+//// let finished =
 ////   sinal.event(
-////     [atom.create("request"), atom.create("finished")],
-////     fields.int(atom.create("duration_ms")),
-////     fields.string(atom.create("route")),
+////     ["request", "finished"],
+////     fields.int("duration_ms"),
+////     fields.string("route"),
 ////   )
-//// let assert Ok(id) = sinal.handler_id("request-finished-observer")
-//// let assert Ok(attachment) =
-////   sinal.observe(id, finished, fn(duration_ms, route) { record(route, duration_ms) })
-//// let assert Ok(Nil) = sinal.emit(finished, 42, "/users")
-//// let assert Ok(Nil) = sinal.detach(attachment)
+//// let attachment =
+////   sinal.observe(finished, fn(duration_ms, route) { record(route, duration_ms) })
+//// sinal.emit(finished, 42, "/users")
+//// let _ = sinal.detach(attachment)
 //// ```
+////
+//// ## Delivery
+////
+//// Handlers run synchronously in the emitting process, unless the
+//// application routed a prefix of the event's name to a forwarder with
+//// `sinal/forwarder.route`: then `emit` hands the event to that forwarder's
+//// process and returns at once. A malformed native map or a failing
+//// handler removes that handler and emits telemetry's standard
+//// `[telemetry, handler, failure]` event; the emitter does not crash.
+////
+//// ## Registration
+////
+//// `observe` attaches an infallible handler to one event. A `Subscription`
+//// describes any registration: `subscription` for one event, `handler`
+//// for several same-shaped events with a fallible handler and a typed
+//// failure observer, and `with_id` for a stable native handler id. `attach`
+//// installs one for the long term; `with_subscriptions` installs a group
+//// for the duration of one function call. Sinal gives every handler a
+//// fresh id unless `with_id` names one.
+////
+//// ## Names are atoms
+////
+//// Each name segment becomes an atom, and the BEAM never frees an atom. A
+//// segment must match `[a-z][a-z0-9_]{0,62}` and must be written in source
+//// code, never built from input. An invalid segment, an empty name, an
+//// empty `with_id` or a repeated event in `handler` is a definition bug:
+//// the constructor panics with a message naming it.
+////
+//// ## The telemetry application
+////
+//// The `telemetry` OTP application must be running before handlers are
+//// attached. `gleam run` and `gleam test` start it. Without it, `attach`,
+//// `observe` and `detach` exit the caller with `noproc`, and `emit`
+//// reaches no handler.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
+import gleam/int
 import gleam/list
-import gleam/result
-import sinal/exception.{type BeamException}
-import sinal/fields.{type FieldEncodeError, type FieldError, type Fields}
+import gleam/option.{type Option, None, Some}
+import gleam/string
+import sinal/fields.{type FieldError, type Fields}
 import sinal/internal/ffi
+import sinal/internal/name as grammar
+import sinal/internal/route
 
-/// A strongly-typed event descriptor retaining native atom identity
-/// and typed measurement and metadata field specifications.
+/// A typed event: its name and the codecs of its measurements and
+/// metadata.
 pub opaque type Event(measurements, metadata) {
   Event(
     name: List(Atom),
@@ -54,98 +75,166 @@ pub opaque type Event(measurements, metadata) {
   )
 }
 
-pub type EventError {
-  EmptyEventName
-}
-
-/// Canonical constructor for a typed event descriptor from trusted native atoms, deriving
-/// the logical name safely from the atoms and rejecting empty names.
+/// Defines an event. `name` is the native event name, for example
+/// `["http_gun", "request", "stop"]`.
+///
+/// Panics when `name` is empty or a segment breaks the name grammar.
 pub fn event(
-  name: List(Atom),
-  measurements: Fields(m),
-  metadata: Fields(d),
-) -> Result(Event(m, d), EventError) {
-  case name {
-    [] -> Error(EmptyEventName)
-    _ -> Ok(Event(name, measurements, metadata))
-  }
+  name: List(String),
+  measurements: Fields(measurements),
+  metadata: Fields(metadata),
+) -> Event(measurements, metadata) {
+  Event(
+    name: name_atoms(name, "sinal.event"),
+    measurements: measurements,
+    metadata: metadata,
+  )
 }
 
-/// Exposes the logical name derived from the native atom list.
-pub fn event_name(event: Event(m, d)) -> List(String) {
+/// The event's name.
+pub fn name(event: Event(m, d)) -> List(String) {
   list.map(event.name, atom.to_string)
 }
 
-/// Exposes the native atom list binding.
-pub fn event_native_name(event: Event(m, d)) -> List(Atom) {
-  event.name
-}
-
-pub opaque type HandlerId {
-  PublicHandlerId(String)
-  ScopedHandlerId(Int)
-}
-
-pub type IdentityError {
-  EmptyHandlerId
-}
-
-/// Creates a public handler identifier, rejecting empty names.
-pub fn handler_id(name: String) -> Result(HandlerId, IdentityError) {
-  case name {
-    "" -> Error(EmptyHandlerId)
-    _ -> Ok(PublicHandlerId(name))
+/// Emits an event. Handlers run in the caller before `emit` returns,
+/// unless the application routed a prefix of the event's name with
+/// `sinal/forwarder.route`. A routed event is handed to that forwarder and
+/// `emit` returns without waiting; when the forwarder is full or not
+/// running, the event is dropped and counted in the forwarder's
+/// `dropped_event`. Handler failures never reach the caller.
+pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
+  let raw_measurements = fields.encode(event.measurements, measurements)
+  let raw_metadata = fields.encode(event.metadata, metadata)
+  case route.find(event.name) {
+    Ok(send) -> send(event.name, raw_measurements, raw_metadata)
+    Error(Nil) ->
+      ffi.telemetry_execute(event.name, raw_measurements, raw_metadata)
   }
 }
 
-@external(erlang, "erlang", "unique_integer")
-fn fresh_scoped_handler_number() -> Int
-
+/// A registered handler. Keep it to `detach` the handler.
 pub opaque type Attachment {
-  Attachment(detach_fn: fn() -> Result(Nil, DetachError))
+  Attachment(id: Dynamic)
 }
 
+/// Why `attach` refused a subscription. The union is closed.
 pub type AttachError {
-  AlreadyExists
-  DuplicateEventName(List(String))
-  BackendNotAvailable
+  /// A handler with this `with_id` id is already attached.
+  AlreadyExists(id: String)
 }
 
-pub type DetachError {
-  NotAttached
-  DetachBackendNotAvailable
-}
-
-pub type EmitError {
-  EncodingFailed(FieldEncodeError)
-}
-
+/// Why a handler did not run. The union is closed.
 pub type HandlerFailure(e) {
   MalformedMeasurements(FieldError)
   MalformedMetadata(FieldError)
   HandlerReturned(e)
 }
 
-pub type ScopeCleanupFailure {
-  DetachReturnedError(DetachError)
-  DetachRaisedException(BeamException)
+/// Why a scope could not detach one of its handlers. The union is closed.
+pub type CleanupFailure {
+  /// The handler was no longer attached, for example because telemetry
+  /// removed it after it failed.
+  AlreadyDetached
+  /// Detaching raised; `description` is for logs.
+  DetachCrashed(description: String)
 }
 
-pub type ScopedCompletion(a) {
-  ScopedCompletion(
-    work_result: a,
-    cleanup_result: Result(Nil, ScopeCleanupFailure),
+/// A registration that `attach` or `with_subscriptions` installs. Building
+/// one has no effect.
+pub opaque type Subscription {
+  Subscription(id: Option(String), install: fn(Dynamic) -> Result(Nil, Nil))
+}
+
+/// Attaches an infallible handler to one event and returns its attachment.
+/// The handler runs in the emitting process (or the forwarder's, for a
+/// routed event). A malformed native map or a handler crash removes it and
+/// emits telemetry's `[telemetry, handler, failure]` event.
+pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
+  case attach(subscription(event, run)) {
+    Ok(attachment) -> attachment
+    Error(error) ->
+      panic as { "sinal.observe: " <> describe_attach_error(error) }
+  }
+}
+
+/// Describes an infallible handler of one event.
+pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
+  handler(
+    [event],
+    fn(_event, measurements, metadata) {
+      run(measurements, metadata)
+      Ok(Nil)
+    },
+    fn(_event, _failure) { Nil },
   )
 }
 
-/// A pure description of one independently registered typed observer. The
-/// event and callbacks are bound before the runner erases their type parameters.
-pub opaque type Subscription {
-  Subscription(acquire: fn() -> Result(Attachment, AttachError))
+/// Describes one handler of several same-shaped events. `run` receives the
+/// event that fired. When a native map does not decode, or `run` returns
+/// an error, `on_failure` receives the typed failure, and telemetry then
+/// removes the handler and emits `[telemetry, handler, failure]`.
+///
+/// Panics when `events` is empty or names one event twice.
+pub fn handler(
+  events: List(Event(m, d)),
+  run: fn(Event(m, d), m, d) -> Result(Nil, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+) -> Subscription {
+  case events {
+    [] -> panic as "sinal.handler: no events"
+    _ -> Nil
+  }
+  case first_repeated(list.map(events, fn(event) { event.name }), []) {
+    Ok(repeated) ->
+      panic as {
+        "sinal.handler: event "
+        <> string.inspect(list.map(repeated, atom.to_string))
+        <> " is listed twice"
+      }
+    Error(Nil) -> Nil
+  }
+  let names = list.map(events, fn(event) { event.name })
+  let callback = fn(name, raw_measurements, raw_metadata) {
+    dispatch(name, raw_measurements, raw_metadata, events, run, on_failure)
+  }
+  Subscription(id: None, install: fn(id) {
+    ffi.telemetry_attach_many(id, names, callback)
+  })
 }
 
-/// A pure plan for a heterogeneous scope. The default exception-cleanup
-/// reporter is silent; normal cleanup failures remain in the result.
+/// Gives the handler a stable native handler id instead of a fresh one, so
+/// that an Erlang or Elixir caller can `:telemetry.detach(id)` it. `attach`
+/// returns `AlreadyExists` while another handler holds the id.
+///
+/// Panics when `id` is empty.
+pub fn with_id(subscription: Subscription, id: String) -> Subscription {
+  case id {
+    "" -> panic as "sinal.with_id: the handler id is empty"
+    _ -> Subscription(..subscription, id: Some(id))
+  }
+}
+
+/// Installs a subscription until `detach`.
+pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
+  let Subscription(id:, install:) = subscription
+  let raw_id = case id {
+    Some(id) -> ffi.to_dynamic(id)
+    None -> ffi.unique_handler_id()
+  }
+  case install(raw_id), id {
+    Ok(Nil), _ -> Ok(Attachment(raw_id))
+    Error(Nil), Some(id) -> Error(AlreadyExists(id))
+    Error(Nil), None -> panic as "sinal.attach: a fresh handler id was taken"
+  }
+}
+
+/// Removes a handler. Returns `Error(Nil)` when it was not attached: it was
+/// detached before, or telemetry removed it after it failed.
+pub fn detach(attachment: Attachment) -> Result(Nil, Nil) {
+  ffi.telemetry_detach(attachment.id)
+}
+
+/// A group of subscriptions for `with_subscriptions`.
 pub opaque type SubscriptionPlan {
   SubscriptionPlan(
     entries: List(Subscription),
@@ -153,10 +242,13 @@ pub opaque type SubscriptionPlan {
   )
 }
 
+/// A cleanup failure of the subscription at zero-based `index`.
 pub type SubscriptionCleanupFailure {
-  SubscriptionCleanupFailure(index: Int, failure: ScopeCleanupFailure)
+  SubscriptionCleanupFailure(index: Int, failure: CleanupFailure)
 }
 
+/// `with_subscriptions` could not attach the subscription at `index`; the
+/// work did not run, and the subscriptions before it were detached.
 pub type SubscriptionScopeError {
   SubscriptionAttachFailed(
     index: Int,
@@ -165,12 +257,177 @@ pub type SubscriptionScopeError {
   )
 }
 
+/// The work's result and the handlers that did not detach cleanly. Read it
+/// by label; sinal may add fields.
 pub type SubscriptionCompletion(a) {
   SubscriptionCompletion(
     work_result: a,
     cleanup_failures: List(SubscriptionCleanupFailure),
   )
 }
+
+/// Plans a scope over `entries`, attached in list order and detached in
+/// reverse order.
+pub fn subscriptions(entries: List(Subscription)) -> SubscriptionPlan {
+  SubscriptionPlan(entries, fn(_) { Nil })
+}
+
+/// Reports cleanup failures that happen while the work's exception is
+/// being re-raised; such failures cannot be returned. The default reporter
+/// does nothing. A reporter that crashes does not mask the work's
+/// exception.
+pub fn with_exception_cleanup_reporter(
+  plan: SubscriptionPlan,
+  reporter: fn(SubscriptionCleanupFailure) -> Nil,
+) -> SubscriptionPlan {
+  SubscriptionPlan(..plan, exception_cleanup_reporter: reporter)
+}
+
+/// Attaches the plan's subscriptions in order, runs `work`, and detaches
+/// them in reverse order.
+///
+/// - When an attach fails, `work` does not run, the earlier subscriptions
+///   are detached, and the error names the failing index.
+/// - When `work` raises (error, exit or throw), every subscription is
+///   detached and the exception is re-raised with its class, reason and
+///   stacktrace.
+/// - Attaching is not atomic: a concurrent emitter can see a partial set.
+///   Detaching does not wait for a handler already running in another
+///   process. A killed process skips cleanup.
+pub fn with_subscriptions(
+  plan: SubscriptionPlan,
+  work: fn() -> a,
+) -> Result(SubscriptionCompletion(a), SubscriptionScopeError) {
+  case
+    acquire_subscriptions(plan.entries, 0, [], plan.exception_cleanup_reporter)
+  {
+    Ok(cleanups) ->
+      Ok(ffi_with_subscription_scope(
+        work,
+        cleanups,
+        plan.exception_cleanup_reporter,
+      ))
+    Error(error) -> Error(error)
+  }
+}
+
+/// Describes an attach failure for logs.
+pub fn describe_attach_error(error: AttachError) -> String {
+  case error {
+    AlreadyExists(id) ->
+      "a handler with id " <> string.inspect(id) <> " is already attached"
+  }
+}
+
+/// Describes a handler failure for logs, with `describe` for the handler's
+/// own error.
+pub fn describe_handler_failure(
+  failure: HandlerFailure(e),
+  describe: fn(e) -> String,
+) -> String {
+  case failure {
+    MalformedMeasurements(error) ->
+      "malformed measurements: " <> fields.describe_error(error)
+    MalformedMetadata(error) ->
+      "malformed metadata: " <> fields.describe_error(error)
+    HandlerReturned(error) ->
+      "the handler returned an error: " <> describe(error)
+  }
+}
+
+/// Describes a cleanup failure for logs.
+pub fn describe_cleanup_failure(failure: CleanupFailure) -> String {
+  case failure {
+    AlreadyDetached -> "the handler was already detached"
+    DetachCrashed(description) -> "detaching crashed: " <> description
+  }
+}
+
+/// Describes a scope failure for logs.
+pub fn describe_scope_error(error: SubscriptionScopeError) -> String {
+  let SubscriptionAttachFailed(index:, error:, rollback_failures:) = error
+  let rollback = case rollback_failures {
+    [] -> ""
+    failures ->
+      "; rollback failed for "
+      <> string.join(
+        list.map(failures, fn(failure) {
+          "subscription "
+          <> int.to_string(failure.index)
+          <> " ("
+          <> describe_cleanup_failure(failure.failure)
+          <> ")"
+        }),
+        ", ",
+      )
+  }
+  "subscription "
+  <> int.to_string(index)
+  <> " did not attach: "
+  <> describe_attach_error(error)
+  <> rollback
+}
+
+fn name_atoms(name: List(String), caller: String) -> List(Atom) {
+  case name {
+    [] -> panic as { caller <> ": the event name is empty" }
+    _ ->
+      list.map(name, fn(segment) {
+        grammar.to_atom(segment, caller:, what: "name segment")
+      })
+  }
+}
+
+fn first_repeated(
+  names: List(List(Atom)),
+  seen: List(List(Atom)),
+) -> Result(List(Atom), Nil) {
+  case names {
+    [] -> Error(Nil)
+    [name, ..rest] ->
+      case list.contains(seen, name) {
+        True -> Ok(name)
+        False -> first_repeated(rest, [name, ..seen])
+      }
+  }
+}
+
+fn dispatch(
+  event_name: List(Atom),
+  raw_measurements: Dynamic,
+  raw_metadata: Dynamic,
+  events: List(Event(m, d)),
+  run: fn(Event(m, d), m, d) -> Result(Nil, e),
+  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
+) -> Nil {
+  case list.find(events, fn(event) { event.name == event_name }) {
+    Error(Nil) -> ffi.raise_callback_failure("unrecognized_event_descriptor")
+    Ok(event) ->
+      case fields.decode(event.measurements, raw_measurements) {
+        Error(error) -> {
+          on_failure(event, MalformedMeasurements(error))
+          ffi.raise_callback_failure("malformed_measurements")
+        }
+        Ok(measurements) ->
+          case fields.decode(event.metadata, raw_metadata) {
+            Error(error) -> {
+              on_failure(event, MalformedMetadata(error))
+              ffi.raise_callback_failure("malformed_metadata")
+            }
+            Ok(metadata) ->
+              case run(event, measurements, metadata) {
+                Ok(Nil) -> Nil
+                Error(error) -> {
+                  on_failure(event, HandlerReturned(error))
+                  ffi.raise_callback_failure("handler_returned_error")
+                }
+              }
+          }
+      }
+  }
+}
+
+type BeamException
 
 type Acquisition(a) {
   Acquired(a)
@@ -184,318 +441,33 @@ fn ffi_acquire_subscription(
 
 @external(erlang, "sinal_scope_ffi", "cleanup_and_reraise")
 fn cleanup_and_reraise(
-  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  cleanups: List(#(Int, fn() -> Result(Nil, Nil))),
   on_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
   exception: BeamException,
 ) -> a
 
-/// Binds a typed event and fallible handler for later scoped acquisition.
-/// The explicit ID permits application-owned handler identity.
-pub fn handler_subscription(
-  id: HandlerId,
-  event: Event(m, d),
-  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
-  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-) -> Subscription {
-  Subscription(fn() { attach(id, event, handler, on_failure) })
-}
-
-/// Binds an infallible typed observer for later scoped acquisition.
-pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
-  Subscription(fn() {
-    observe(ScopedHandlerId(fresh_scoped_handler_number()), event, run)
-  })
-}
-
-/// Builds a scope with no exception-cleanup reporting side effect.
-pub fn subscriptions(entries: List(Subscription)) -> SubscriptionPlan {
-  SubscriptionPlan(entries, fn(_) { Nil })
-}
-
-/// Reports cleanup failures that occur while an original exception is raised.
-pub fn with_exception_cleanup_reporter(
-  plan: SubscriptionPlan,
-  reporter: fn(SubscriptionCleanupFailure) -> Nil,
-) -> SubscriptionPlan {
-  SubscriptionPlan(..plan, exception_cleanup_reporter: reporter)
-}
-
-/// Detaches an installed handler using its originating detach callback.
-pub fn detach(attachment: Attachment) -> Result(Nil, DetachError) {
-  let Attachment(detach_fn) = attachment
-  detach_fn()
-}
-
-/// Validates that a nonempty set of event descriptors contains no duplicate native names.
-fn validate_event_names(
-  first: Event(m, d),
-  rest: List(Event(m, d)),
-) -> Result(Nil, AttachError) {
-  validate_rest_names(rest, [first.name])
-}
-
-fn validate_rest_names(
-  rest: List(Event(m, d)),
-  seen: List(List(Atom)),
-) -> Result(Nil, AttachError) {
-  case rest {
-    [] -> Ok(Nil)
-    [ev, ..tail] ->
-      case list.contains(seen, ev.name) {
-        True -> Error(DuplicateEventName(list.map(ev.name, atom.to_string)))
-        False -> validate_rest_names(tail, [ev.name, ..seen])
-      }
-  }
-}
-
-/// Emits an event synchronously to native BEAM telemetry.
-pub fn emit(
-  event: Event(m, d),
-  measurements: m,
-  metadata: d,
-) -> Result(Nil, EmitError) {
-  case encode_event(event, measurements, metadata) {
-    Error(err) -> Error(EncodingFailed(err))
-    Ok(#(name, raw_measurements, raw_metadata)) -> {
-      ffi.telemetry_execute(name, raw_measurements, raw_metadata)
-      Ok(Nil)
-    }
-  }
-}
-
-/// Encodes measurements and metadata against an event's field contracts
-/// without executing native dispatch, exposing the event's trusted native
-/// atom name alongside the resulting encoded native maps.
-///
-/// `@internal`: this exists so package-internal adapters (such as the
-/// bounded forwarder) can encode once and dispatch out-of-band without
-/// duplicating `emit`'s encoding steps. It returns raw `Dynamic` native maps,
-/// which this package does not otherwise expose in its public API, so it is
-/// not part of the supported contract for other packages.
-@internal
-pub fn encode_event(
-  event: Event(m, d),
-  measurements: m,
-  metadata: d,
-) -> Result(#(List(Atom), Dynamic, Dynamic), FieldEncodeError) {
-  use raw_measurements <- result.try(fields.encode(
-    event.measurements,
-    measurements,
-  ))
-  use raw_metadata <- result.try(fields.encode(event.metadata, metadata))
-  Ok(#(event.name, raw_measurements, raw_metadata))
-}
-
-/// Attaches a typed handler to a single event descriptor.
-pub fn attach(
-  id: HandlerId,
-  event: Event(m, d),
-  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
-  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-) -> Result(Attachment, AttachError) {
-  attach_many(id, event, [], handler, on_failure)
-}
-
-/// Attaches an infallible observer to one event using native failure isolation.
-/// The callback runs synchronously in the emitting process. Malformed native
-/// maps still remove this registration and emit telemetry's handler failure event.
-/// Retain the returned attachment and call `detach` when observation is complete.
-pub fn observe(
-  id: HandlerId,
-  event: Event(m, d),
-  run: fn(m, d) -> Nil,
-) -> Result(Attachment, AttachError) {
-  attach(
-    id,
-    event,
-    fn(_selected_event, measurements, metadata) {
-      run(measurements, metadata)
-      Ok(Nil)
-    },
-    fn(_selected_event, _failure) { Nil },
-  )
-}
-
-/// Attaches a typed handler to multiple same-shaped event descriptors.
-pub fn attach_many(
-  id: HandlerId,
-  first: Event(m, d),
-  rest: List(Event(m, d)),
-  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
-  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-) -> Result(Attachment, AttachError) {
-  case validate_event_names(first, rest) {
-    Error(err) -> Error(err)
-    Ok(Nil) -> {
-      let descriptors = [first, ..rest]
-      let event_names = list.map(descriptors, fn(ev) { ev.name })
-      let callback = fn(event_name, raw_measurements, raw_metadata, _config) {
-        dispatch(
-          event_name,
-          raw_measurements,
-          raw_metadata,
-          descriptors,
-          handler,
-          on_failure,
-        )
-      }
-      let raw_id = ffi.to_dynamic(id)
-      case
-        ffi.telemetry_attach_many(
-          raw_id,
-          event_names,
-          callback,
-          ffi.to_dynamic(Nil),
-        )
-      {
-        Ok(Nil) -> {
-          let detach_fn = fn() {
-            case ffi.telemetry_detach(raw_id) {
-              Ok(Nil) -> Ok(Nil)
-              Error(ffi.NativeNotFound) -> Error(NotAttached)
-              Error(ffi.NativeDetachOther(_)) ->
-                Error(DetachBackendNotAvailable)
-            }
-          }
-          Ok(Attachment(detach_fn))
-        }
-        Error(ffi.NativeAlreadyExists) -> Error(AlreadyExists)
-        Error(ffi.NativeAttachOther(_)) -> Error(BackendNotAvailable)
-      }
-    }
-  }
-}
-
-fn dispatch(
-  event_name: List(Atom),
-  raw_measurements: Dynamic,
-  raw_metadata: Dynamic,
-  descriptors: List(Event(m, d)),
-  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
-  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-) -> Nil {
-  case list.find(descriptors, fn(ev) { ev.name == event_name }) {
-    Error(Nil) -> ffi.raise_callback_failure("unrecognized_event_descriptor")
-    Ok(descriptor) ->
-      case fields.decode(descriptor.measurements, raw_measurements) {
-        Error(field_err) -> {
-          on_failure(descriptor, MalformedMeasurements(field_err))
-          ffi.raise_callback_failure("malformed_measurements")
-        }
-        Ok(measurements) ->
-          case fields.decode(descriptor.metadata, raw_metadata) {
-            Error(field_err) -> {
-              on_failure(descriptor, MalformedMetadata(field_err))
-              ffi.raise_callback_failure("malformed_metadata")
-            }
-            Ok(metadata) -> {
-              case handler(descriptor, measurements, metadata) {
-                Ok(Nil) -> Nil
-                Error(handler_err) -> {
-                  on_failure(descriptor, HandlerReturned(handler_err))
-                  ffi.raise_callback_failure("handler_returned_error")
-                }
-              }
-            }
-          }
-      }
-  }
-}
-
-/// Executes work with temporary attachments, guaranteeing cleanup attempt and
-/// preserving original return values separately from cleanup outcome.
-@external(erlang, "sinal_scope_ffi", "with_scope")
-fn ffi_with_scope(
-  work: fn() -> a,
-  cleanup: fn() -> Result(Nil, DetachError),
-  on_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
-) -> ScopedCompletion(a)
-
-/// Executes work with temporary scoped attachments, guaranteeing one cleanup attempt
-/// upon normal return or catchable BEAM exception (error, exit, throw), and preserving
-/// original return values separately from cleanup outcomes.
-///
-/// Limits and operational semantics:
-/// - Non-quiescence: Detaching unregisters the handler from subsequent event dispatches,
-///   but does not wait for or interrupt callbacks already in flight on other processes.
-///   Captured resources should remain valid until independent handler work terminates.
-/// - Uncatchable termination: Abrupt process loss, VM termination, or untrappable exits
-///   will bypass cleanup. No linear ownership or exactly-once guarantee is promised.
-/// - Re-raising: Catchable work exceptions (error, exit, throw) preserve exact class,
-///   reason, and stacktrace. Reporter failures do not mask work exceptions.
-pub fn with_attachments(
-  first: Event(m, d),
-  rest: List(Event(m, d)),
-  handler: fn(Event(m, d), m, d) -> Result(Nil, e),
-  on_failure: fn(Event(m, d), HandlerFailure(e)) -> Nil,
-  on_exception_cleanup_failure: fn(ScopeCleanupFailure) -> Nil,
-  run: fn() -> a,
-) -> Result(ScopedCompletion(a), AttachError) {
-  case validate_event_names(first, rest) {
-    Error(err) -> Error(err)
-    Ok(Nil) -> {
-      let scoped_id = ScopedHandlerId(fresh_scoped_handler_number())
-      case attach_many(scoped_id, first, rest, handler, on_failure) {
-        Error(err) -> Error(err)
-        Ok(attachment) -> {
-          let cleanup = fn() { detach(attachment) }
-          let completion =
-            ffi_with_scope(run, cleanup, on_exception_cleanup_failure)
-          Ok(completion)
-        }
-      }
-    }
-  }
-}
-
 @external(erlang, "sinal_scope_ffi", "cleanup_subscriptions")
 fn cleanup_subscriptions(
-  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  cleanups: List(#(Int, fn() -> Result(Nil, Nil))),
 ) -> List(SubscriptionCleanupFailure)
 
 @external(erlang, "sinal_scope_ffi", "with_subscription_scope")
 fn ffi_with_subscription_scope(
   work: fn() -> a,
-  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  cleanups: List(#(Int, fn() -> Result(Nil, Nil))),
   on_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
 ) -> SubscriptionCompletion(a)
-
-/// Acquires independent subscriptions in order and releases them in reverse
-/// order. Acquisition is not atomically visible to concurrent emitters.
-/// On acquisition failure, work is skipped and prior registrations are removed.
-/// Every cleanup failure retains the subscription's zero-based list index.
-/// Catchable work exceptions are re-raised with their original class, reason,
-/// and stacktrace after all cleanup attempts.
-pub fn with_subscriptions(
-  plan: SubscriptionPlan,
-  run: fn() -> a,
-) -> Result(SubscriptionCompletion(a), SubscriptionScopeError) {
-  case
-    acquire_subscriptions(plan.entries, 0, [], plan.exception_cleanup_reporter)
-  {
-    Ok(cleanups) ->
-      Ok(ffi_with_subscription_scope(
-        run,
-        cleanups,
-        plan.exception_cleanup_reporter,
-      ))
-    Error(error) -> Error(error)
-  }
-}
 
 fn acquire_subscriptions(
   subscriptions: List(Subscription),
   index: Int,
-  cleanups: List(#(Int, fn() -> Result(Nil, DetachError))),
+  cleanups: List(#(Int, fn() -> Result(Nil, Nil))),
   on_exception_cleanup_failure: fn(SubscriptionCleanupFailure) -> Nil,
-) -> Result(
-  List(#(Int, fn() -> Result(Nil, DetachError))),
-  SubscriptionScopeError,
-) {
+) -> Result(List(#(Int, fn() -> Result(Nil, Nil))), SubscriptionScopeError) {
   case subscriptions {
     [] -> Ok(cleanups)
-    [Subscription(acquire), ..rest] ->
-      case ffi_acquire_subscription(acquire) {
+    [subscription, ..rest] ->
+      case ffi_acquire_subscription(fn() { attach(subscription) }) {
         Acquired(Ok(attachment)) ->
           acquire_subscriptions(
             rest,

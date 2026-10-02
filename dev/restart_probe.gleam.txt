@@ -1,4 +1,3 @@
-import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/io
 import gleam/string
@@ -35,10 +34,9 @@ fn startup() {
   let initialising = process.new_subject()
   let started = process.new_subject()
   let entered = process.new_subject()
-  let assert Ok(fwd) = forwarder.new(process.new_name("startup_probe"), 1)
-  let assert Ok(event) = sinal.event([atom.create("startup_probe")], fields.empty(), fields.empty())
-  let assert Ok(id) = sinal.handler_id("startup-probe-handler")
-  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+  let fwd = forwarder.new(process.new_name("startup_probe")) |> forwarder.with_capacity(1)
+  let event = sinal.event(["startup_probe"], fields.empty(), fields.empty())
+  let attachment = sinal.observe(event, fn(_, _) {
     let release = process.new_subject()
     process.send(entered, release)
     process.receive_forever(release)
@@ -81,12 +79,11 @@ fn delayed_sender() {
   let sending = process.new_subject()
   let done = process.new_subject()
   let entered = process.new_subject()
-  let assert Ok(fwd) = forwarder.new(process.new_name("delayed_probe"), 1)
+  let fwd = forwarder.new(process.new_name("delayed_probe")) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(first) = spec.start()
-  let assert Ok(event) = sinal.event([atom.create("delayed_probe")], fields.empty(), fields.empty())
-  let assert Ok(id) = sinal.handler_id("delayed-probe-handler")
-  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+  let event = sinal.event(["delayed_probe"], fields.empty(), fields.empty())
+  let attachment = sinal.observe(event, fn(_, _) {
     let release = process.new_subject()
     process.send(entered, release)
     process.receive_forever(release)
@@ -124,12 +121,11 @@ fn delayed_drop() {
   let sending = process.new_subject()
   let done = process.new_subject()
   let entered = process.new_subject()
-  let assert Ok(fwd) = forwarder.new(process.new_name("delayed_drop_probe"), 1)
+  let fwd = forwarder.new(process.new_name("delayed_drop_probe")) |> forwarder.with_capacity(1)
   let spec = forwarder.supervised(fwd)
   let assert Ok(first) = spec.start()
-  let assert Ok(event) = sinal.event([atom.create("delayed_drop_probe")], fields.empty(), fields.empty())
-  let assert Ok(id) = sinal.handler_id("delayed-drop-handler")
-  let assert Ok(attachment) = sinal.observe(id, event, fn(_, _) {
+  let event = sinal.event(["delayed_drop_probe"], fields.empty(), fields.empty())
+  let attachment = sinal.observe(event, fn(_, _) {
     let release = process.new_subject()
     process.send(entered, release)
     process.receive_forever(release)

@@ -2,16 +2,14 @@
 //// map of measurements or metadata, and back.
 ////
 //// Use this module to give a `sinal.Event` or a `sinal/span` span its
-//// measurement and metadata types. `string`, `int` and `bool` cover one
-//// atom key each; `optional` makes a single-key field absent-able; `pair`
-//// joins two field groups with distinct keys, and `imap` maps the result
-//// to a record. `field` builds a custom key with explicit encode and decode
-//// functions, for values the primitive constructors do not cover. `empty`
-//// declares no keys. Decoding reads only the declared keys and ignores any
-//// others in the map.
+//// measurement and metadata types. `string`, `int`, `float` and `bool`
+//// each declare one key; `enum` declares a key whose value is one of a
+//// fixed set; `optional` makes a one-key field absent-able; `field` covers
+//// any other value with an encoder and a `gleam/dynamic/decode` decoder.
+//// `record`, `parameter`, `and` and `build` join several fields into one
+//// record, one line per field. `empty` declares no keys.
 ////
 //// ```gleam
-//// import gleam/erlang/atom
 //// import sinal/fields
 ////
 //// pub type Request {
@@ -19,183 +17,210 @@
 //// }
 ////
 //// pub fn request_fields() -> fields.Fields(Request) {
-////   let assert Ok(pair) =
-////     fields.pair(
-////       fields.string(atom.create("method")),
-////       fields.int(atom.create("status")),
-////     )
-////   fields.imap(pair, fn(p) { Request(p.0, p.1) }, fn(r: Request) {
-////     #(r.method, r.status)
+////   fields.record({
+////     use method <- fields.parameter
+////     use status <- fields.parameter
+////     Request(method:, status:)
 ////   })
+////   |> fields.and(fields.string("method"), fn(r: Request) { r.method })
+////   |> fields.and(fields.int("status"), fn(r) { r.status })
+////   |> fields.build
 //// }
 //// ```
+////
+//// Only the first getter needs a type annotation: the record type is not
+//// known until `build`.
+////
+//// ## Keys are atoms
+////
+//// Each key becomes an atom of the native map, and the BEAM never frees an
+//// atom. A key must match `[a-z][a-z0-9_]{0,62}` and must be written in
+//// source code, never built from input. A key that breaks the grammar, a
+//// key declared twice in one record, an `optional` field over anything but
+//// one key, and an `enum` with no values or a repeated name are definition
+//// bugs: the constructor panics with a message naming the key.
+////
+//// ## Decoding
+////
+//// Decoding reads only the declared keys and ignores any others in the map.
+//// It fails with a `FieldError` when the term is not a map, a required key
+//// is missing, or a value does not decode. Encoding cannot fail.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 import sinal/internal/ffi
+import sinal/internal/name as grammar
 
+/// Why a native map did not decode. The union is closed: sinal adds no
+/// variant without a major release.
 pub type FieldError {
-  MissingField(name: String)
-  DuplicateField(name: String)
-  InvalidField(name: String, error: FieldDecodeError)
-  InvalidOptionalInner(names: List(String))
+  /// The measurements or metadata term was not a map.
+  NotAMap
+  /// A required key was absent.
+  MissingField(key: String)
+  /// The value at `key` did not decode; `errors` come from its decoder.
+  InvalidField(key: String, errors: List(decode.DecodeError))
 }
 
-pub type FieldDecodeError {
-  FieldDecodeError(message: String)
-}
-
-pub type FieldEncodeError {
-  FieldEncodeError(message: String)
-}
-
+/// A codec between a Gleam value and the keys it writes to a native map.
 pub opaque type Fields(a) {
   Fields(
     keys: List(Atom),
-    encode_fn: fn(a) -> Result(Dynamic, FieldEncodeError),
-    decode_fn: fn(Dynamic) -> Result(a, FieldError),
+    put: fn(a, Dynamic) -> Dynamic,
+    decode: fn(Dynamic) -> Result(a, FieldError),
   )
 }
 
-/// The empty field group: contributes no keys, rejects non-map terms at the boundary,
-/// and tolerates any foreign fields in a valid map.
+/// Declares no keys. It decodes any map as `Nil` and rejects a term that is
+/// not a map.
 pub fn empty() -> Fields(Nil) {
-  Fields(
-    keys: [],
-    encode_fn: fn(_nil) { Ok(ffi.empty_map()) },
-    decode_fn: fn(raw_map) {
-      case ffi.is_map(raw_map) {
-        True -> Ok(Nil)
-        False ->
-          Error(InvalidField("", FieldDecodeError("Expected a native BEAM map")))
-      }
-    },
-  )
+  Fields(keys: [], put: fn(_, map) { map }, decode: fn(raw) {
+    case ffi.is_map(raw) {
+      True -> Ok(Nil)
+      False -> Error(NotAMap)
+    }
+  })
 }
 
-/// Canonical constructor for a custom native field backed by a trusted BEAM atom key.
-/// Field identity is derived strictly from the atom. Encoding is fallible.
-/// Unrelated foreign fields present in a valid map are ignored.
+/// Declares one key whose value is written by `encode` and read by
+/// `decoder`. Use it for a value the other constructors do not cover.
+///
+/// ```gleam
+/// fields.field("attempt", dynamic.int, decode.int)
+/// ```
 pub fn field(
-  key: Atom,
-  encode: fn(a) -> Result(Dynamic, FieldEncodeError),
-  decode: fn(Dynamic) -> Result(a, FieldDecodeError),
+  key: String,
+  encode: fn(a) -> Dynamic,
+  decoder: decode.Decoder(a),
 ) -> Fields(a) {
-  let name = atom.to_string(key)
-  Fields(
-    keys: [key],
-    encode_fn: fn(item) {
-      case encode(item) {
-        Ok(val) -> Ok(ffi.map_from_pair(key, val))
-        Error(err) -> Error(err)
-      }
-    },
-    decode_fn: fn(raw_map) {
-      case ffi.is_map(raw_map) {
-        False ->
-          Error(InvalidField(
-            name,
-            FieldDecodeError("Expected a native BEAM map"),
-          ))
-        True ->
-          case ffi.map_get(raw_map, key) {
-            Error(Nil) -> Error(MissingField(name))
-            Ok(raw_val) ->
-              case decode(raw_val) {
-                Ok(item) -> Ok(item)
-                Error(err) -> Error(InvalidField(name, err))
-              }
-          }
-      }
-    },
+  single(key, "sinal/fields.field", encode, decoder)
+}
+
+/// Declares a key holding a UTF-8 binary.
+pub fn string(key: String) -> Fields(String) {
+  single(key, "sinal/fields.string", dynamic.string, decode.string)
+}
+
+/// Declares a key holding an integer.
+pub fn int(key: String) -> Fields(Int) {
+  single(key, "sinal/fields.int", dynamic.int, decode.int)
+}
+
+/// Declares a key holding a float. Decoding also accepts an integer, which
+/// native producers often send for a whole-number measurement, and converts
+/// it.
+pub fn float(key: String) -> Fields(Float) {
+  single(
+    key,
+    "sinal/fields.float",
+    dynamic.float,
+    decode.one_of(decode.float, [decode.int |> decode.map(int.to_float)]),
   )
 }
 
-/// Declares a native string field from a trusted, application-defined atom key.
-pub fn string(key: Atom) -> Fields(String) {
-  field(key, fn(value) { Ok(dynamic.string(value)) }, fn(raw) {
-    case decode.run(raw, decode.string) {
-      Ok(value) -> Ok(value)
-      Error(_) -> Error(FieldDecodeError("Expected a native BEAM string"))
-    }
-  })
+/// Declares a key holding a boolean.
+pub fn bool(key: String) -> Fields(Bool) {
+  single(key, "sinal/fields.bool", dynamic.bool, decode.bool)
 }
 
-/// Declares a native integer field from a trusted, application-defined atom key.
-pub fn int(key: Atom) -> Fields(Int) {
-  field(key, fn(value) { Ok(dynamic.int(value)) }, fn(raw) {
-    case decode.run(raw, decode.int) {
-      Ok(value) -> Ok(value)
-      Error(_) -> Error(FieldDecodeError("Expected a native BEAM integer"))
-    }
-  })
-}
-
-/// Declares a native boolean field from a trusted, application-defined atom key.
-pub fn bool(key: Atom) -> Fields(Bool) {
-  field(key, fn(value) { Ok(dynamic.bool(value)) }, fn(raw) {
-    case decode.run(raw, decode.bool) {
-      Ok(value) -> Ok(value)
-      Error(_) -> Error(FieldDecodeError("Expected a native BEAM boolean"))
-    }
-  })
-}
-
-/// Wraps a single-key field so its absence is a genuine option rather than a
-/// decode failure: a missing native key, or a present raw `nil`/`undefined`
-/// marker value at that key, decodes as `None`; any other present value
-/// decodes and encodes through `inner`. Encoding `None` omits the key
-/// entirely, so a foreign consumer sees no key rather than an explicit
-/// marker.
+/// Declares a key holding one of `values`, written as the UTF-8 binary
+/// `name(value)`. Decoding accepts that binary, or an atom with the same
+/// text, and fails on any other name.
 ///
-/// `inner` must declare exactly one native key, since presence is checked at
-/// that one key; an `inner` with zero or more than one key (`fields.empty()`,
-/// a `pair`, ...) is rejected with `InvalidOptionalInner` rather than
-/// silently doing the wrong thing.
+/// ```gleam
+/// pub type Method {
+///   Get
+///   Post
+/// }
 ///
-/// This cannot distinguish a genuinely absent value from a present value
-/// that `inner` itself would encode as the atom `nil` or `undefined` — for
-/// example, wrapping Gleam's own `Nil` through `fields.field` as a
-/// legitimate non-absent payload. Do not compose `optional` with an `inner`
-/// whose valid encoded values include those two markers.
-pub fn optional(inner: Fields(a)) -> Result(Fields(Option(a)), FieldError) {
-  case inner.keys {
-    [key] -> Ok(build_optional(key, inner))
-    other -> Error(InvalidOptionalInner(list.map(other, atom.to_string)))
+/// fields.enum("method", [Get, Post], fn(method) {
+///   case method {
+///     Get -> "get"
+///     Post -> "post"
+///   }
+/// })
+/// ```
+///
+/// Panics when `values` is empty or two values share a name.
+pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
+  let named = list.map(values, fn(value) { #(name(value), value) })
+  let names = list.map(named, fn(pair) { pair.0 })
+  let first = case values {
+    [first, ..] -> first
+    [] ->
+      panic as {
+        "sinal/fields.enum: key " <> string.inspect(key) <> " has no values"
+      }
   }
+  case first_duplicate(names, []) {
+    Ok(duplicate) ->
+      panic as {
+        "sinal/fields.enum: key "
+        <> string.inspect(key)
+        <> " gives two values the name "
+        <> string.inspect(duplicate)
+      }
+    Error(Nil) -> Nil
+  }
+  let expected = "one of " <> string.join(names, ", ")
+  let decoder =
+    decode.one_of(decode.string, [atom.decoder() |> decode.map(atom.to_string)])
+    |> decode.then(fn(found) {
+      case list.key_find(named, found) {
+        Ok(value) -> decode.success(value)
+        Error(Nil) -> decode.failure(first, expected)
+      }
+    })
+  single(
+    key,
+    "sinal/fields.enum",
+    fn(value) { dynamic.string(name(value)) },
+    decoder,
+  )
 }
 
-fn build_optional(key: Atom, inner: Fields(a)) -> Fields(Option(a)) {
-  let name = atom.to_string(key)
+/// Makes a one-key field absent-able. Encoding `None` omits the key.
+/// Decoding reads a missing key, or the atom `nil` or `undefined` that a
+/// native producer may write instead, as `None`; any other value decodes
+/// through `inner`.
+///
+/// Do not wrap an `inner` whose own encoded values include the atoms `nil`
+/// or `undefined`: they would decode as `None`.
+///
+/// Panics when `inner` declares other than exactly one key.
+pub fn optional(inner: Fields(a)) -> Fields(Option(a)) {
+  let key = case inner.keys {
+    [key] -> key
+    other ->
+      panic as {
+        "sinal/fields.optional: the inner field must declare exactly one key, got "
+        <> string.inspect(list.map(other, atom.to_string))
+      }
+  }
   Fields(
     keys: inner.keys,
-    encode_fn: fn(value) {
+    put: fn(value, map) {
       case value {
-        None -> Ok(ffi.empty_map())
-        Some(actual) -> inner.encode_fn(actual)
+        None -> map
+        Some(actual) -> inner.put(actual, map)
       }
     },
-    decode_fn: fn(raw_map) {
-      case ffi.is_map(raw_map) {
-        False ->
-          Error(InvalidField(
-            name,
-            FieldDecodeError("Expected a native BEAM map"),
-          ))
-        True ->
-          case ffi.map_get(raw_map, key) {
-            Error(Nil) -> Ok(None)
-            Ok(raw_val) ->
-              case ffi.is_missing_marker(raw_val) {
-                True -> Ok(None)
-                False ->
-                  case inner.decode_fn(raw_map) {
-                    Ok(value) -> Ok(Some(value))
-                    Error(err) -> Error(err)
-                  }
+    decode: fn(raw) {
+      case ffi.map_lookup(raw, key) {
+        ffi.NotAMap -> Error(NotAMap)
+        ffi.Absent -> Ok(None)
+        ffi.Present(value) ->
+          case ffi.is_missing_marker(value) {
+            True -> Ok(None)
+            False ->
+              case inner.decode(raw) {
+                Ok(value) -> Ok(Some(value))
+                Error(error) -> Error(error)
               }
           }
       }
@@ -203,86 +228,154 @@ fn build_optional(key: Atom, inner: Fields(a)) -> Fields(Option(a)) {
   )
 }
 
-/// Composes two field specifications. Rejects duplicate declared native keys.
-pub fn pair(
-  left: Fields(a),
-  right: Fields(b),
-) -> Result(Fields(#(a, b)), FieldError) {
-  case check_duplicate_keys(left.keys, right.keys) {
-    Error(dup) -> Error(DuplicateField(atom.to_string(dup)))
-    Ok(Nil) ->
-      Ok(
-        Fields(
-          keys: list.append(left.keys, right.keys),
-          encode_fn: fn(pair_val: #(a, b)) {
-            case left.encode_fn(pair_val.0) {
-              Error(err) -> Error(err)
-              Ok(map_a) ->
-                case right.encode_fn(pair_val.1) {
-                  Error(err) -> Error(err)
-                  Ok(map_b) -> Ok(ffi.map_merge(map_a, map_b))
-                }
-            }
-          },
-          decode_fn: fn(raw_map) {
-            case left.decode_fn(raw_map) {
-              Error(err) -> Error(err)
-              Ok(val_a) ->
-                case right.decode_fn(raw_map) {
-                  Error(err) -> Error(err)
-                  Ok(val_b) -> Ok(#(val_a, val_b))
-                }
-            }
-          },
-        ),
-      )
-  }
+/// A record codec under construction. `record` starts it, each `and` adds a
+/// field and consumes one parameter of the constructor, and `build` ends it.
+pub opaque type Record(record, constructor) {
+  Record(
+    keys: List(Atom),
+    puts: List(fn(record, Dynamic) -> Dynamic),
+    decode: fn(Dynamic) -> Result(constructor, FieldError),
+  )
 }
 
-/// Re-expresses a field set with a different Gleam type using bidirectional mapping.
-pub fn imap(fields: Fields(a), from: fn(a) -> b, to: fn(b) -> a) -> Fields(b) {
-  Fields(
-    keys: fields.keys,
-    encode_fn: fn(val_b) { fields.encode_fn(to(val_b)) },
-    decode_fn: fn(raw_map) {
-      case fields.decode_fn(raw_map) {
-        Ok(val_a) -> Ok(from(val_a))
-        Error(err) -> Error(err)
+/// Starts a record codec from a curried constructor, usually written with
+/// `use x <- fields.parameter` for each field.
+pub fn record(constructor: constructor) -> Record(record, constructor) {
+  Record(keys: [], puts: [], decode: fn(raw) {
+    case ffi.is_map(raw) {
+      True -> Ok(constructor)
+      False -> Error(NotAMap)
+    }
+  })
+}
+
+/// Turns the rest of a `use` block into one parameter of a curried record
+/// constructor.
+pub fn parameter(next: fn(a) -> rest) -> fn(a) -> rest {
+  next
+}
+
+/// Adds the next field of the record: `field` encodes and decodes the
+/// value, and `get` reads it from the record when encoding. Add fields in
+/// the constructor's parameter order.
+///
+/// Panics when `field` declares a key the record already has.
+pub fn and(
+  record: Record(record, fn(a) -> rest),
+  field: Fields(a),
+  get: fn(record) -> a,
+) -> Record(record, rest) {
+  case list.find(field.keys, fn(key) { list.contains(record.keys, key) }) {
+    Ok(duplicate) ->
+      panic as {
+        "sinal/fields.and: key "
+        <> string.inspect(atom.to_string(duplicate))
+        <> " is declared twice in one record"
+      }
+    Error(Nil) -> Nil
+  }
+  let previous = record.decode
+  Record(
+    keys: list.append(record.keys, field.keys),
+    puts: [fn(value, map) { field.put(get(value), map) }, ..record.puts],
+    decode: fn(raw) {
+      case previous(raw) {
+        Error(error) -> Error(error)
+        Ok(constructor) ->
+          case field.decode(raw) {
+            Error(error) -> Error(error)
+            Ok(value) -> Ok(constructor(value))
+          }
       }
     },
   )
 }
 
-/// Returns the declared logical field labels derived from the native keys.
-pub fn declared_keys(fields: Fields(a)) -> List(String) {
+/// Ends a record codec once every constructor parameter has a field.
+pub fn build(record: Record(record, record)) -> Fields(record) {
+  let puts = list.reverse(record.puts)
+  Fields(
+    keys: record.keys,
+    put: fn(value, map) {
+      list.fold(puts, map, fn(map, put) { put(value, map) })
+    },
+    decode: record.decode,
+  )
+}
+
+/// The keys `fields` writes, in declaration order.
+pub fn keys(fields: Fields(a)) -> List(String) {
   list.map(fields.keys, atom.to_string)
 }
 
-/// Returns the declared native atom keys.
-pub fn declared_native_keys(fields: Fields(a)) -> List(Atom) {
-  fields.keys
+/// Encodes `value` into the native map that `sinal.emit` would send. Use it
+/// to pin a package's wire format in tests or to hand a map to Erlang code.
+pub fn encode(fields: Fields(a), value: a) -> Dynamic {
+  fields.put(value, ffi.empty_map())
 }
 
-/// Encodes a value into a native BEAM map with error propagation.
-pub fn encode(fields: Fields(a), item: a) -> Result(Dynamic, FieldEncodeError) {
-  fields.encode_fn(item)
+/// Decodes a native map the way a handler would, reading only the
+/// declared keys.
+pub fn decode(fields: Fields(a), raw: Dynamic) -> Result(a, FieldError) {
+  fields.decode(raw)
 }
 
-/// Decodes a value from a native BEAM map, rejecting non-map terms and ignoring unrelated foreign keys.
-pub fn decode(fields: Fields(a), raw_map: Dynamic) -> Result(a, FieldError) {
-  fields.decode_fn(raw_map)
+/// Describes a decoding failure for logs.
+pub fn describe_error(error: FieldError) -> String {
+  case error {
+    NotAMap -> "expected a native map"
+    MissingField(key) -> "missing key " <> key
+    InvalidField(key, errors) ->
+      "invalid value at key "
+      <> key
+      <> ": "
+      <> string.join(list.map(errors, describe_decode_error), "; ")
+  }
 }
 
-fn check_duplicate_keys(
-  left: List(Atom),
-  right: List(Atom),
-) -> Result(Nil, Atom) {
-  case left {
-    [] -> Ok(Nil)
-    [head, ..tail] ->
-      case list.contains(right, head) {
-        True -> Error(head)
-        False -> check_duplicate_keys(tail, right)
+fn describe_decode_error(error: decode.DecodeError) -> String {
+  let decode.DecodeError(expected:, found:, path:) = error
+  let at = case path {
+    [] -> ""
+    _ -> " at " <> string.join(path, ".")
+  }
+  "expected " <> expected <> ", found " <> found <> at
+}
+
+fn single(
+  key: String,
+  caller: String,
+  encode: fn(a) -> Dynamic,
+  decoder: decode.Decoder(a),
+) -> Fields(a) {
+  let native_key = grammar.to_atom(key, caller:, what: "key")
+  Fields(
+    keys: [native_key],
+    put: fn(value, map) { ffi.map_put(map, native_key, encode(value)) },
+    decode: fn(raw) {
+      case ffi.map_lookup(raw, native_key) {
+        ffi.NotAMap -> Error(NotAMap)
+        ffi.Absent -> Error(MissingField(key))
+        ffi.Present(value) ->
+          case decode.run(value, decoder) {
+            Ok(decoded) -> Ok(decoded)
+            Error(errors) -> Error(InvalidField(key, errors))
+          }
+      }
+    },
+  )
+}
+
+fn first_duplicate(
+  names: List(String),
+  seen: List(String),
+) -> Result(String, Nil) {
+  case names {
+    [] -> Error(Nil)
+    [name, ..rest] ->
+      case list.contains(seen, name) {
+        True -> Ok(name)
+        False -> first_duplicate(rest, [name, ..seen])
       }
   }
 }

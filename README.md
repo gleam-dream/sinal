@@ -2,461 +2,273 @@
 
 A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead of dynamic maps and atoms.
 
-`sinal` wraps native BEAM `:telemetry` (1.4.2 or a later 1.x) directly. It replaces untyped string/atom map lookups with type-safe generic codecs (`Fields(t)`), structured event descriptors (`Event(m, d)`), and typed span execution. Typed encoding and decoding execute directly at the callback boundary; the included microbenchmarks establish an empirical performance baseline.
-
----
-
-## Getting Started
-
-The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` (`>= 1.4.2 and < 2.0.0`) is a direct dependency; applications do not need to declare it separately, and an Elixir or Erlang application can share any 1.x release from 1.4.2. `sinal` uses only telemetry's documented API. The dependency declaration below is for the planned initial release:
+`sinal` wraps native BEAM `:telemetry` (1.4.2 or a later 1.x). You describe an event once, with typed codecs for its measurements and metadata, and then emit and observe Gleam values. Erlang and Elixir code sees ordinary telemetry events with atom names and maps.
 
 ```toml
 [dependencies]
 sinal = ">= 0.1.0 and < 1.0.0"
 ```
 
-The `telemetry` OTP application must be running before handlers are attached. `gleam run` and `gleam test` start it. An application started another way starts it with the application, for example by listing `telemetry` among its release's applications or calling `application:ensure_all_started(telemetry)`. Without it, `attach`, `observe` and `detach` exit the caller with `noproc`, and `emit` reaches no handler.
+`telemetry` (`>= 1.4.2 and < 2.0.0`) comes with sinal; an application does not declare it. The `telemetry` OTP application must be running before handlers are attached; `gleam run` and `gleam test` start it.
 
----
+## The common path
 
-## Usage Examples
-
-Register long-lived handlers during application startup, before events are emitted, and retain each `Attachment` for shutdown cleanup. A public `HandlerId` must be unique among currently attached native telemetry handlers; an occupied ID returns `AlreadyExists`. `sinal` needs no global configuration step; its only node-wide setting is an optional forwarder route (see section 7). Define event names and field keys as trusted atoms in application code, and attach the resulting descriptors where their lifecycle is owned. Temporary observers can use `with_subscriptions`; its acquisition is sequential and visible to concurrent emitters.
-
-The examples are exercised against BEAM `:telemetry` in `test/sinal_test.gleam` and `test/readme_example_test.gleam`.
-
-Common imports used across examples:
-
-- `import sinal`
-- `import sinal/fields`
-- `import sinal/span`
-- `import sinal/forwarder`
-- `import gleam/erlang/atom`
-- `import gleam/erlang/process`
-- `import gleam/otp/static_supervisor`
-
-For ordinary events, use `sinal.event` and the primitive `fields.string`,
-`fields.int`, and `fields.bool` constructors; join several with `fields.pair`
-and map them to a record with `fields.imap`. Keys and event names must be
-trusted, application-defined atoms. Use `fields.field` only for a value the
-primitive constructors do not cover, with explicit encode and decode functions.
-
-An infallible observer needs only the decoded measurements and metadata:
+Define an event, observe it, emit it, and detach:
 
 ```gleam
 pub fn observe_request_example() {
-  let assert Ok(ev) =
+  let finished =
     sinal.event(
-      [atom.create("request"), atom.create("finished")],
-      fields.int(atom.create("duration_ms")),
-      fields.string(atom.create("route")),
+      ["request", "finished"],
+      fields.int("duration_ms"),
+      fields.string("route"),
     )
-  let assert Ok(id) = sinal.handler_id("request-finished-observer")
-  let assert Ok(attachment) =
-    sinal.observe(id, ev, fn(_duration_ms, _route) {
-      // Handle the event synchronously in the emitting process.
+  let attachment =
+    sinal.observe(finished, fn(_duration_ms, _route) {
+      // Runs in the emitting process, before `emit` returns.
       Nil
     })
-  let assert Ok(Nil) = sinal.emit(ev, 42, "/users")
+  sinal.emit(finished, 42, "/users")
   let assert Ok(Nil) = sinal.detach(attachment)
 }
 ```
 
-`observe` uses the same native attachment path as `attach`. Malformed native
-maps and observer exceptions remove the registration and emit the standard
-`[telemetry, handler, failure]` event; `observe` does not expose a typed failure
-callback. Use `attach` when you need a fallible handler, the selected event
-descriptor, or a typed failure callback. Keep the returned attachment to detach
-an observer explicitly.
+`sinal.event` takes the native event name and one codec for the measurements and one for the metadata. `observe` attaches a handler with a fresh handler id and returns its `Attachment`. `emit` encodes the values and runs every attached handler in the caller before it returns. A malformed native map or a crashing handler removes that handler and emits telemetry's `[telemetry, handler, failure]` event; it never crashes the emitter.
 
-### 1. Defining Fields and Events
+## Defaults
 
-Events are parameterized by measurement and metadata types: `Event(measurements, metadata)`.
+| Operation                                  | Default                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
+| Handler run inside `emit`                  | Synchronous in the emitting process, with no timeout; a slow handler blocks the emitter                 |
+| `emit` of a routed event                   | Handed to the route's forwarder; never waits; dropped and counted when the forwarder is full or down    |
+| Forwarder capacity (queued plus executing) | 1,024 events (`forwarder.default_capacity`); `forwarder.with_capacity(n)`; below 1 fails the start      |
+| Forwarder initialisation                   | 1,000 ms                                                                                                |
+| Forwarder shutdown                         | No drain; in-flight events are lost and reported as `Dropped(lost:)` by the next incarnation            |
+| Drop reporting                             | Coalesced per drain; counters shared by every `Forwarder` of one name and kept for the life of the node |
+| Routes                                     | No limit on count; stored in `persistent_term`, so each change is a node-wide update                    |
+| `attach` / `observe` / `detach`            | A `gen_server` call to native telemetry with its default 5,000 ms timeout                               |
+| Handler ids                                | Fresh for every attachment; `with_id` sets a stable one                                                 |
+| Event names and field keys                 | Atoms; each segment must match `[a-z][a-z0-9_]{0,62}`; a definition that breaks it panics               |
+| Decoding a native map                      | Reads declared keys only; other keys are ignored; no size bound                                         |
+
+Synchronous dispatch is the only unbounded default, and sinal cannot bound it: native telemetry runs handlers inline. An application bounds it by routing a library's events to a forwarder (see [Isolating a library's events](#isolating-a-librarys-events)).
+
+## Names are atoms
+
+Every event name segment and field key becomes an atom of the native event, and the BEAM never frees an atom. Sinal checks each one against `[a-z][a-z0-9_]{0,62}` when the event or codec is defined, so a URL, an email address or a name with spaces fails at definition instead of growing the atom table. The check does not stop a deliberate `"tenant_" <> id`: write names and keys in source code, never build them from input.
+
+A definition that breaks a rule is a programmer error, so the constructor panics with a message that names the offending value: an invalid segment or key, an empty event name, a key declared twice in one record, an `optional` over anything but one key, an `enum` with no values or a repeated name, a span key the span protocol owns, an empty `with_id`, or one event listed twice in `handler`. Any test that builds the definition catches it. Sinal has no fallible constructor for names built at run time, because such names would create atoms from data.
+
+## Records as measurements and metadata
+
+`fields.record` builds the codec of a record, one line per field. `fields.enum` covers a closed set of values, and `fields.field` covers anything else with an encoder and a `gleam/dynamic/decode` decoder:
 
 ```gleam
 pub type HttpMeasurements {
   HttpMeasurements(duration_ms: Int, bytes_sent: Int)
 }
 
+pub type Method {
+  Get
+  Post
+}
+
 pub type HttpMetadata {
-  HttpMetadata(method: String, route: String, status: Int)
+  HttpMetadata(method: Method, route: String, status: Int)
 }
 
-pub fn http_request_event() -> Result(
-  sinal.Event(HttpMeasurements, HttpMetadata),
-  sinal.EventError,
-) {
-  let assert Ok(meas_pair) =
-    fields.pair(
-      fields.int(atom.create("duration_ms")),
-      fields.int(atom.create("bytes_sent")),
-    )
-  let meas_fields =
-    fields.imap(
-      meas_pair,
-      fn(p) { HttpMeasurements(p.0, p.1) },
-      fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
-    )
+pub fn http_request_event() -> sinal.Event(HttpMeasurements, HttpMetadata) {
+  let measurements =
+    fields.record({
+      use duration_ms <- fields.parameter
+      use bytes_sent <- fields.parameter
+      HttpMeasurements(duration_ms:, bytes_sent:)
+    })
+    |> fields.and(fields.int("duration_ms"), fn(m: HttpMeasurements) {
+      m.duration_ms
+    })
+    |> fields.and(fields.int("bytes_sent"), fn(m) { m.bytes_sent })
+    |> fields.build
 
-  let assert Ok(method_route) =
-    fields.pair(
-      fields.string(atom.create("method")),
-      fields.string(atom.create("route")),
+  let metadata =
+    fields.record({
+      use method <- fields.parameter
+      use route <- fields.parameter
+      use status <- fields.parameter
+      HttpMetadata(method:, route:, status:)
+    })
+    |> fields.and(
+      fields.enum("method", [Get, Post], method_name),
+      fn(m: HttpMetadata) { m.method },
     )
-  let assert Ok(meta_triple) =
-    fields.pair(method_route, fields.int(atom.create("status")))
-  let meta_fields =
-    fields.imap(
-      meta_triple,
-      fn(p) {
-        let #(#(method, route), status) = p
-        HttpMetadata(method: method, route: route, status: status)
-      },
-      fn(m: HttpMetadata) { #(#(m.method, m.route), m.status) },
-    )
+    |> fields.and(fields.string("route"), fn(m) { m.route })
+    |> fields.and(fields.int("status"), fn(m) { m.status })
+    |> fields.build
 
-  sinal.event(
-    [atom.create("http"), atom.create("server"), atom.create("request")],
-    meas_fields,
-    meta_fields,
-  )
+  sinal.event(["http", "server", "request"], measurements, metadata)
 }
-```
 
-### 2. Emitting Events
-
-```gleam
-pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
-  let meas = HttpMeasurements(duration_ms: 42, bytes_sent: 2048)
-  let meta = HttpMetadata(method: "GET", route: "/api/users", status: 200)
-
-  case sinal.emit(ev, meas, meta) {
-    Ok(Nil) -> Nil
-    Error(sinal.EncodingFailed(fields.FieldEncodeError(msg))) -> panic as msg
+fn method_name(method: Method) -> String {
+  case method {
+    Get -> "get"
+    Post -> "post"
   }
 }
 ```
 
-### 3. Attaching and Detaching Handlers
+Only the first getter needs a type annotation, because the record type is not known until `build`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
+
+## Handlers
+
+`observe` covers an infallible handler of one event. A `Subscription` describes any other registration, and `attach` installs it until `detach`:
 
 ```gleam
-pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
-  let assert Ok(hid) = sinal.handler_id("prometheus-http-metrics")
-
-  let handler = fn(
-    _event,
-    _measurements: HttpMeasurements,
-    _metadata: HttpMetadata,
-  ) {
-    // Record metrics synchronously
-    Ok(Nil)
-  }
-
-  let on_failure = fn(_event, _failure) {
-    // Called if measurements/metadata cannot be decoded or handler returned Error
-    Nil
-  }
-
-  let assert Ok(attachment) = sinal.attach(hid, ev, handler, on_failure)
-
-  // Later, cleanly detach handler:
-  let assert Ok(Nil) = sinal.detach(attachment)
-  Nil
-}
-```
-
-### 4. Scoped Subscriptions
-
-Bind an event and observer as a pure `Subscription`, then run with any mix of
-measurement and metadata types. Acquisition is sequential, so concurrent
-emitters can observe a partial set while it is being installed. On acquisition
-failure, work is skipped and earlier registrations are detached. Cleanup runs
-on normal return or catchable BEAM exception (error, exit, throw), preserving
-the original exception. Uncatchable termination such as `kill` bypasses cleanup.
-
-```gleam
-pub fn scoped_metrics_example(
+pub fn attach_metrics(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
-) -> Result(sinal.SubscriptionCompletion(Int), sinal.SubscriptionScopeError) {
-  let observer = sinal.subscription(event, fn(_measurements, _metadata) { Nil })
-
-  sinal.with_subscriptions(sinal.subscriptions([observer]), fn() {
-    // Work runs with attachments active.
-    // Detach runs on normal return or catchable error, exit, or throw.
-    // Original error/exit/throw is re-raised with exact origin stacktrace.
-    42
-  })
+) -> sinal.Attachment {
+  let subscription =
+    sinal.handler(
+      [event],
+      fn(_event, measurements: HttpMeasurements, _metadata: HttpMetadata) {
+        case measurements.duration_ms >= 0 {
+          True -> Ok(Nil)
+          False -> Error("negative duration")
+        }
+      },
+      fn(_event, failure) {
+        // A malformed native map or an `Error` from the handler; telemetry
+        // then removes the handler.
+        let _ = sinal.describe_handler_failure(failure, fn(e) { e })
+        Nil
+      },
+    )
+    |> sinal.with_id("http-metrics")
+  let assert Ok(attachment) = sinal.attach(subscription)
+  attachment
 }
 ```
 
-`handler_subscription(id, event, handler, on_failure)` retains a typed handler
-error and lets the application choose a handler ID. `with_subscriptions` reports
-the zero-based index of an acquisition failure and any rollback failures; a
-successful run carries its work result and indexed cleanup failures. A raised
-acquisition exception also rolls back prior registrations before it is
-re-raised. Use `with_exception_cleanup_reporter(plan, reporter)` if cleanup
-failures during exception unwinding need separate reporting. `attach_many` and
-`with_attachments` remain the native same-shaped
-grouping path when one registration must cover multiple event names.
+- `sinal.subscription(event, run)` is the `Subscription` form of `observe`.
+- `sinal.handler(events, run, on_failure)` registers one handler for several events of the same shape. `run` receives the event that fired and may return an error. `on_failure` receives a `HandlerFailure`: `MalformedMeasurements`, `MalformedMetadata` or `HandlerReturned`. Telemetry then removes the handler and emits `[telemetry, handler, failure]`.
+- `sinal.with_id(subscription, id)` replaces the fresh handler id with a stable binary id, so Erlang or Elixir code can detach it. `attach` returns `AlreadyExists(id)` while another handler holds the id.
+- `detach` returns `Error(Nil)` when the handler was no longer attached, for example because telemetry removed it after a failure.
 
-### 5. Native Telemetry Spans (`sinal/span`)
+## Scoped subscriptions
 
-Execute code wrapped in standard `:telemetry` spans, emitting start and stop (or exception) events:
+`with_subscriptions` attaches a group of subscriptions for the duration of one function call:
 
 ```gleam
-pub type QueryMeta {
-  QueryMeta(sql: String)
+pub fn count_requests(
+  event: sinal.Event(HttpMeasurements, HttpMetadata),
+  work: fn() -> a,
+) -> Result(sinal.SubscriptionCompletion(a), sinal.SubscriptionScopeError) {
+  let seen = process.new_subject()
+  let observer = sinal.subscription(event, fn(_, _) { process.send(seen, Nil) })
+  // Attached before `work` runs and detached when it returns or raises.
+  sinal.with_subscriptions(sinal.subscriptions([observer]), work)
 }
+```
 
-pub fn query_meta_fields() -> fields.Fields(QueryMeta) {
-  fields.imap(fields.string(atom.create("sql")), QueryMeta, fn(q: QueryMeta) {
-    q.sql
-  })
-}
+Subscriptions attach in list order and detach in reverse order. When one fails to attach, the work does not run, the earlier ones are detached, and `SubscriptionAttachFailed(index:, error:, rollback_failures:)` names it. When the work raises (error, exit or throw), every subscription is detached and the exception is re-raised with its class, reason and stacktrace; `with_exception_cleanup_reporter` reports cleanup failures that happen meanwhile. A completed run returns `SubscriptionCompletion(work_result:, cleanup_failures:)`. Attaching is not atomic, so a concurrent emitter can see a partial set, and a killed process skips cleanup.
 
-pub fn run_database_query(query_str: String) -> String {
-  // Simulated database execution
-  "result for: " <> query_str
-}
+## Native spans
 
-pub fn execute_traced_query(query_str: String) -> String {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("db"), atom.create("query")])
-  let assert Ok(sp) =
-    span.define_span(
-      prefix,
-      query_meta_fields(),
-      fields.empty(),
-      query_meta_fields(),
+`sinal/span` wraps work in native telemetry's start, stop and exception events:
+
+```gleam
+pub fn traced_query(sql: String) -> List(String) {
+  let query =
+    span.define(
+      ["db", "query"],
+      start_metadata: fields.string("sql"),
+      stop_measurements: fields.empty(),
+      stop_metadata: fields.int("rows"),
     )
-
-  span.run_span(sp, QueryMeta(sql: query_str), fn() {
-    let result = run_database_query(query_str)
+  span.run(query, sql, fn() {
+    let rows = ["row for " <> sql]
     span.Completion(
-      result: result,
+      result: rows,
       measurements: Nil,
-      metadata: QueryMeta(sql: query_str),
+      metadata: list.length(rows),
     )
   })
 }
 ```
 
-`run_span_result` returns `SpanCompleted(result)`, `StartEncodingFailed(error)`,
-or `CompletionEncodingFailed(result, error)`. A start encoding failure runs no
-work and emits no event. A completion encoding failure retains the completed
-business result and delegates to native telemetry to emit an exception event
-whose structured reason identifies the instrumentation failure; the result is
-kept private from that event. It emits no stop event. Catchable work exceptions
-follow native telemetry's exception path and retain their original class,
-reason, and stacktrace. `run_span` is the distinct raising policy for encoding
-failures. Use `duration_in(duration, Millisecond)`,
-`system_time_in(time, Second)`, or `monotonic_time_in(time, Native)` to read
-timing values in an explicit `TimeUnit`. All native timing fields must decode
-as integers before their opaque wrappers are constructed.
+`span.events(query)` returns the three typed events for `observe` or `handler`. The stop event carries the extra measurements and metadata of the `Completion`; a raised exception emits the exception event and is re-raised unchanged. `duration_in`, `system_time_in` and `monotonic_time_in` read the timing fields in an explicit `TimeUnit`. A span runs in one process and ignores forwarder routes.
 
-### 6. Forwarded Delivery (`sinal/forwarder`)
+## Isolating a library's events
 
-Every handler attached with `sinal.attach`/`sinal.observe` runs synchronously
-in the emitting process, so a slow or blocked handler stalls the producer.
-`sinal/forwarder` is an additive, opt-in hop: it hands an already-encoded
-event to a dedicated forwarder process before any handler runs, so a stalled
-handler blocks the forwarder instead of the producer. `sinal.emit` and
-`sinal.attach`/`sinal.observe` are unchanged for any caller that does not use
-it.
+Handlers run inside `emit`, so a slow handler of a library's events slows the library. The application isolates the library with one supervised forwarder and one route, once, at start:
 
 ```gleam
-pub fn build_supervisor(forwarder_name: process.Name(forwarder.Message)) {
-  let assert Ok(fwd) = forwarder.new(forwarder_name, 1024)
-  let assert Ok(_started) =
+pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
+  let observations = forwarder.new(name)
+  let assert Ok(_) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(forwarder.supervised(fwd))
+    |> static_supervisor.add(forwarder.supervised(observations))
     |> static_supervisor.start
-  fwd
+  // Every `sinal.emit` of an event named `my_library..` now returns as soon
+  // as the event is handed to the forwarder.
+  forwarder.route(["my_library"], observations)
 }
+```
 
-pub fn emit_via_forwarder(
-  fwd: forwarder.Forwarder,
-  ev,
-  measurements,
-  metadata,
-) {
-  case forwarder.emit(fwd, ev, measurements, metadata) {
+From then on, every `sinal.emit` of an event whose name starts with `my_library` hands the event to the forwarder's process and returns. A full or stopped forwarder drops the event and counts it; the forwarder reports the counts in its own `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`, measurements `Dropped(rejected:, lost:, unavailable:)`). The library itself changes nothing: it emits with `sinal.emit` either way.
+
+- **Longest prefix wins.** `[]` routes every event. Routing a prefix again replaces its forwarder; `forwarder.unroute(prefix)` restores synchronous delivery.
+- **The handler's `self()` is the forwarder.** Process-dictionary context from the emitter is not carried across the hop.
+- **No loops.** A forwarder's drop report and native spans ignore routes.
+
+Sinal ships no default forwarder application: the application owns the forwarder's name, capacity and supervision.
+
+## A package that owns its forwarder
+
+A package that runs its own forwarder, one per database for example, emits to it directly and sees the refusal:
+
+```gleam
+pub fn emit_owned(
+  observations: forwarder.Forwarder,
+  event: sinal.Event(Int, Nil),
+) -> Nil {
+  case forwarder.emit(observations, event, 1, Nil) {
     Ok(Nil) -> Nil
-    Error(forwarder.ForwardEncodingFailed(_)) -> panic as "bad event shape"
+    // Dropped and counted in the forwarder's `dropped_event`.
     Error(forwarder.CapacityExceeded) -> Nil
     Error(forwarder.ForwarderUnavailable) -> Nil
   }
 }
 ```
 
-`forwarder.new(name, capacity)` allocates the forwarder's shared counters
-without starting a process; `capacity` must be positive. Pass a
-`process.Name` created once at application start, the same way any named
-`gleam_erlang` process is named — never inside a loop. `forwarder.supervised`
-turns the result into a `supervision.ChildSpecification(Nil)` for an OTP
-supervisor to own and restart.
+`forwarder.new(name)` holds 1,024 events; `forwarder.with_capacity(n)` changes that. `forwarder.supervised(forwarder)` returns a `ChildSpecification(Forwarder)`. Create the `process.Name` once at application start: every `Forwarder` built from one name shares its drop counters, which live for the life of the node.
 
-`forwarder.emit` encodes with the same `Fields` codecs as `sinal.emit`, then
-hands the event to the forwarder process, returning as soon as that hand-off
-completes without waiting for any attached handler:
+## Operational limits
 
-- `ForwardEncodingFailed(error)` — the same encoding failure `sinal.emit`
-  would report. It never reaches the capacity counters, so it never consumes
-  a slot.
-- `CapacityExceeded` — the forwarder already has `capacity` messages in
-  flight; this send is dropped and counted as `rejected` in the forwarder's
-  own `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`,
-  carrying `Dropped(rejected:, lost:, unavailable:)`), reported once per
-  `ReportDrops` drain cycle rather than once per drop.
-- `ForwarderUnavailable` — no incarnation has published a forwarding target
-  (not started, still initialising, or between incarnations). The send is
-  dropped and counted as `unavailable`. A later drop drain or supervised
-  restart can report it. A replacement starts with fresh admission capacity;
-  it never inherits the previous actor's queued events.
+- **Unspecified handler order.** When several handlers are attached to one event, native telemetry calls them in an unspecified order.
+- **Detach does not wait.** Detaching stops later deliveries but does not wait for, or interrupt, a handler already running in another process.
+- **Uncatchable exits bypass cleanup.** A killed process skips scoped cleanup.
+- **Handler storage.** Native telemetry keeps handlers in an ETS table. Sinal has no wrapper for `:telemetry.persist/0`; an application that wants it declares `@external(erlang, "telemetry", "persist")` and calls it after attaching its long-lived handlers.
+- **No export or unbounded buffering.** Sinal delivers in process. Export (OTLP, StatsD, Prometheus) belongs in a separate adapter. The forwarder is a bounded, best-effort hop, not a queue.
+- **Forwarder delivery is best-effort and per-producer FIFO.** A send beyond capacity or to a stopped forwarder is dropped and counted, never retried. One producer's events to one forwarder keep their order; events split across routes, or across a route change, do not.
+- **A handler's exit can stop the forwarder.** Native telemetry isolates a handler that raises, but not one that receives an exit signal.
+- **Capacity belongs to one incarnation.** A restarted forwarder starts with fresh admission counters, and a delayed producer cannot enqueue into the replacement. An existing ETS table with the forwarder's name, or a capacity below 1, makes the start fail with `InitFailed`.
+- **Admission is one atomic increment.** It never admits past capacity, but under concurrent load at the boundary it can refuse a send that would have fit under another ordering.
 
-Handlers attach exactly as before — same `sinal.attach`/`sinal.observe`, same
-native failure isolation for a handler that raises — except their `self()`
-is the forwarder process, not the original caller, and process-dictionary
-context from the caller is not carried across the hop. Unlike a raise, a
-handler's own _exit_ (from a link, or an untrappable `kill`) is not isolated
-by native telemetry and can take the forwarder process down. See "Operational
-Limits and Semantics" below for the forwarder's delivery, ordering, and
-restart guarantees. Constructing more than one `Forwarder` for the same
-`process.Name` gives each its own, unshared counters — use one `Forwarder`
-value per name.
+## Target and support
 
-### 7. Routing a Library's Events (`sinal/forwarder`)
+| Target            | Status                        | Notes                                                                                         |
+| :---------------- | :---------------------------- | :-------------------------------------------------------------------------------------------- |
+| **Erlang / BEAM** | **Initial release candidate** | CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                               |
+| **JavaScript**    | **Unsupported**               | `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes and atom tables. |
 
-A library that emits observations cannot know whether its application wants
-them synchronous or forwarded, and should not own a forwarder's name and
-capacity. It calls `forwarder.emit_routed`; the application decides with
-`forwarder.route(prefix, forwarder)`, once, at startup.
-
-```gleam
-pub fn route_library_events(fwd: forwarder.Forwarder) -> Nil {
-  // Application start, after the forwarder is supervised.
-  forwarder.route([atom.create("my_library")], fwd)
-}
-
-pub fn library_observe(ev, measurements, metadata) -> Nil {
-  // Library code: forwarded if the application routed this name,
-  // synchronous otherwise. Drops are the forwarder's to report.
-  let _ = forwarder.emit_routed(ev, measurements, metadata)
-  Nil
-}
-```
-
-- **No route: synchronous.** An `emit_routed` event whose name has no routed
-  prefix is exactly `sinal.emit`: handlers run in the caller and finish before
-  it returns. An application that routes nothing changes nothing.
-- **Longest prefix wins.** A route covers every event whose name starts with
-  its prefix; `[]` covers every routed event. Routing a prefix again replaces
-  its forwarder; `forwarder.unroute(prefix)` removes it.
-- **A routed event never blocks and never falls back inline.** It behaves
-  exactly as `forwarder.emit` to that forwarder: over capacity it is dropped,
-  returns `CapacityExceeded`, and is counted as `rejected` in the forwarder's
-  `[sinal, forwarder, dropped]` report; with the forwarder not running it is
-  dropped, returns `ForwarderUnavailable`, and is counted as `unavailable` in
-  the report its next incarnation makes when it starts. A library can
-  therefore ignore the result without hiding a loss. There is no
-  backpressure: the emitter never waits for handler execution.
-- **Handler failures stay off the emitter.** A raising handler is detached by
-  native telemetry on either path. Behind a route, a handler exit that stops
-  the forwarder loses its in-flight events, which the restarted forwarder
-  reports as `Dropped(lost:)`.
-- **The library accepts a different `self()`.** A library that emits through
-  `emit_routed` must not rely on its caller's process dictionary in handlers,
-  and cannot route a native span.
-
-`sinal.emit` and `forwarder.emit` never consult routes, and a forwarder
-emits its own `dropped_event` directly with `sinal.emit`, so a route (even
-`[]`) cannot loop, and reporting a drop never causes another drop.
-
----
-
-## Target and Support Matrix
-
-| Target            | Status                        | Notes                                                                                                                  |
-| :---------------- | :---------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| **Erlang / BEAM** | **Initial release candidate** | Full initial facade implemented. CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                       |
-| **JavaScript**    | **Unsupported**               | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
-
----
-
-## Architecture and Core Design
-
-1. **Direct Native Binding**: Measurements and metadata are decoded directly from native Erlang maps into typed Gleam records via explicit field codecs at the callback boundary.
-2. **Atom Safety**: Event prefixes and field names use Erlang atoms. Atoms must be trusted constants or pre-validated identifiers; never dynamically construct atoms from untrusted user strings.
-3. **Same-Process Synchronous Dispatch**: Telemetry handlers execute synchronously inside the emitting process.
-4. **Honest Failure Isolation**: Handler errors and malformed maps notify a local typed observer and emit the standard native `[telemetry, handler, failure]` event before removing the failing handler, without crashing the emitter.
-
----
-
-## Operational Limits and Semantics
-
-- **Span event names**: `span.events(sp)` exposes typed `start`, `stop`, and `exception` descriptors for a span prefix. Attach observers before calling `run_span` or `run_span_result` when those events must be seen. Native telemetry owns the lifecycle and timing fields.
-- **Span result retention**: `run_span_result` preserves a completed work result when stop instrumentation encoding fails. It cannot recover a result from work that raises; native telemetry emits an exception event and re-raises the original exception.
-- **Synchronous Execution**: Handlers execute synchronously in the caller process. Slow handlers directly block the emitter.
-- **Unspecified Handler Order**: When multiple handlers are attached to an event, the order in which `:telemetry` calls them is explicitly unspecified.
-- **Non-Quiescence on Detach**: Detaching a handler prevents it from being selected for subsequent event emissions. However, if a callback is already executing in flight in another process, detaching does not wait for or abort that in-flight execution.
-- **Uncatchable VM Exits**: Abrupt process exits or untrappable signals (`kill`) bypass cleanup hooks.
-- **Handler storage**: native telemetry keeps attached handlers in an ETS table. `sinal` has no wrapper for `:telemetry.persist/0`, which moves them into `persistent_term`; an application that wants it declares its own `@external(erlang, "telemetry", "persist")` and calls it after attaching its long-lived handlers.
-- **No Network Export or Unbounded Buffering**: `sinal` is an in-process telemetry delivery facade. Network export (OTLP, StatsD, Prometheus) and unbounded batch buffering belong in dedicated adapter processes. `sinal/forwarder` (above) is the one in-core exception, and it is deliberately narrow: a bounded, best-effort, in-process hop, not a queue, not export, and not a substitute for a real buffering adapter.
-- **Forwarder delivery is best-effort**: `forwarder.emit` never blocks and never retries. A send that would exceed capacity, or that targets a forwarder not currently running, is dropped and reported rather than queued.
-- **Forwarder ordering is per-producer, not global**: native BEAM message ordering guarantees a single producer's forwarded events are dispatched in the order it sent them. Interleaving across producers is unspecified, as it already is for native telemetry handler order.
-- **The forwarder is the handler's `self()`**: a handler attached to a forwarded event runs inside the forwarder process, not the original caller. Process-dictionary context from the producer is not carried across the hop, and a native telemetry span cannot be forwarded (its start and stop must share one process to measure duration).
-- **Routed ordering holds per route**: a producer's `emit_routed` events that resolve to the same forwarder, or that are all unrouted, keep its send order. Events split across routes, or across a route change, have no relative order; after an `unroute`, a later synchronous event can run before an earlier forwarded one.
-- **Routes are node-global setup values**: they live in `persistent_term`, so `emit_routed` reads them without a lock (with no routes, it costs one lookup over `sinal.emit`; see the benchmark), while `route` and `unroute` are expensive and belong at application start and shutdown. Unroute before stopping a routed forwarder, or its events are dropped as unavailable (counted, but reported only if that forwarder starts again).
-- **Forwarder shutdown does not drain**: messages still in flight when the forwarder process stops are lost, not delivered. A supervised restart schedules a diagnostic `Dropped(lost:)` snapshot from the replacement process; it is not exact delivery accounting.
-- **Drop reporting is best effort**: `rejected` counts capacity refusals and `unavailable` counts sends made without a published target. These diagnostic counters survive restarts. `lost` snapshots outstanding work when a replacement starts; races with producers and handler completion can over- or under-count it. Reports can themselves be lost when their process stops. Observation success is never a delivery receipt.
-- **Capacity belongs to an incarnation**: a one-row named ETS table publishes a direct event subject together with fresh admission counters after initialisation. The table is owned by the actor and disappears on its death. A delayed producer retains the old subject and counters and cannot send into a replacement actor. Before publication, sends return `ForwarderUnavailable`. Admission counts pending events plus the executing handler. An incarnation also has one coalesced drop-notice flag and an optional startup report; delayed drop notices keep the old direct destination. An existing ETS table with the forwarder name makes startup fail with `InitFailed`.
-- **Concurrent emitters may see a spurious, safe rejection near the capacity boundary**: admission is a single atomic increment-then-check, so it never over-admits, but under concurrent load at the boundary it can reject a send that would have fit under a different ordering. It never admits past capacity.
-
----
-
-## Defaults
-
-| Operation                                 | Default                                                                                      |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Handler run inside `emit`                 | Synchronous in the emitting process, with no timeout; a slow handler blocks the emitter      |
-| `forwarder.emit` and routed `emit_routed` | Never waits; drops and counts the event when over capacity or when the forwarder is down     |
-| Forwarder capacity (queued + executing)   | Required argument to `forwarder.new`; below 1 returns `InvalidCapacity`                      |
-| Forwarder initialisation                  | 1000 ms                                                                                      |
-| Forwarder shutdown                        | No drain; in-flight events are lost and reported as `Dropped(lost:)` by the next incarnation |
-| Drop reporting                            | Coalesced per drain cycle; counters survive restarts                                         |
-| Routes                                    | No limit on count; stored in `persistent_term`, so each change is a node-wide update         |
-| `attach` / `observe` / `detach`           | A `gen_server` call to native telemetry with the default 5000 ms timeout                     |
-| Atoms for event names and field keys      | Created by the caller with `atom.create`; nothing bounds them                                |
-| Decoding a native map                     | Reads declared keys only; other keys are ignored                                             |
-
-Synchronous dispatch is the only unbounded default, and `sinal` cannot bound
-it. Route a library's event prefix to a forwarder (section 7) to take its
-handlers off the emitting process.
-
----
-
-## Development, Tests & Benchmarks
-
-To enter the dev shell and run test suites:
+## Development, tests and benchmarks
 
 ```sh
-# Enter reproducible dev environment
-nix develop
-
-# Run unit tests and bounded stress harness
-gleam test
-
-# Run microbenchmarks (reproducible latency and throughput baseline)
-gleam run -m benchmark
-
-# Run standalone bounded stress test
-gleam run -m stress_test
-
-# Validate documentation generation
-gleam docs build
-
-# Validate Hex package generation (dry run)
-gleam export hex-tarball
+nix develop                  # reproducible dev shell
+gleam test                   # unit, README and stress tests
+gleam run -m benchmark       # microbenchmarks
+gleam run -m stress_test     # standalone stress test
+python3 dev/check_forwarder.py   # synchronized forwarder start and restart races
 ```
 
-The synchronized forwarder startup/restart regression command is `python3 dev/check_forwarder.py` inside the development shell. It instruments disposable source copies only; production code contains no test hooks.
+The README's Gleam snippets are copied verbatim from `test/readme_example_test.gleam`, which compiles and runs them.

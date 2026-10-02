@@ -2,6 +2,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
+import gleam/list
 import gleeunit/should
 import sinal
 import sinal/fields
@@ -29,11 +30,18 @@ fn has_origin_frame(
   function: String,
 ) -> Bool
 
-@external(erlang, "scope_test_ffi", "is_span_instrumentation_reason")
-fn is_span_instrumentation_reason(reason: Dynamic, error: Dynamic) -> Bool
+@external(erlang, "scope_test_ffi", "native_map")
+fn native_map(pairs: List(#(String, Dynamic))) -> Dynamic
 
-@external(erlang, "scope_test_ffi", "has_span_result_slot")
-fn has_span_result_slot() -> Bool
+@external(erlang, "scope_test_ffi", "handler_records")
+fn handler_records(name: List(String)) -> List(#(Dynamic, atom.Atom))
+
+@external(erlang, "scope_test_ffi", "native_emit")
+fn native_emit(
+  name: List(String),
+  measurements: Dynamic,
+  metadata: Dynamic,
+) -> Nil
 
 @external(erlang, "scope_test_ffi", "native_to_milliseconds")
 fn native_to_milliseconds(value: Int) -> Int
@@ -42,17 +50,13 @@ fn native_to_milliseconds(value: Int) -> Int
 fn native_to_nanoseconds(value: Int) -> Int
 
 pub fn mixed_subscriptions_acquire_and_cleanup_test() {
-  let assert Ok(number_event) =
+  let number_event =
+    sinal.event(["api_control", "number"], fields.int("number"), fields.empty())
+  let name_event =
     sinal.event(
-      [atom.create("api_control"), atom.create("number")],
-      fields.int(atom.create("number")),
-      fields.empty(),
-    )
-  let assert Ok(name_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("name")],
-      fields.string(atom.create("name")),
-      fields.bool(atom.create("active")),
+      ["api_control", "name"],
+      fields.string("name"),
+      fields.bool("active"),
     )
   let subject = process.new_subject()
   let number =
@@ -73,74 +77,52 @@ pub fn mixed_subscriptions_acquire_and_cleanup_test() {
     })
   let outcome =
     sinal.with_subscriptions(sinal.subscriptions([number, name]), fn() {
-      let assert Ok(Nil) = sinal.emit(number_event, 7, Nil)
-      let assert Ok(Nil) = sinal.emit(name_event, "Ada", True)
+      sinal.emit(number_event, 7, Nil)
+      sinal.emit(name_event, "Ada", True)
       42
     })
   outcome
   |> should.equal(Ok(sinal.SubscriptionCompletion(42, [])))
   process.receive(subject, 100) |> should.equal(Ok("7"))
   process.receive(subject, 100) |> should.equal(Ok("Ada:active"))
-  let assert Ok(Nil) = sinal.emit(number_event, 8, Nil)
-  let assert Ok(Nil) = sinal.emit(name_event, "Lin", False)
+  sinal.emit(number_event, 8, Nil)
+  sinal.emit(name_event, "Lin", False)
   process.receive(subject, 20) |> should.be_error()
 }
 
 pub fn subscription_acquisition_failure_rolls_back_and_skips_work_test() {
-  let assert Ok(first_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("rollback_1")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(second_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("rollback_2")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(id) = sinal.handler_id("api-control-shared-id")
+  let first_event =
+    sinal.event(["api_control", "rollback_1"], fields.empty(), fields.empty())
+  let second_event =
+    sinal.event(["api_control", "rollback_2"], fields.empty(), fields.empty())
   let subject = process.new_subject()
   let first =
-    sinal.handler_subscription(
-      id,
-      first_event,
-      fn(_, _, _) {
-        process.send(subject, "first")
-        Ok(Nil)
-      },
-      fn(_, _) { Nil },
-    )
+    sinal.subscription(first_event, fn(_, _) { process.send(subject, "first") })
+    |> sinal.with_id("api-control-shared-id")
   let second =
-    sinal.handler_subscription(
-      id,
-      second_event,
-      fn(_, _, _) { Ok(Nil) },
-      fn(_, _) { Nil },
-    )
+    sinal.subscription(second_event, fn(_, _) { Nil })
+    |> sinal.with_id("api-control-shared-id")
   sinal.with_subscriptions(sinal.subscriptions([first, second]), fn() {
     process.send(subject, "work")
   })
   |> should.equal(
-    Error(sinal.SubscriptionAttachFailed(1, sinal.AlreadyExists, [])),
+    Error(
+      sinal.SubscriptionAttachFailed(
+        1,
+        sinal.AlreadyExists("api-control-shared-id"),
+        [],
+      ),
+    ),
   )
-  let assert Ok(Nil) = sinal.emit(first_event, Nil, Nil)
+  sinal.emit(first_event, Nil, Nil)
   process.receive(subject, 20) |> should.be_error()
 }
 
 pub fn subscription_work_exception_cleans_mixed_handlers_test() {
-  let assert Ok(first_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("throw_1")],
-      fields.int(atom.create("x")),
-      fields.empty(),
-    )
-  let assert Ok(second_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("throw_2")],
-      fields.string(atom.create("y")),
-      fields.empty(),
-    )
+  let first_event =
+    sinal.event(["api_control", "throw_1"], fields.int("x"), fields.empty())
+  let second_event =
+    sinal.event(["api_control", "throw_2"], fields.string("y"), fields.empty())
   let subject = process.new_subject()
   let caught =
     catch_exception(fn() {
@@ -154,8 +136,8 @@ pub fn subscription_work_exception_cleans_mixed_handlers_test() {
           }),
         ]),
         fn() {
-          let assert Ok(Nil) = sinal.emit(first_event, 1, Nil)
-          let assert Ok(Nil) = sinal.emit(second_event, "a", Nil)
+          sinal.emit(first_event, 1, Nil)
+          sinal.emit(second_event, "a", Nil)
           raise_test_throw("mixed_work_throw")
         },
       )
@@ -172,78 +154,56 @@ pub fn subscription_work_exception_cleans_mixed_handlers_test() {
   }
   process.receive(subject, 100) |> should.equal(Ok("first"))
   process.receive(subject, 100) |> should.equal(Ok("second"))
-  let assert Ok(Nil) = sinal.emit(first_event, 2, Nil)
-  let assert Ok(Nil) = sinal.emit(second_event, "b", Nil)
+  sinal.emit(first_event, 2, Nil)
+  sinal.emit(second_event, "b", Nil)
   process.receive(subject, 20) |> should.be_error()
 }
 
 pub fn subscription_cleanup_failures_keep_each_index_test() {
-  let assert Ok(first_event) =
+  let first_event =
+    sinal.event(["api_control", "cleanup_1"], fields.int("x"), fields.empty())
+  let second_event =
     sinal.event(
-      [atom.create("api_control"), atom.create("cleanup_1")],
-      fields.int(atom.create("x")),
+      ["api_control", "cleanup_2"],
+      fields.string("y"),
       fields.empty(),
     )
-  let assert Ok(second_event) =
-    sinal.event(
-      [atom.create("api_control"), atom.create("cleanup_2")],
-      fields.string(atom.create("y")),
-      fields.empty(),
-    )
-  let assert Ok(first_id) = sinal.handler_id("api-control-cleanup-first")
-  let assert Ok(second_id) = sinal.handler_id("api-control-cleanup-second")
   let first =
-    sinal.handler_subscription(
-      first_id,
-      first_event,
+    sinal.handler(
+      [first_event],
       fn(_, _, _) { Error("first failed") },
       fn(_, _) { Nil },
     )
   let second =
-    sinal.handler_subscription(
-      second_id,
-      second_event,
-      fn(_, _, _) { Error(27) },
-      fn(_, _) { Nil },
-    )
+    sinal.handler([second_event], fn(_, _, _) { Error(27) }, fn(_, _) { Nil })
   let result =
     sinal.with_subscriptions(sinal.subscriptions([first, second]), fn() {
-      let assert Ok(Nil) = sinal.emit(first_event, 1, Nil)
-      let assert Ok(Nil) = sinal.emit(second_event, "name", Nil)
+      sinal.emit(first_event, 1, Nil)
+      sinal.emit(second_event, "name", Nil)
       "work completed"
     })
   result
   |> should.equal(
     Ok(
       sinal.SubscriptionCompletion("work completed", [
-        sinal.SubscriptionCleanupFailure(
-          1,
-          sinal.DetachReturnedError(sinal.NotAttached),
-        ),
-        sinal.SubscriptionCleanupFailure(
-          0,
-          sinal.DetachReturnedError(sinal.NotAttached),
-        ),
+        sinal.SubscriptionCleanupFailure(1, sinal.AlreadyDetached),
+        sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached),
       ]),
     ),
   )
 }
 
 pub fn subscription_plan_reports_cleanup_during_work_exception_test() {
-  let assert Ok(event) =
+  let event =
     sinal.event(
-      [atom.create("api_control"), atom.create("cleanup_on_throw")],
+      ["api_control", "cleanup_on_throw"],
       fields.empty(),
       fields.empty(),
     )
-  let assert Ok(id) = sinal.handler_id("api-control-cleanup-on-throw")
   let observer =
-    sinal.handler_subscription(
-      id,
-      event,
-      fn(_, _, _) { Error("handler failed") },
-      fn(_, _) { Nil },
-    )
+    sinal.handler([event], fn(_, _, _) { Error("handler failed") }, fn(_, _) {
+      Nil
+    })
   let reports = process.new_subject()
   let plan =
     sinal.subscriptions([observer])
@@ -253,7 +213,7 @@ pub fn subscription_plan_reports_cleanup_during_work_exception_test() {
   let caught =
     catch_exception(fn() {
       sinal.with_subscriptions(plan, fn() {
-        let assert Ok(Nil) = sinal.emit(event, Nil, Nil)
+        sinal.emit(event, Nil, Nil)
         raise_test_throw("work failed after observer removal")
       })
     })
@@ -269,154 +229,63 @@ pub fn subscription_plan_reports_cleanup_during_work_exception_test() {
   }
   process.receive(reports, 100)
   |> should.equal(
-    Ok(sinal.SubscriptionCleanupFailure(
-      0,
-      sinal.DetachReturnedError(sinal.NotAttached),
-    )),
+    Ok(sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached)),
   )
 }
 
 pub fn malformed_native_span_timing_reaches_typed_failure_test() {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("bad_time")])
-  let assert Ok(definition) =
-    span.define_span(prefix, fields.empty(), fields.empty(), fields.empty())
+  let definition =
+    span.define(
+      ["api_control", "bad_time"],
+      start_metadata: fields.empty(),
+      stop_measurements: fields.empty(),
+      stop_metadata: fields.empty(),
+    )
   let events = span.events(definition)
-  let assert Ok(id) = sinal.handler_id("api-control-bad-time")
   let subject = process.new_subject()
   let assert Ok(attachment) =
-    sinal.attach(id, events.start, fn(_, _, _) { Ok(Nil) }, fn(_, failure) {
-      process.send(subject, failure)
-    })
-  let bad = ffi.map_from_pair(atom.create("system_time"), ffi.to_dynamic("bad"))
-  let measurements =
-    ffi.map_merge(
-      bad,
-      ffi.map_from_pair(atom.create("monotonic_time"), ffi.to_dynamic(10)),
+    sinal.attach(
+      sinal.handler([events.start], fn(_, _, _) { Ok(Nil) }, fn(_, failure) {
+        process.send(subject, failure)
+      }),
     )
-  ffi.telemetry_execute(
-    sinal.event_native_name(events.start),
-    measurements,
-    ffi.empty_map(),
+  native_emit(
+    sinal.name(events.start),
+    native_map([
+      #("system_time", dynamic.string("bad")),
+      #("monotonic_time", dynamic.int(10)),
+    ]),
+    native_map([]),
   )
   let assert Ok(failure) = process.receive(subject, 100)
   case failure {
     sinal.MalformedMeasurements(fields.InvalidField("system_time", _)) -> Nil
     _ -> panic as "expected rejected system_time"
   }
-  sinal.detach(attachment) |> should.equal(Error(sinal.NotAttached))
-}
-
-pub fn span_completion_encoding_failure_retains_result_without_terminal_event_test() {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("encode_fail")])
-  let extra =
-    fields.field(
-      atom.create("custom"),
-      fn(_value: Int) { Error(fields.FieldEncodeError("cannot encode custom")) },
-      fn(_) { Ok(0) },
-    )
-  let assert Ok(definition) =
-    span.define_span(prefix, fields.empty(), extra, fields.empty())
-  let events = span.events(definition)
-  let subject = process.new_subject()
-  let reason_subject = process.new_subject()
-  let assert Ok(start_id) = sinal.handler_id("api-control-start")
-  let assert Ok(stop_id) = sinal.handler_id("api-control-stop")
-  let assert Ok(exception_id) = sinal.handler_id("api-control-exception")
-  let assert Ok(start_attachment) =
-    sinal.observe(start_id, events.start, fn(_, _) {
-      process.send(subject, "start")
-    })
-  let assert Ok(stop_attachment) =
-    sinal.observe(stop_id, events.stop, fn(_, _) {
-      process.send(subject, "stop")
-    })
-  let assert Ok(exception_attachment) =
-    sinal.observe(exception_id, events.exception, fn(_, metadata) {
-      process.send(
-        reason_subject,
-        span.exception_reason_to_dynamic(metadata.reason),
-      )
-    })
-  let outcome =
-    span.run_span_result(definition, Nil, fn() {
-      process.send(subject, "work")
-      span.Completion("business-result", 5, Nil)
-    })
-  outcome
-  |> should.equal(span.CompletionEncodingFailed(
-    "business-result",
-    span.ExtraMeasurementsEncodingFailed(fields.FieldEncodeError(
-      "cannot encode custom",
-    )),
-  ))
-  process.receive(subject, 100) |> should.equal(Ok("start"))
-  process.receive(subject, 100) |> should.equal(Ok("work"))
-  process.receive(subject, 20) |> should.be_error()
-  let assert Ok(reason) = process.receive(reason_subject, 100)
-  is_span_instrumentation_reason(
-    reason,
-    ffi.to_dynamic(
-      span.ExtraMeasurementsEncodingFailed(fields.FieldEncodeError(
-        "cannot encode custom",
-      )),
-    ),
-  )
-  |> should.equal(True)
-  sinal.detach(start_attachment) |> should.equal(Ok(Nil))
-  sinal.detach(stop_attachment) |> should.equal(Ok(Nil))
-  sinal.detach(exception_attachment) |> should.equal(Ok(Nil))
-  has_span_result_slot() |> should.equal(False)
-}
-
-pub fn span_start_encoding_failure_skips_work_and_events_test() {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("start_fail")])
-  let start =
-    fields.field(
-      atom.create("input"),
-      fn(_value: Int) { Error(fields.FieldEncodeError("bad start")) },
-      fn(_) { Ok(0) },
-    )
-  let assert Ok(definition) =
-    span.define_span(prefix, start, fields.empty(), fields.empty())
-  let events = span.events(definition)
-  let subject = process.new_subject()
-  let assert Ok(id) = sinal.handler_id("api-control-start-fail")
-  let assert Ok(attachment) =
-    sinal.observe(id, events.start, fn(_, _) { process.send(subject, "start") })
-  span.run_span_result(definition, 1, fn() {
-    process.send(subject, "work")
-    span.Completion("never", Nil, Nil)
-  })
-  |> should.equal(
-    span.StartEncodingFailed(fields.FieldEncodeError("bad start")),
-  )
-  process.receive(subject, 20) |> should.be_error()
-  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  sinal.detach(attachment) |> should.equal(Error(Nil))
 }
 
 pub fn span_duration_conversion_is_explicit_test() {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("duration")])
-  let assert Ok(definition) =
-    span.define_span(prefix, fields.empty(), fields.empty(), fields.empty())
+  let definition =
+    span.define(
+      ["api_control", "duration"],
+      start_metadata: fields.empty(),
+      stop_measurements: fields.empty(),
+      stop_metadata: fields.empty(),
+    )
   let events = span.events(definition)
   let subject = process.new_subject()
   let start_subject = process.new_subject()
-  let assert Ok(id) = sinal.handler_id("api-control-duration")
-  let assert Ok(start_id) = sinal.handler_id("api-control-start-times")
-  let assert Ok(start_attachment) =
-    sinal.observe(start_id, events.start, fn(measurements, _) {
+  let start_attachment =
+    sinal.observe(events.start, fn(measurements, _) {
       process.send(start_subject, measurements)
     })
-  let assert Ok(attachment) =
-    sinal.observe(id, events.stop, fn(measurements, _) {
+  let attachment =
+    sinal.observe(events.stop, fn(measurements, _) {
       process.send(subject, measurements.duration)
     })
-  span.run_span_result(definition, Nil, fn() { span.Completion(9, Nil, Nil) })
-  |> should.equal(span.SpanCompleted(9))
+  span.run(definition, Nil, fn() { span.Completion(9, Nil, Nil) })
+  |> should.equal(9)
   let assert Ok(start) = process.receive(start_subject, 100)
   let system_time_is_positive =
     span.system_time_in(start.system_time, span.Native) > 0
@@ -443,64 +312,23 @@ pub fn span_duration_conversion_is_explicit_test() {
   sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
-pub fn nested_span_encoding_failures_keep_distinct_results_and_clean_slots_test() {
-  let assert Ok(outer_prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("nested_outer")])
-  let assert Ok(inner_prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("nested_inner")])
-  let failing =
-    fields.field(
-      atom.create("extra"),
-      fn(_value: Int) { Error(fields.FieldEncodeError("bad extra")) },
-      fn(_) { Ok(0) },
+pub fn span_run_preserves_native_work_exception_test() {
+  let definition =
+    span.define(
+      ["api_control", "work_throw"],
+      start_metadata: fields.empty(),
+      stop_measurements: fields.empty(),
+      stop_metadata: fields.empty(),
     )
-  let assert Ok(outer) =
-    span.define_span(outer_prefix, fields.empty(), failing, fields.empty())
-  let assert Ok(inner) =
-    span.define_span(inner_prefix, fields.empty(), failing, fields.empty())
-  let result =
-    span.run_span_result(outer, Nil, fn() {
-      let inner_result =
-        span.run_span_result(inner, Nil, fn() {
-          span.Completion("inner", 1, Nil)
-        })
-      inner_result
-      |> should.equal(span.CompletionEncodingFailed(
-        "inner",
-        span.ExtraMeasurementsEncodingFailed(fields.FieldEncodeError(
-          "bad extra",
-        )),
-      ))
-      span.Completion("outer", 2, Nil)
-    })
-  result
-  |> should.equal(span.CompletionEncodingFailed(
-    "outer",
-    span.ExtraMeasurementsEncodingFailed(fields.FieldEncodeError("bad extra")),
-  ))
-  has_span_result_slot() |> should.equal(False)
-}
-
-pub fn span_result_preserves_native_work_exception_test() {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("api_control"), atom.create("work_throw")])
-  let assert Ok(definition) =
-    span.define_span(prefix, fields.empty(), fields.empty(), fields.empty())
   let events = span.events(definition)
   let reason_subject = process.new_subject()
-  let assert Ok(id) = sinal.handler_id("api-control-work-throw")
-  let assert Ok(attachment) =
-    sinal.observe(id, events.exception, fn(_, metadata) {
-      process.send(
-        reason_subject,
-        span.exception_reason_to_dynamic(metadata.reason),
-      )
+  let attachment =
+    sinal.observe(events.exception, fn(_, metadata) {
+      process.send(reason_subject, span.reason_to_dynamic(metadata.reason))
     })
   let caught =
     catch_exception(fn() {
-      span.run_span_result(definition, Nil, fn() {
-        raise_test_throw("original_span_throw")
-      })
+      span.run(definition, Nil, fn() { raise_test_throw("original_span_throw") })
     })
   case caught {
     CaughtException(class, reason, stacktrace) -> {
@@ -515,6 +343,70 @@ pub fn span_result_preserves_native_work_exception_test() {
   let assert Ok(event_reason) = process.receive(reason_subject, 100)
   term_equals(event_reason, ffi.to_dynamic("original_span_throw"))
   |> should.equal(True)
-  has_span_result_slot() |> should.equal(False)
   sinal.detach(attachment) |> should.equal(Ok(Nil))
+}
+
+// Every handler gets a fresh id, so two observers of one event coexist
+// without the caller naming them, and each is attached as the exported
+// `sinal_ffi:handle/4`, which keeps native telemetry on its fast path.
+pub fn observe_uses_fresh_ids_and_an_exported_handler_test() {
+  let name = ["api_control", "fresh_ids"]
+  let event = sinal.event(name, fields.int("n"), fields.empty())
+  let subject = process.new_subject()
+  let first = sinal.observe(event, fn(n, _) { process.send(subject, #(1, n)) })
+  let second = sinal.observe(event, fn(n, _) { process.send(subject, #(2, n)) })
+  let named =
+    sinal.attach(
+      sinal.subscription(event, fn(_, _) { Nil })
+      |> sinal.with_id("api-control-named"),
+    )
+  let assert Ok(named) = named
+
+  let records = handler_records(name)
+  records |> list.length |> should.equal(3)
+  records
+  |> list.all(fn(record) { record.1 == atom.create("external") })
+  |> should.be_true()
+  records
+  |> list.any(fn(record) { record.0 == dynamic.string("api-control-named") })
+  |> should.be_true()
+
+  sinal.emit(event, 5, Nil)
+  let assert Ok(a) = process.receive(subject, 100)
+  let assert Ok(b) = process.receive(subject, 100)
+  list.sort([a.0, b.0], int.compare) |> should.equal([1, 2])
+
+  sinal.detach(first) |> should.equal(Ok(Nil))
+  sinal.detach(second) |> should.equal(Ok(Nil))
+  sinal.detach(named) |> should.equal(Ok(Nil))
+  handler_records(name) |> should.equal([])
+}
+
+pub fn describe_functions_name_the_failure_test() {
+  sinal.describe_attach_error(sinal.AlreadyExists("metrics"))
+  |> should.equal("a handler with id \"metrics\" is already attached")
+  sinal.describe_handler_failure(sinal.HandlerReturned(3), int.to_string)
+  |> should.equal("the handler returned an error: 3")
+  sinal.describe_handler_failure(
+    sinal.MalformedMetadata(fields.MissingField("route")),
+    int.to_string,
+  )
+  |> should.equal("malformed metadata: missing key route")
+  sinal.describe_handler_failure(
+    sinal.MalformedMeasurements(fields.NotAMap),
+    int.to_string,
+  )
+  |> should.equal("malformed measurements: expected a native map")
+  sinal.describe_cleanup_failure(sinal.AlreadyDetached)
+  |> should.equal("the handler was already detached")
+  sinal.describe_cleanup_failure(sinal.DetachCrashed("exit: timeout"))
+  |> should.equal("detaching crashed: exit: timeout")
+  sinal.describe_scope_error(
+    sinal.SubscriptionAttachFailed(2, sinal.AlreadyExists("metrics"), [
+      sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached),
+    ]),
+  )
+  |> should.equal(
+    "subscription 2 did not attach: a handler with id \"metrics\" is already attached; rollback failed for subscription 0 (the handler was already detached)",
+  )
 }

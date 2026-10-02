@@ -1,6 +1,6 @@
 import gleam/dynamic
 import gleam/dynamic/decode
-import gleam/erlang/atom
+import gleam/erlang/process
 import gleam/int
 import gleam/io
 import sinal
@@ -49,32 +49,18 @@ pub fn main() {
 }
 
 fn bench_zero_handler() {
-  let ev_name = [atom.create("bench"), atom.create("zero_handler")]
-  let key = atom.create("value")
-  let val_field =
-    fields.field(key, fn(i: Int) { Ok(dynamic.int(i)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(i) -> Ok(i)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
-    })
-  let assert Ok(ev) = sinal.event(ev_name, val_field, fields.empty())
+  let val_field = fields.field("value", dynamic.int, decode.int)
+  let ev = sinal.event(["bench", "zero_handler"], val_field, fields.empty())
 
   let warmup = 10_000
   let samples = 50_000
 
   // Warmup
-  loop_n(warmup, fn(i) {
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
-    Nil
-  })
+  loop_n(warmup, fn(i) { sinal.emit(ev, i, Nil) })
 
   // Sample
   let start_t = monotonic_nanos()
-  loop_n(samples, fn(i) {
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
-    Nil
-  })
+  loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
   let end_t = monotonic_nanos()
 
   let total_nanos = end_t - start_t
@@ -100,36 +86,19 @@ fn bench_zero_handler() {
 }
 
 fn bench_single_handler() {
-  let ev_name = [atom.create("bench"), atom.create("single_handler")]
-  let key = atom.create("value")
-  let val_field =
-    fields.field(key, fn(i: Int) { Ok(dynamic.int(i)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(i) -> Ok(i)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
-    })
-  let assert Ok(ev) = sinal.event(ev_name, val_field, fields.empty())
-  let assert Ok(hid) = sinal.handler_id("bench-single-handler")
-
-  let handler = fn(_ev, _val: Int, _meta) { Ok(Nil) }
-  let assert Ok(att) = sinal.attach(hid, ev, handler, fn(_, _) { Nil })
+  let val_field = fields.field("value", dynamic.int, decode.int)
+  let ev = sinal.event(["bench", "single_handler"], val_field, fields.empty())
+  let att = sinal.observe(ev, fn(_val: Int, _meta) { Nil })
 
   let warmup = 10_000
   let samples = 50_000
 
   // Warmup
-  loop_n(warmup, fn(i) {
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
-    Nil
-  })
+  loop_n(warmup, fn(i) { sinal.emit(ev, i, Nil) })
 
   // Sample
   let start_t = monotonic_nanos()
-  loop_n(samples, fn(i) {
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
-    Nil
-  })
+  loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
   let end_t = monotonic_nanos()
 
   let total_nanos = end_t - start_t
@@ -159,30 +128,22 @@ fn bench_single_handler() {
 }
 
 fn bench_codec() {
-  let key_a = atom.create("user_id")
-  let key_b = atom.create("active")
-  let field_a =
-    fields.field(key_a, fn(i: Int) { Ok(dynamic.int(i)) }, fn(dyn) {
-      case decode.run(dyn, decode.int) {
-        Ok(i) -> Ok(i)
-        Error(_) -> Error(fields.FieldDecodeError("expected int"))
-      }
+  let pair_codec =
+    fields.record({
+      use user_id <- fields.parameter
+      use active <- fields.parameter
+      #(user_id, active)
     })
-  let field_b =
-    fields.field(key_b, fn(b: Bool) { Ok(dynamic.bool(b)) }, fn(dyn) {
-      case decode.run(dyn, decode.bool) {
-        Ok(b) -> Ok(b)
-        Error(_) -> Error(fields.FieldDecodeError("expected bool"))
-      }
-    })
-  let assert Ok(pair_codec) = fields.pair(field_a, field_b)
+    |> fields.and(fields.int("user_id"), fn(p: #(Int, Bool)) { p.0 })
+    |> fields.and(fields.bool("active"), fn(p) { p.1 })
+    |> fields.build
 
   let warmup = 10_000
   let samples = 50_000
 
   // Warmup
   loop_n(warmup, fn(i) {
-    let assert Ok(encoded) = fields.encode(pair_codec, #(i, True))
+    let encoded = fields.encode(pair_codec, #(i, True))
     let assert Ok(_) = fields.decode(pair_codec, encoded)
     Nil
   })
@@ -190,7 +151,7 @@ fn bench_codec() {
   // Sample
   let start_t = monotonic_nanos()
   loop_n(samples, fn(i) {
-    let assert Ok(encoded) = fields.encode(pair_codec, #(i, True))
+    let encoded = fields.encode(pair_codec, #(i, True))
     let assert Ok(_) = fields.decode(pair_codec, encoded)
     Nil
   })
@@ -225,21 +186,19 @@ pub type BenchSpanMeta {
 }
 
 fn bench_span() {
-  let prefix = [atom.create("bench"), atom.create("span")]
-  let assert Ok(p) = span.event_prefix(prefix)
-  let op_key = atom.create("op")
   let op_field =
     fields.field(
-      op_key,
-      fn(m: BenchSpanMeta) { Ok(dynamic.string(m.op)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.string) {
-          Ok(s) -> Ok(BenchSpanMeta(s))
-          Error(_) -> Error(fields.FieldDecodeError("expected string"))
-        }
-      },
+      "op",
+      fn(m: BenchSpanMeta) { dynamic.string(m.op) },
+      decode.string |> decode.map(BenchSpanMeta),
     )
-  let assert Ok(sp) = span.define_span(p, op_field, fields.empty(), op_field)
+  let sp =
+    span.define(
+      ["bench", "span"],
+      start_metadata: op_field,
+      stop_measurements: fields.empty(),
+      stop_metadata: op_field,
+    )
 
   let warmup = 5000
   let samples = 20_000
@@ -247,7 +206,7 @@ fn bench_span() {
   // Warmup
   loop_n(warmup, fn(_) {
     let _ =
-      span.run_span(sp, BenchSpanMeta("query"), fn() {
+      span.run(sp, BenchSpanMeta("query"), fn() {
         span.Completion(Ok(1), Nil, BenchSpanMeta("query_done"))
       })
     Nil
@@ -257,7 +216,7 @@ fn bench_span() {
   let start_t = monotonic_nanos()
   loop_n(samples, fn(_) {
     let _ =
-      span.run_span(sp, BenchSpanMeta("query"), fn() {
+      span.run(sp, BenchSpanMeta("query"), fn() {
         span.Completion(Ok(1), Nil, BenchSpanMeta("query_done"))
       })
     Nil
@@ -271,9 +230,7 @@ fn bench_span() {
     False -> 0
   }
 
-  io.println(
-    "4. Native span execution (span.run_span with start + stop events):",
-  )
+  io.println("4. Native span execution (span.run with start + stop events):")
   io.println(
     "   Samples:    "
     <> int.to_string(samples)
@@ -289,38 +246,32 @@ fn bench_span() {
 }
 
 fn bench_unrouted() {
-  let ev_name = [
-    atom.create("bench"),
-    atom.create("unrouted"),
-    atom.create("event"),
-  ]
-  let assert Ok(ev) =
-    sinal.event(ev_name, fields.int(atom.create("value")), fields.empty())
+  let ev =
+    sinal.event(
+      ["bench", "unrouted", "event"],
+      fields.int("value"),
+      fields.empty(),
+    )
 
   let warmup = 10_000
   let samples = 50_000
 
-  loop_n(warmup, fn(i) {
-    let assert Ok(Nil) = forwarder.emit_routed(ev, i, Nil)
-    Nil
-  })
+  loop_n(warmup, fn(i) { sinal.emit(ev, i, Nil) })
 
   let start_t = monotonic_nanos()
-  loop_n(samples, fn(i) {
-    let assert Ok(Nil) = forwarder.emit_routed(ev, i, Nil)
-    Nil
-  })
-  let total_nanos = monotonic_nanos() - start_t
+  loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
+  let no_routes_nanos = monotonic_nanos() - start_t
 
-  let direct_start = monotonic_nanos()
-  loop_n(samples, fn(i) {
-    let assert Ok(Nil) = sinal.emit(ev, i, Nil)
-    Nil
-  })
-  let direct_nanos = monotonic_nanos() - direct_start
+  // A route on another prefix makes every emit scan the route list.
+  let other = forwarder.new(process.new_name("bench_other_forwarder"))
+  forwarder.route(["bench_other"], other)
+  let routed_start = monotonic_nanos()
+  loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
+  let other_route_nanos = monotonic_nanos() - routed_start
+  forwarder.unroute(["bench_other"])
 
   io.println(
-    "5. Unrouted emission (forwarder.emit_routed, three-atom name, no route, no handlers):",
+    "5. Route lookup (sinal.emit, three-segment name, no handlers, not routed):",
   )
   io.println(
     "   Samples:    "
@@ -331,9 +282,9 @@ fn bench_unrouted() {
   )
   io.println(
     "   Latency:    "
-    <> int.to_string(total_nanos / samples)
-    <> " ns/op (sinal.emit on the same event: "
-    <> int.to_string(direct_nanos / samples)
-    <> " ns/op)\n",
+    <> int.to_string(no_routes_nanos / samples)
+    <> " ns/op with no routes, "
+    <> int.to_string(other_route_nanos / samples)
+    <> " ns/op with one route on another prefix\n",
   )
 }

@@ -10,8 +10,11 @@
     is_callback_failure_reason/2,
     is_panic_reason/2,
     term_equals/2,
-    is_span_instrumentation_reason/2,
-    has_span_result_slot/0,
+    native_map/1,
+    native_emit/3,
+    panic_message/1,
+    span_context_term/1,
+    handler_records/1,
     native_to_milliseconds/1,
     native_to_nanoseconds/1,
     telemetry_persist/0,
@@ -89,18 +92,34 @@ is_panic_reason(_, _) ->
 term_equals(A, B) ->
     A =:= B.
 
-is_span_instrumentation_reason(
-    {sinal_completion_encoding_failed, Token, Error}, ExpectedError
-) ->
-    is_reference(Token) andalso Error =:= ExpectedError;
-is_span_instrumentation_reason(_, _) ->
-    false.
+%% A native map with atom keys, as a foreign producer would build it.
+native_map(Pairs) ->
+    maps:from_list([{binary_to_atom(Key, utf8), Value} || {Key, Value} <- Pairs]).
 
-has_span_result_slot() ->
-    lists:any(fun({Key, Value}) ->
-        is_reference(Key) andalso is_tuple(Value) andalso
-        tuple_size(Value) =:= 2 andalso element(1, Value) =:= stored_result
-    end, erlang:get()).
+%% Executes an event directly through telemetry, bypassing sinal's encoding
+%% and routes.
+native_emit(Name, Measurements, Metadata) ->
+    telemetry:execute([binary_to_atom(Segment, utf8) || Segment <- Name], Measurements, Metadata),
+    nil.
+
+%% Runs Fun and returns the message of the Gleam panic it raises.
+panic_message(Fun) ->
+    try Fun() of
+        _ -> {error, nil}
+    catch
+        error:#{gleam_error := panic, message := Message} -> {ok, Message}
+    end.
+
+%% The id and function type of each native handler of exactly this event.
+handler_records(Name) ->
+    EventName = [binary_to_atom(Segment, utf8) || Segment <- Name],
+    [{Id, element(2, erlang:fun_info(Function, type))}
+     || #{id := Id, event_name := Event, function := Function}
+            <- telemetry:list_handlers(EventName),
+        Event =:= EventName].
+
+%% The native term inside an opaque `span.SpanContext`.
+span_context_term({span_context, Term}) -> Term.
 
 native_to_milliseconds(Value) ->
     erlang:convert_time_unit(Value, native, millisecond).

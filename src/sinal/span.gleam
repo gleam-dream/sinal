@@ -1,76 +1,58 @@
 //// Runs work inside a native telemetry span, which emits typed start, stop
 //// and exception events around it.
 ////
-//// Use this module to time a unit of work and report how it ended. An
-//// `EventPrefix` names the span; `define_span` adds `sinal/fields` codecs
-//// for start metadata, extra stop measurements and stop metadata, and
-//// rejects fields the span protocol reserves. `run_span` and
-//// `run_span_result` run the work: `[prefix, start]` is emitted before it,
-//// then `[prefix, stop]` on return or `[prefix, exception]` on a raised
-//// exception, which is re-raised. `run_span_result` returns encoding
-//// failures as values and keeps the work's result; `run_span` raises them.
-//// `events` returns the three typed descriptors, so handlers can be attached
-//// with `sinal.observe` or `sinal.attach`. Native telemetry measures the
-//// timing fields; the `*_in` functions read them in an explicit `TimeUnit`.
-//// A span runs in one process and cannot go through `sinal/forwarder`.
+//// Use this module to time a unit of work and report how it ended.
+//// `define` names the span and gives `sinal/fields` codecs for its start
+//// metadata, its extra stop measurements and its stop metadata. `run` runs
+//// the work: `[name.., start]` is emitted before it, then `[name.., stop]`
+//// when it returns or `[name.., exception]` when it raises, and the
+//// exception is re-raised unchanged. `events` returns the three typed
+//// events, so handlers attach with `sinal.observe` or `sinal.handler`.
 ////
 //// ```gleam
-//// import gleam/erlang/atom
 //// import sinal/fields
 //// import sinal/span
 ////
-//// let assert Ok(prefix) =
-////   span.event_prefix([atom.create("db"), atom.create("query")])
-//// let sql = fields.string(atom.create("sql"))
-//// let assert Ok(query) = span.define_span(prefix, sql, fields.empty(), sql)
+//// let query =
+////   span.define(
+////     ["db", "query"],
+////     start_metadata: fields.string("sql"),
+////     stop_measurements: fields.empty(),
+////     stop_metadata: fields.int("rows"),
+////   )
 //// let rows =
-////   span.run_span(query, "SELECT 1", fn() {
-////     span.Completion(result: run("SELECT 1"), measurements: Nil, metadata: "SELECT 1")
+////   span.run(query, "SELECT 1", fn() {
+////     let rows = select("SELECT 1")
+////     span.Completion(result: rows, measurements: Nil, metadata: list.length(rows))
 ////   })
 //// ```
+////
+//// Native telemetry measures the timing fields; `duration_in`,
+//// `system_time_in` and `monotonic_time_in` read them in an explicit
+//// `TimeUnit`. A span runs in one process: it ignores forwarder routes,
+//// because its start and stop must share a process to measure duration.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
-import gleam/erlang/atom.{type Atom}
+import gleam/erlang/atom
 import gleam/list
+import gleam/string
 import sinal
 import sinal/fields
 import sinal/internal/ffi
+import sinal/internal/name as grammar
 
-pub opaque type EventPrefix {
-  EventPrefix(prefix: List(Atom))
-}
-
-pub type PrefixError {
-  EmptyPrefix
-}
-
-/// Constructs a span event prefix from trusted atoms, rejecting empty prefixes.
-pub fn event_prefix(prefix: List(Atom)) -> Result(EventPrefix, PrefixError) {
-  case prefix {
-    [] -> Error(EmptyPrefix)
-    _ -> Ok(EventPrefix(prefix))
-  }
-}
-
-/// Returns the logical prefix strings derived from the native prefix atoms.
-pub fn prefix_name(prefix: EventPrefix) -> List(String) {
-  list.map(prefix.prefix, atom.to_string)
-}
-
-/// Returns the native prefix atom list.
-pub fn prefix_native_name(prefix: EventPrefix) -> List(Atom) {
-  prefix.prefix
-}
-
+/// A wall-clock timestamp in native time units.
 pub opaque type SystemTime {
   SystemTime(Int)
 }
 
+/// A monotonic timestamp in native time units.
 pub opaque type MonotonicTime {
   MonotonicTime(Int)
 }
 
+/// A span duration in native time units.
 pub opaque type NativeDuration {
   NativeDuration(Int)
 }
@@ -84,81 +66,68 @@ pub type TimeUnit {
   Second
 }
 
+/// The `telemetry_span_context` that links one span's events. Compare two
+/// with `==`.
 pub opaque type SpanContext {
   SpanContext(Dynamic)
 }
 
+/// The reason of the exception that ended a span.
 pub opaque type ExceptionReason {
   ExceptionReason(Dynamic)
 }
 
+/// The stacktrace of the exception that ended a span.
 pub opaque type ExceptionStacktrace {
   ExceptionStacktrace(Dynamic)
 }
 
+/// The class of the exception that ended a span.
 pub type ExceptionKind {
   ExceptionError
   ExceptionExit
   ExceptionThrow
 }
 
-pub fn system_time_to_dynamic(time: SystemTime) -> Dynamic {
-  let SystemTime(value) = time
-  ffi.to_dynamic(value)
-}
-
-pub fn monotonic_time_to_dynamic(time: MonotonicTime) -> Dynamic {
-  let MonotonicTime(value) = time
-  ffi.to_dynamic(value)
-}
-
-pub fn duration_to_dynamic(duration: NativeDuration) -> Dynamic {
-  let NativeDuration(value) = duration
-  ffi.to_dynamic(value)
-}
-
 @external(erlang, "sinal_ffi", "convert_native_time")
 fn convert_native_time(value: Int, unit: TimeUnit) -> Int
 
-/// Converts a native span duration to the selected unit.
+/// Converts a native span duration to `unit`.
 pub fn duration_in(duration: NativeDuration, unit: TimeUnit) -> Int {
   let NativeDuration(value) = duration
   convert_native_time(value, unit)
 }
 
-/// Converts a native system timestamp to the selected unit.
+/// Converts a native system timestamp to `unit`.
 pub fn system_time_in(time: SystemTime, unit: TimeUnit) -> Int {
   let SystemTime(value) = time
   convert_native_time(value, unit)
 }
 
-/// Converts a native monotonic timestamp to the selected unit.
+/// Converts a native monotonic timestamp to `unit`.
 pub fn monotonic_time_in(time: MonotonicTime, unit: TimeUnit) -> Int {
   let MonotonicTime(value) = time
   convert_native_time(value, unit)
 }
 
-pub fn span_context_to_dynamic(context: SpanContext) -> Dynamic {
-  let SpanContext(dyn) = context
-  dyn
+/// The exception reason as a native term, which may be any BEAM value.
+pub fn reason_to_dynamic(reason: ExceptionReason) -> Dynamic {
+  let ExceptionReason(value) = reason
+  value
 }
 
-pub fn exception_reason_to_dynamic(reason: ExceptionReason) -> Dynamic {
-  let ExceptionReason(dyn) = reason
-  dyn
+/// The exception stacktrace as a native term.
+pub fn stacktrace_to_dynamic(stacktrace: ExceptionStacktrace) -> Dynamic {
+  let ExceptionStacktrace(value) = stacktrace
+  value
 }
 
-pub fn exception_stacktrace_to_dynamic(
-  stacktrace: ExceptionStacktrace,
-) -> Dynamic {
-  let ExceptionStacktrace(dyn) = stacktrace
-  dyn
-}
-
+/// Measurements of `[name.., start]`.
 pub type StartMeasurements {
   StartMeasurements(system_time: SystemTime, monotonic_time: MonotonicTime)
 }
 
+/// Measurements of `[name.., stop]`: the timing fields and the span's own.
 pub type StopMeasurements(extra) {
   StopMeasurements(
     duration: NativeDuration,
@@ -167,18 +136,23 @@ pub type StopMeasurements(extra) {
   )
 }
 
+/// Measurements of `[name.., exception]`.
 pub type ExceptionMeasurements {
   ExceptionMeasurements(duration: NativeDuration, monotonic_time: MonotonicTime)
 }
 
+/// Metadata of `[name.., start]`.
 pub type StartMetadata(metadata) {
   StartMetadata(metadata: metadata, context: SpanContext)
 }
 
+/// Metadata of `[name.., stop]`.
 pub type StopMetadata(metadata) {
   StopMetadata(metadata: metadata, context: SpanContext)
 }
 
+/// Metadata of `[name.., exception]`: the start metadata and the
+/// exception.
 pub type ExceptionMetadata(metadata) {
   ExceptionMetadata(
     metadata: metadata,
@@ -189,55 +163,51 @@ pub type ExceptionMetadata(metadata) {
   )
 }
 
+/// A typed span definition.
 pub opaque type Span(start_metadata, extra_measurements, stop_metadata) {
   Span(
-    prefix: EventPrefix,
+    name: List(String),
     start_metadata: fields.Fields(start_metadata),
-    extra_measurements: fields.Fields(extra_measurements),
+    stop_measurements: fields.Fields(extra_measurements),
     stop_metadata: fields.Fields(stop_metadata),
   )
 }
 
-pub type SpanDefinitionError {
-  ReservedMeasurementField(String)
-  ReservedMetadataField(String)
-}
-
-/// Defines a typed span descriptor, rejecting reserved fields owned by the span protocol.
-pub fn define_span(
-  prefix: EventPrefix,
-  start_metadata: fields.Fields(start_metadata),
-  extra_measurements: fields.Fields(extra_measurements),
-  stop_metadata: fields.Fields(stop_metadata),
-) -> Result(
-  Span(start_metadata, extra_measurements, stop_metadata),
-  SpanDefinitionError,
-) {
-  case
-    check_reserved(
-      extra_measurements,
-      ["duration", "monotonic_time"],
-      ReservedMeasurementField,
-    ),
-    check_reserved(
-      start_metadata,
-      ["telemetry_span_context", "kind", "reason", "stacktrace"],
-      ReservedMetadataField,
-    ),
-    check_reserved(
-      stop_metadata,
-      ["telemetry_span_context"],
-      ReservedMetadataField,
-    )
-  {
-    Ok(Nil), Ok(Nil), Ok(Nil) ->
-      Ok(Span(prefix, start_metadata, extra_measurements, stop_metadata))
-    Error(err), _, _ -> Error(err)
-    _, Error(err), _ -> Error(err)
-    _, _, Error(err) -> Error(err)
+/// Defines a span. `name` is the prefix of its three events.
+///
+/// Panics when `name` is empty or breaks the name grammar, or when a codec
+/// declares a key the span protocol owns: `duration` and `monotonic_time`
+/// in the stop measurements, `telemetry_span_context`, `kind`, `reason` and
+/// `stacktrace` in the start metadata, and `telemetry_span_context` in the
+/// stop metadata.
+pub fn define(
+  name: List(String),
+  start_metadata start_metadata: fields.Fields(start_metadata),
+  stop_measurements stop_measurements: fields.Fields(extra_measurements),
+  stop_metadata stop_metadata: fields.Fields(stop_metadata),
+) -> Span(start_metadata, extra_measurements, stop_metadata) {
+  case name {
+    [] -> panic as "sinal/span.define: the span name is empty"
+    _ ->
+      list.each(name, fn(segment) {
+        grammar.to_atom(
+          segment,
+          caller: "sinal/span.define",
+          what: "name segment",
+        )
+      })
   }
+  reject_reserved(stop_measurements, "stop measurement", [
+    "duration", "monotonic_time",
+  ])
+  reject_reserved(start_metadata, "start metadata", [
+    "telemetry_span_context", "kind", "reason", "stacktrace",
+  ])
+  reject_reserved(stop_metadata, "stop metadata", ["telemetry_span_context"])
+  Span(name:, start_metadata:, stop_measurements:, stop_metadata:)
 }
 
+/// The span's three events.
 pub type SpanEvents(start_metadata, extra_measurements, stop_metadata) {
   SpanEvents(
     start: sinal.Event(StartMeasurements, StartMetadata(start_metadata)),
@@ -252,32 +222,31 @@ pub type SpanEvents(start_metadata, extra_measurements, stop_metadata) {
   )
 }
 
-/// Derives typed start, stop, and exception event descriptors for the span.
+/// Returns the typed start, stop and exception events of `span`.
 pub fn events(
   span: Span(start_metadata, extra_measurements, stop_metadata),
 ) -> SpanEvents(start_metadata, extra_measurements, stop_metadata) {
-  let prefix = span.prefix.prefix
-  let assert Ok(start_ev) =
-    sinal.event(
-      list.append(prefix, [atom.create("start")]),
+  SpanEvents(
+    start: sinal.event(
+      list.append(span.name, ["start"]),
       start_measurement_fields(),
       start_metadata_fields(span.start_metadata),
-    )
-  let assert Ok(stop_ev) =
-    sinal.event(
-      list.append(prefix, [atom.create("stop")]),
-      stop_measurement_fields(span.extra_measurements),
+    ),
+    stop: sinal.event(
+      list.append(span.name, ["stop"]),
+      stop_measurement_fields(span.stop_measurements),
       stop_metadata_fields(span.stop_metadata),
-    )
-  let assert Ok(exception_ev) =
-    sinal.event(
-      list.append(prefix, [atom.create("exception")]),
+    ),
+    exception: sinal.event(
+      list.append(span.name, ["exception"]),
       exception_measurement_fields(),
       exception_metadata_fields(span.start_metadata),
-    )
-  SpanEvents(start: start_ev, stop: stop_ev, exception: exception_ev)
+    ),
+  )
 }
 
+/// What the work of a span returns: its result, and the stop event's extra
+/// measurements and metadata.
 pub type Completion(result, extra_measurements, stop_metadata) {
   Completion(
     result: result,
@@ -286,364 +255,212 @@ pub type Completion(result, extra_measurements, stop_metadata) {
   )
 }
 
-pub type CompletionEncodeError {
-  ExtraMeasurementsEncodingFailed(fields.FieldEncodeError)
-  StopMetadataEncodingFailed(fields.FieldEncodeError)
-}
-
-/// Completed work is retained when stop instrumentation cannot be encoded.
-pub type SpanOutcome(a) {
-  SpanCompleted(a)
-  StartEncodingFailed(fields.FieldEncodeError)
-  CompletionEncodingFailed(result: a, error: CompletionEncodeError)
-}
-
-type EncodedCompletion(a) {
-  EncodedCompletion(a, Dynamic, Dynamic)
-  UnencodedCompletion(a, CompletionEncodeError)
-}
-
-@external(erlang, "sinal_ffi", "telemetry_span_outcome")
-fn telemetry_span_outcome(
-  prefix: List(Atom),
-  start_metadata: Dynamic,
-  work: fn() -> EncodedCompletion(a),
-) -> SpanOutcome(a)
-
-/// Executes a span without panicking for metadata encoding failures. Start
-/// failure skips work and emits no event. Completion failure retains the work
-/// result; native telemetry emits an exception event with a structured
-/// `sinal_completion_encoding_failed` reason and no stop event. The reason
-/// carries a private per-call reference and the encoding error. The completed
-/// business result stays private. Catchable exceptions raised by work follow native telemetry's
-/// exception event and exact re-raise behavior.
-pub fn run_span_result(
-  span: Span(start_metadata, extra_measurements, stop_metadata),
-  start_metadata: start_metadata,
-  work: fn() -> Completion(a, extra_measurements, stop_metadata),
-) -> SpanOutcome(a) {
-  case fields.encode(span.start_metadata, start_metadata) {
-    Error(error) -> StartEncodingFailed(error)
-    Ok(raw_start_metadata) ->
-      telemetry_span_outcome(span.prefix.prefix, raw_start_metadata, fn() {
-        let Completion(result, extra, stop) = work()
-        case fields.encode(span.extra_measurements, extra) {
-          Error(error) ->
-            UnencodedCompletion(result, ExtraMeasurementsEncodingFailed(error))
-          Ok(raw_extra) ->
-            case fields.encode(span.stop_metadata, stop) {
-              Error(error) ->
-                UnencodedCompletion(result, StopMetadataEncodingFailed(error))
-              Ok(raw_stop) -> EncodedCompletion(result, raw_extra, raw_stop)
-            }
-        }
-      })
-  }
-}
-
-/// Executes work inside a native telemetry span, emitting start and either stop or exception events.
-pub fn run_span(
+/// Runs `work` inside the span and returns its result. A raised exception
+/// (error, exit or throw) emits the exception event and is re-raised with
+/// its class, reason and stacktrace.
+pub fn run(
   span: Span(start_metadata, extra_measurements, stop_metadata),
   start_metadata: start_metadata,
   work: fn() -> Completion(a, extra_measurements, stop_metadata),
 ) -> a {
-  let raw_start_metadata = case
-    fields.encode(span.start_metadata, start_metadata)
-  {
-    Ok(map) -> map
-    Error(fields.FieldEncodeError(msg)) ->
-      panic as { "Failed to encode span start metadata: " <> msg }
-  }
+  ffi.telemetry_span(
+    list.map(span.name, atom.create),
+    fields.encode(span.start_metadata, start_metadata),
+    fn() {
+      let Completion(result:, measurements:, metadata:) = work()
+      #(
+        result,
+        fields.encode(span.stop_measurements, measurements),
+        fields.encode(span.stop_metadata, metadata),
+      )
+    },
+  )
+}
 
-  ffi.telemetry_span(span.prefix.prefix, raw_start_metadata, fn() {
-    let Completion(result, extra_meas, stop_meta) = work()
-    let raw_extra_meas = case
-      fields.encode(span.extra_measurements, extra_meas)
-    {
-      Ok(map) -> map
-      Error(fields.FieldEncodeError(msg)) ->
-        panic as { "Failed to encode span extra measurements: " <> msg }
-    }
-    let raw_stop_meta = case fields.encode(span.stop_metadata, stop_meta) {
-      Ok(map) -> map
-      Error(fields.FieldEncodeError(msg)) ->
-        panic as { "Failed to encode span stop metadata: " <> msg }
-    }
-    #(result, raw_extra_meas, raw_stop_meta)
-  })
+fn reject_reserved(
+  codec: fields.Fields(a),
+  what: String,
+  reserved: List(String),
+) -> Nil {
+  case list.find(fields.keys(codec), list.contains(reserved, _)) {
+    Ok(key) ->
+      panic as {
+        "sinal/span.define: "
+        <> what
+        <> " key "
+        <> string.inspect(key)
+        <> " is reserved by the span protocol"
+      }
+    Error(Nil) -> Nil
+  }
+}
+
+fn system_time_field() -> fields.Fields(SystemTime) {
+  fields.field(
+    "system_time",
+    fn(time) {
+      let SystemTime(value) = time
+      dynamic.int(value)
+    },
+    decode.int |> decode.map(SystemTime),
+  )
+}
+
+fn monotonic_time_field() -> fields.Fields(MonotonicTime) {
+  fields.field(
+    "monotonic_time",
+    fn(time) {
+      let MonotonicTime(value) = time
+      dynamic.int(value)
+    },
+    decode.int |> decode.map(MonotonicTime),
+  )
+}
+
+fn duration_field() -> fields.Fields(NativeDuration) {
+  fields.field(
+    "duration",
+    fn(duration) {
+      let NativeDuration(value) = duration
+      dynamic.int(value)
+    },
+    decode.int |> decode.map(NativeDuration),
+  )
+}
+
+fn span_context_field() -> fields.Fields(SpanContext) {
+  fields.field(
+    "telemetry_span_context",
+    fn(context) {
+      let SpanContext(value) = context
+      value
+    },
+    decode.dynamic |> decode.map(SpanContext),
+  )
 }
 
 fn start_measurement_fields() -> fields.Fields(StartMeasurements) {
-  let sys_key = atom.create("system_time")
-  let mono_key = atom.create("monotonic_time")
-  let sys_field =
-    fields.field(
-      sys_key,
-      fn(time) {
-        let SystemTime(value) = time
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(SystemTime(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError(
-              "Expected a native integer system_time",
-            ))
-        }
-      },
-    )
-  let mono_field =
-    fields.field(
-      mono_key,
-      fn(time) {
-        let MonotonicTime(value) = time
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(MonotonicTime(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError(
-              "Expected a native integer monotonic_time",
-            ))
-        }
-      },
-    )
-  let assert Ok(p) = fields.pair(sys_field, mono_field)
-  fields.imap(
-    p,
-    fn(pair) { StartMeasurements(pair.0, pair.1) },
-    fn(m: StartMeasurements) { #(m.system_time, m.monotonic_time) },
-  )
+  fields.record({
+    use system_time <- fields.parameter
+    use monotonic_time <- fields.parameter
+    StartMeasurements(system_time:, monotonic_time:)
+  })
+  |> fields.and(system_time_field(), fn(m: StartMeasurements) { m.system_time })
+  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
+  |> fields.build
 }
 
 fn stop_measurement_fields(
   extra: fields.Fields(extra),
 ) -> fields.Fields(StopMeasurements(extra)) {
-  let dur_key = atom.create("duration")
-  let mono_key = atom.create("monotonic_time")
-  let dur_field =
-    fields.field(
-      dur_key,
-      fn(dur) {
-        let NativeDuration(value) = dur
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(NativeDuration(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError("Expected a native integer duration"))
-        }
-      },
-    )
-  let mono_field =
-    fields.field(
-      mono_key,
-      fn(time) {
-        let MonotonicTime(value) = time
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(MonotonicTime(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError(
-              "Expected a native integer monotonic_time",
-            ))
-        }
-      },
-    )
-  let assert Ok(timing) = fields.pair(dur_field, mono_field)
-  let assert Ok(all) = fields.pair(timing, extra)
-  fields.imap(
-    all,
-    fn(pair) {
-      let #(#(dur, mono), extra_meas) = pair
-      StopMeasurements(dur, mono, extra_meas)
-    },
-    fn(m: StopMeasurements(extra)) {
-      #(#(m.duration, m.monotonic_time), m.extra)
-    },
-  )
+  fields.record({
+    use duration <- fields.parameter
+    use monotonic_time <- fields.parameter
+    use extra <- fields.parameter
+    StopMeasurements(duration:, monotonic_time:, extra:)
+  })
+  |> fields.and(duration_field(), fn(m: StopMeasurements(extra)) { m.duration })
+  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
+  |> fields.and(extra, fn(m) { m.extra })
+  |> fields.build
 }
 
 fn exception_measurement_fields() -> fields.Fields(ExceptionMeasurements) {
-  let dur_key = atom.create("duration")
-  let mono_key = atom.create("monotonic_time")
-  let dur_field =
-    fields.field(
-      dur_key,
-      fn(dur) {
-        let NativeDuration(value) = dur
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(NativeDuration(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError("Expected a native integer duration"))
-        }
-      },
-    )
-  let mono_field =
-    fields.field(
-      mono_key,
-      fn(time) {
-        let MonotonicTime(value) = time
-        Ok(ffi.to_dynamic(value))
-      },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(value) -> Ok(MonotonicTime(value))
-          Error(_) ->
-            Error(fields.FieldDecodeError(
-              "Expected a native integer monotonic_time",
-            ))
-        }
-      },
-    )
-  let assert Ok(timing) = fields.pair(dur_field, mono_field)
-  fields.imap(
-    timing,
-    fn(pair) { ExceptionMeasurements(pair.0, pair.1) },
-    fn(m: ExceptionMeasurements) { #(m.duration, m.monotonic_time) },
-  )
-}
-
-fn span_context_field() -> fields.Fields(SpanContext) {
-  let ctx_key = atom.create("telemetry_span_context")
-  fields.field(
-    ctx_key,
-    fn(c) {
-      let SpanContext(dyn) = c
-      Ok(dyn)
-    },
-    fn(dyn) { Ok(SpanContext(dyn)) },
-  )
+  fields.record({
+    use duration <- fields.parameter
+    use monotonic_time <- fields.parameter
+    ExceptionMeasurements(duration:, monotonic_time:)
+  })
+  |> fields.and(duration_field(), fn(m: ExceptionMeasurements) { m.duration })
+  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
+  |> fields.build
 }
 
 fn start_metadata_fields(
-  metadata: fields.Fields(meta),
-) -> fields.Fields(StartMetadata(meta)) {
-  let ctx = span_context_field()
-  let assert Ok(p) = fields.pair(metadata, ctx)
-  fields.imap(
-    p,
-    fn(pair) { StartMetadata(pair.0, pair.1) },
-    fn(m: StartMetadata(meta)) { #(m.metadata, m.context) },
-  )
+  metadata: fields.Fields(metadata),
+) -> fields.Fields(StartMetadata(metadata)) {
+  fields.record({
+    use metadata <- fields.parameter
+    use context <- fields.parameter
+    StartMetadata(metadata:, context:)
+  })
+  |> fields.and(metadata, fn(m: StartMetadata(metadata)) { m.metadata })
+  |> fields.and(span_context_field(), fn(m) { m.context })
+  |> fields.build
 }
 
 fn stop_metadata_fields(
-  metadata: fields.Fields(meta),
-) -> fields.Fields(StopMetadata(meta)) {
-  let ctx = span_context_field()
-  let assert Ok(p) = fields.pair(metadata, ctx)
-  fields.imap(
-    p,
-    fn(pair) { StopMetadata(pair.0, pair.1) },
-    fn(m: StopMetadata(meta)) { #(m.metadata, m.context) },
-  )
+  metadata: fields.Fields(metadata),
+) -> fields.Fields(StopMetadata(metadata)) {
+  fields.record({
+    use metadata <- fields.parameter
+    use context <- fields.parameter
+    StopMetadata(metadata:, context:)
+  })
+  |> fields.and(metadata, fn(m: StopMetadata(metadata)) { m.metadata })
+  |> fields.and(span_context_field(), fn(m) { m.context })
+  |> fields.build
 }
 
 fn exception_metadata_fields(
-  metadata: fields.Fields(meta),
-) -> fields.Fields(ExceptionMetadata(meta)) {
-  let ctx = span_context_field()
-  let kind_key = atom.create("kind")
-  let reason_key = atom.create("reason")
-  let stack_key = atom.create("stacktrace")
-
-  let kind_field =
+  metadata: fields.Fields(metadata),
+) -> fields.Fields(ExceptionMetadata(metadata)) {
+  fields.record({
+    use metadata <- fields.parameter
+    use context <- fields.parameter
+    use kind <- fields.parameter
+    use reason <- fields.parameter
+    use stacktrace <- fields.parameter
+    ExceptionMetadata(metadata:, context:, kind:, reason:, stacktrace:)
+  })
+  |> fields.and(metadata, fn(m: ExceptionMetadata(metadata)) { m.metadata })
+  |> fields.and(span_context_field(), fn(m) { m.context })
+  |> fields.and(kind_field(), fn(m) { m.kind })
+  |> fields.and(
     fields.field(
-      kind_key,
-      fn(kind) {
-        case kind {
-          ExceptionError -> Ok(ffi.to_dynamic(atom.create("error")))
-          ExceptionExit -> Ok(ffi.to_dynamic(atom.create("exit")))
-          ExceptionThrow -> Ok(ffi.to_dynamic(atom.create("throw")))
-        }
+      "reason",
+      fn(reason) {
+        let ExceptionReason(value) = reason
+        value
       },
-      fn(dyn) {
-        case decode.run(dyn, atom.decoder()) {
-          Ok(a) ->
-            case atom.to_string(a) {
-              "error" -> Ok(ExceptionError)
-              "exit" -> Ok(ExceptionExit)
-              "throw" -> Ok(ExceptionThrow)
-              _ ->
-                Error(fields.FieldDecodeError(
-                  "Expected exception kind atom: error, exit, or throw",
-                ))
-            }
-          Error(_) ->
-            Error(fields.FieldDecodeError(
-              "Expected exception kind atom: error, exit, or throw",
-            ))
-        }
-      },
-    )
-
-  let reason_field =
-    fields.field(
-      reason_key,
-      fn(r) {
-        let ExceptionReason(dyn) = r
-        Ok(dyn)
-      },
-      fn(dyn) { Ok(ExceptionReason(dyn)) },
-    )
-
-  let stack_field =
-    fields.field(
-      stack_key,
-      fn(s) {
-        let ExceptionStacktrace(dyn) = s
-        Ok(dyn)
-      },
-      fn(dyn) { Ok(ExceptionStacktrace(dyn)) },
-    )
-
-  let assert Ok(with_ctx) = fields.pair(metadata, ctx)
-  let assert Ok(with_kind) = fields.pair(with_ctx, kind_field)
-  let assert Ok(with_reason) = fields.pair(with_kind, reason_field)
-  let assert Ok(all) = fields.pair(with_reason, stack_field)
-
-  fields.imap(
-    all,
-    fn(tuple) {
-      let #(#(#(#(meta, c), k), r), s) = tuple
-      ExceptionMetadata(meta, c, k, r, s)
-    },
-    fn(m: ExceptionMetadata(meta)) {
-      #(#(#(#(m.metadata, m.context), m.kind), m.reason), m.stacktrace)
-    },
+      decode.dynamic |> decode.map(ExceptionReason),
+    ),
+    fn(m) { m.reason },
   )
+  |> fields.and(
+    fields.field(
+      "stacktrace",
+      fn(stacktrace) {
+        let ExceptionStacktrace(value) = stacktrace
+        value
+      },
+      decode.dynamic |> decode.map(ExceptionStacktrace),
+    ),
+    fn(m) { m.stacktrace },
+  )
+  |> fields.build
 }
 
-fn check_reserved(
-  f: fields.Fields(a),
-  reserved: List(String),
-  make_error: fn(String) -> SpanDefinitionError,
-) -> Result(Nil, SpanDefinitionError) {
-  case first_overlap(fields.declared_keys(f), reserved) {
-    Error(Nil) -> Ok(Nil)
-    Ok(name) -> Error(make_error(name))
-  }
-}
-
-fn first_overlap(
-  names: List(String),
-  reserved: List(String),
-) -> Result(String, Nil) {
-  case names {
-    [] -> Error(Nil)
-    [name, ..rest] ->
-      case list.contains(reserved, name) {
-        True -> Ok(name)
-        False -> first_overlap(rest, reserved)
-      }
-  }
+fn kind_field() -> fields.Fields(ExceptionKind) {
+  fields.field(
+    "kind",
+    fn(kind) {
+      atom.to_dynamic(
+        atom.create(case kind {
+          ExceptionError -> "error"
+          ExceptionExit -> "exit"
+          ExceptionThrow -> "throw"
+        }),
+      )
+    },
+    atom.decoder()
+      |> decode.then(fn(kind) {
+        case atom.to_string(kind) {
+          "error" -> decode.success(ExceptionError)
+          "exit" -> decode.success(ExceptionExit)
+          "throw" -> decode.success(ExceptionThrow)
+          _ -> decode.failure(ExceptionError, "error, exit or throw")
+        }
+      }),
+  )
 }

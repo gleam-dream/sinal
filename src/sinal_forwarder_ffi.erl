@@ -4,6 +4,7 @@
     publish_target/2,
     find_target/1,
     new_counters/0,
+    shared_counters/1,
     add_get/3,
     exchange/3,
     decrement_floor/2,
@@ -13,10 +14,8 @@
 ]).
 
 %% Three lock-free signed slots used for diagnostic counts or local admission.
-%% Diagnostic slots are shared across a forwarder's lifetime,
-%% including across a supervisor restart of the process that drains them.
-%% They belong to the `Forwarder` value, not to any process, so they outlive
-%% every incarnation for as long as that value is referenced:
+%% Diagnostic slots are shared by every `Forwarder` of one name, across
+%% every incarnation of the process that drains them:
 %%   index 1 - in-flight Execute messages sent but not yet drained (`lost` on
 %%             a fresh incarnation is this slot's leftover value).
 %%   index 2 - capacity drops since the last drain (`rejected`).
@@ -24,6 +23,32 @@
 %%             (`unavailable`).
 new_counters() ->
     atomics:new(3, [{signed, true}]).
+
+%% The diagnostic counters of a forwarder name, created on first use and
+%% kept in `persistent_term` for the life of the node, so that every
+%% `Forwarder` value built from one name shares them. Storing a new key does
+%% not trigger the global scan that replacing or erasing one does.
+shared_counters(Name) ->
+    Key = {sinal_forwarder_counters, Name},
+    case persistent_term:get(Key, undefined) of
+        undefined ->
+            global:trans(
+                {Key, self()},
+                fun() ->
+                    case persistent_term:get(Key, undefined) of
+                        undefined ->
+                            Counters = new_counters(),
+                            persistent_term:put(Key, Counters),
+                            Counters;
+                        Counters ->
+                            Counters
+                    end
+                end,
+                [node()]
+            );
+        Counters ->
+            Counters
+    end.
 
 add_get(Ref, Index, Delta) ->
     atomics:add_get(Ref, Index, Delta).
@@ -49,7 +74,8 @@ decrement_floor(Ref, Index, Current) ->
     end.
 
 %% The node's routes live in one `persistent_term` value: a list of
-%% {Prefix, Forwarder} sorted longest prefix first, so a lookup on the emit
+%% {Prefix, Send} sorted longest prefix first, where Send hands an encoded
+%% event to the route's forwarder, so a lookup on the emit
 %% path takes no lock, copies nothing, allocates nothing, and returns at once
 %% when nothing is routed. Writing the value is expensive (it can trigger a
 %% global scan of processes still referencing the old one), which is why
@@ -58,9 +84,9 @@ decrement_floor(Ref, Index, Current) ->
 %% `unroute` calls never lose each other's change.
 -define(ROUTES, sinal_forwarder_routes).
 
-put_route(Prefix, Forwarder) ->
+put_route(Prefix, Send) ->
     update_routes(fun(Routes) ->
-        [{Prefix, Forwarder} | lists:keydelete(Prefix, 1, Routes)]
+        [{Prefix, Send} | lists:keydelete(Prefix, 1, Routes)]
     end).
 
 erase_route(Prefix) ->
@@ -83,15 +109,15 @@ update_routes(Change) ->
     ),
     nil.
 
-%% Finds the forwarder of the longest routed prefix of Name.
+%% Finds the send function of the longest routed prefix of Name.
 find_route(Name) ->
     find_route(Name, persistent_term:get(?ROUTES, [])).
 
 find_route(_Name, []) ->
     {error, nil};
-find_route(Name, [{Prefix, Forwarder} | Rest]) ->
+find_route(Name, [{Prefix, Send} | Rest]) ->
     case lists:prefix(Prefix, Name) of
-        true -> {ok, Forwarder};
+        true -> {ok, Send};
         false -> find_route(Name, Rest)
     end.
 

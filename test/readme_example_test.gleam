@@ -1,5 +1,4 @@
 import gleam/bit_array
-import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
 import gleam/otp/static_supervisor
@@ -10,289 +9,259 @@ import sinal/fields
 import sinal/forwarder
 import sinal/span
 
-// --- Snippet 0: Ordinary observation ---
+// --- Snippet 0: The common path ---
 
 pub fn observe_request_example() {
-  let assert Ok(ev) =
+  let finished =
     sinal.event(
-      [atom.create("request"), atom.create("finished")],
-      fields.int(atom.create("duration_ms")),
-      fields.string(atom.create("route")),
+      ["request", "finished"],
+      fields.int("duration_ms"),
+      fields.string("route"),
     )
-  let assert Ok(id) = sinal.handler_id("request-finished-observer")
-  let assert Ok(attachment) =
-    sinal.observe(id, ev, fn(_duration_ms, _route) {
-      // Handle the event synchronously in the emitting process.
+  let attachment =
+    sinal.observe(finished, fn(_duration_ms, _route) {
+      // Runs in the emitting process, before `emit` returns.
       Nil
     })
-  let assert Ok(Nil) = sinal.emit(ev, 42, "/users")
+  sinal.emit(finished, 42, "/users")
   let assert Ok(Nil) = sinal.detach(attachment)
 }
 
-// --- Snippet 1: Defining Fields and Events ---
+// --- Snippet 1: Records as measurements and metadata ---
 
 pub type HttpMeasurements {
   HttpMeasurements(duration_ms: Int, bytes_sent: Int)
 }
 
+pub type Method {
+  Get
+  Post
+}
+
 pub type HttpMetadata {
-  HttpMetadata(method: String, route: String, status: Int)
+  HttpMetadata(method: Method, route: String, status: Int)
 }
 
-pub fn http_request_event() -> Result(
-  sinal.Event(HttpMeasurements, HttpMetadata),
-  sinal.EventError,
-) {
-  let assert Ok(meas_pair) =
-    fields.pair(
-      fields.int(atom.create("duration_ms")),
-      fields.int(atom.create("bytes_sent")),
-    )
-  let meas_fields =
-    fields.imap(
-      meas_pair,
-      fn(p) { HttpMeasurements(p.0, p.1) },
-      fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
-    )
+pub fn http_request_event() -> sinal.Event(HttpMeasurements, HttpMetadata) {
+  let measurements =
+    fields.record({
+      use duration_ms <- fields.parameter
+      use bytes_sent <- fields.parameter
+      HttpMeasurements(duration_ms:, bytes_sent:)
+    })
+    |> fields.and(fields.int("duration_ms"), fn(m: HttpMeasurements) {
+      m.duration_ms
+    })
+    |> fields.and(fields.int("bytes_sent"), fn(m) { m.bytes_sent })
+    |> fields.build
 
-  let assert Ok(method_route) =
-    fields.pair(
-      fields.string(atom.create("method")),
-      fields.string(atom.create("route")),
+  let metadata =
+    fields.record({
+      use method <- fields.parameter
+      use route <- fields.parameter
+      use status <- fields.parameter
+      HttpMetadata(method:, route:, status:)
+    })
+    |> fields.and(
+      fields.enum("method", [Get, Post], method_name),
+      fn(m: HttpMetadata) { m.method },
     )
-  let assert Ok(meta_triple) =
-    fields.pair(method_route, fields.int(atom.create("status")))
-  let meta_fields =
-    fields.imap(
-      meta_triple,
-      fn(p) {
-        let #(#(method, route), status) = p
-        HttpMetadata(method: method, route: route, status: status)
-      },
-      fn(m: HttpMetadata) { #(#(m.method, m.route), m.status) },
-    )
+    |> fields.and(fields.string("route"), fn(m) { m.route })
+    |> fields.and(fields.int("status"), fn(m) { m.status })
+    |> fields.build
 
-  sinal.event(
-    [atom.create("http"), atom.create("server"), atom.create("request")],
-    meas_fields,
-    meta_fields,
-  )
+  sinal.event(["http", "server", "request"], measurements, metadata)
 }
 
-// --- Snippet 2: Emitting Events ---
-
-pub fn log_request(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
-  let meas = HttpMeasurements(duration_ms: 42, bytes_sent: 2048)
-  let meta = HttpMetadata(method: "GET", route: "/api/users", status: 200)
-
-  case sinal.emit(ev, meas, meta) {
-    Ok(Nil) -> Nil
-    Error(sinal.EncodingFailed(fields.FieldEncodeError(msg))) -> panic as msg
+fn method_name(method: Method) -> String {
+  case method {
+    Get -> "get"
+    Post -> "post"
   }
 }
 
-// --- Snippet 3: Attaching and Detaching Handlers ---
+// --- Snippet 2: A fallible handler with a typed failure observer ---
 
-pub fn setup_metrics(ev: sinal.Event(HttpMeasurements, HttpMetadata)) {
-  let assert Ok(hid) = sinal.handler_id("prometheus-http-metrics")
-
-  let handler = fn(
-    _event,
-    _measurements: HttpMeasurements,
-    _metadata: HttpMetadata,
-  ) {
-    // Record metrics synchronously
-    Ok(Nil)
-  }
-
-  let on_failure = fn(_event, _failure) {
-    // Called if measurements/metadata cannot be decoded or handler returned Error
-    Nil
-  }
-
-  let assert Ok(attachment) = sinal.attach(hid, ev, handler, on_failure)
-
-  // Later, cleanly detach handler:
-  let assert Ok(Nil) = sinal.detach(attachment)
-  Nil
-}
-
-// --- Snippet 4: Scoped Attachments (with_attachments) ---
-
-pub fn scoped_metrics_example(
+pub fn attach_metrics(
   event: sinal.Event(HttpMeasurements, HttpMetadata),
-) -> Result(sinal.SubscriptionCompletion(Int), sinal.SubscriptionScopeError) {
-  let observer = sinal.subscription(event, fn(_measurements, _metadata) { Nil })
-
-  sinal.with_subscriptions(sinal.subscriptions([observer]), fn() {
-    // Work runs with attachments active.
-    // Detach runs on normal return or catchable error, exit, or throw.
-    // Original error/exit/throw is re-raised with exact origin stacktrace.
-    42
-  })
-}
-
-// --- Snippet 5: Native Telemetry Spans (sinal/span) ---
-
-pub type QueryMeta {
-  QueryMeta(sql: String)
-}
-
-pub fn query_meta_fields() -> fields.Fields(QueryMeta) {
-  fields.imap(fields.string(atom.create("sql")), QueryMeta, fn(q: QueryMeta) {
-    q.sql
-  })
-}
-
-pub fn run_database_query(query_str: String) -> String {
-  // Simulated database execution
-  "result for: " <> query_str
-}
-
-pub fn execute_traced_query(query_str: String) -> String {
-  let assert Ok(prefix) =
-    span.event_prefix([atom.create("db"), atom.create("query")])
-  let assert Ok(sp) =
-    span.define_span(
-      prefix,
-      query_meta_fields(),
-      fields.empty(),
-      query_meta_fields(),
+) -> sinal.Attachment {
+  let subscription =
+    sinal.handler(
+      [event],
+      fn(_event, measurements: HttpMeasurements, _metadata: HttpMetadata) {
+        case measurements.duration_ms >= 0 {
+          True -> Ok(Nil)
+          False -> Error("negative duration")
+        }
+      },
+      fn(_event, failure) {
+        // A malformed native map or an `Error` from the handler; telemetry
+        // then removes the handler.
+        let _ = sinal.describe_handler_failure(failure, fn(e) { e })
+        Nil
+      },
     )
+    |> sinal.with_id("http-metrics")
+  let assert Ok(attachment) = sinal.attach(subscription)
+  attachment
+}
 
-  span.run_span(sp, QueryMeta(sql: query_str), fn() {
-    let result = run_database_query(query_str)
+// --- Snippet 3: Scoped subscriptions ---
+
+pub fn count_requests(
+  event: sinal.Event(HttpMeasurements, HttpMetadata),
+  work: fn() -> a,
+) -> Result(sinal.SubscriptionCompletion(a), sinal.SubscriptionScopeError) {
+  let seen = process.new_subject()
+  let observer = sinal.subscription(event, fn(_, _) { process.send(seen, Nil) })
+  // Attached before `work` runs and detached when it returns or raises.
+  sinal.with_subscriptions(sinal.subscriptions([observer]), work)
+}
+
+// --- Snippet 4: Native spans ---
+
+pub fn traced_query(sql: String) -> List(String) {
+  let query =
+    span.define(
+      ["db", "query"],
+      start_metadata: fields.string("sql"),
+      stop_measurements: fields.empty(),
+      stop_metadata: fields.int("rows"),
+    )
+  span.run(query, sql, fn() {
+    let rows = ["row for " <> sql]
     span.Completion(
-      result: result,
+      result: rows,
       measurements: Nil,
-      metadata: QueryMeta(sql: query_str),
+      metadata: list.length(rows),
     )
   })
 }
 
-// --- Snippet 6: Forwarded Delivery (sinal/forwarder) ---
+// --- Snippet 5: Isolating a library's events ---
 
-pub fn build_supervisor(forwarder_name: process.Name(forwarder.Message)) {
-  let assert Ok(fwd) = forwarder.new(forwarder_name, 1024)
-  let assert Ok(_started) =
+pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
+  let observations = forwarder.new(name)
+  let assert Ok(_) =
     static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(forwarder.supervised(fwd))
+    |> static_supervisor.add(forwarder.supervised(observations))
     |> static_supervisor.start
-  fwd
+  // Every `sinal.emit` of an event named `my_library..` now returns as soon
+  // as the event is handed to the forwarder.
+  forwarder.route(["my_library"], observations)
 }
 
-pub fn emit_via_forwarder(
-  fwd: forwarder.Forwarder,
-  ev,
-  measurements,
-  metadata,
-) {
-  case forwarder.emit(fwd, ev, measurements, metadata) {
+// --- Snippet 6: A package that owns its forwarder ---
+
+pub fn emit_owned(
+  observations: forwarder.Forwarder,
+  event: sinal.Event(Int, Nil),
+) -> Nil {
+  case forwarder.emit(observations, event, 1, Nil) {
     Ok(Nil) -> Nil
-    Error(forwarder.ForwardEncodingFailed(_)) -> panic as "bad event shape"
+    // Dropped and counted in the forwarder's `dropped_event`.
     Error(forwarder.CapacityExceeded) -> Nil
     Error(forwarder.ForwarderUnavailable) -> Nil
   }
 }
 
-// --- Runnable Tests ---
+// --- Runnable tests ---
 
-// --- Snippet 7: Routing a library's events (sinal/forwarder) ---
-
-pub fn route_library_events(fwd: forwarder.Forwarder) -> Nil {
-  // Application start, after the forwarder is supervised.
-  forwarder.route([atom.create("my_library")], fwd)
+pub fn readme_common_path_test() {
+  observe_request_example()
 }
 
-pub fn library_observe(ev, measurements, metadata) -> Nil {
-  // Library code: forwarded if the application routed this name,
-  // synchronous otherwise. Drops are the forwarder's to report.
-  let _ = forwarder.emit_routed(ev, measurements, metadata)
-  Nil
-}
-
-pub fn readme_example_flow_test() {
-  let assert Ok(ev) = http_request_event()
-  setup_metrics(ev)
-  log_request(ev)
-
-  let assert Ok(scoped_completion) = scoped_metrics_example(ev)
-  scoped_completion.work_result |> should.equal(42)
-}
-
-pub fn readme_http_metadata_preserves_method_test() {
-  let assert Ok(event) = http_request_event()
-  let assert Ok(id) = sinal.handler_id("readme-method-preserved")
+pub fn readme_records_round_trip_test() {
+  let event = http_request_event()
   let subject = process.new_subject()
-  let assert Ok(attachment) =
-    sinal.observe(id, event, fn(_, metadata) {
-      process.send(subject, metadata.method)
+  let attachment =
+    sinal.observe(event, fn(measurements, metadata) {
+      process.send(subject, #(measurements, metadata))
     })
-  let assert Ok(Nil) =
-    sinal.emit(
-      event,
-      HttpMeasurements(duration_ms: 2, bytes_sent: 5),
-      HttpMetadata(method: "POST", route: "/submit", status: 201),
-    )
-  process.receive(subject, 100) |> should.equal(Ok("POST"))
+  let measurements = HttpMeasurements(duration_ms: 2, bytes_sent: 5)
+  let metadata = HttpMetadata(method: Post, route: "/submit", status: 201)
+  sinal.emit(event, measurements, metadata)
+  process.receive(subject, 100) |> should.equal(Ok(#(measurements, metadata)))
   sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
-pub fn readme_span_example_test() {
-  let res = execute_traced_query("SELECT 1;")
-  res |> should.equal("result for: SELECT 1;")
+pub fn readme_fallible_handler_test() {
+  let event = http_request_event()
+  let attachment = attach_metrics(event)
+  sinal.emit(
+    event,
+    HttpMeasurements(duration_ms: 1, bytes_sent: 1),
+    HttpMetadata(method: Get, route: "/", status: 200),
+  )
+  // A second attach under the same id is refused.
+  sinal.attach(
+    sinal.subscription(event, fn(_, _) { Nil }) |> sinal.with_id("http-metrics"),
+  )
+  |> should.equal(Error(sinal.AlreadyExists("http-metrics")))
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
-pub fn readme_forwarder_example_test() {
-  let forwarder_name = process.new_name("readme-forwarder-example")
-  let fwd = build_supervisor(forwarder_name)
-
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("readme"), atom.create("forwarded")],
-      fields.int(atom.create("n")),
-      fields.empty(),
-    )
-  let assert Ok(id) = sinal.handler_id("readme-forwarder-observer")
-  let subject = process.new_subject()
-  let assert Ok(_attachment) =
-    sinal.observe(id, ev, fn(n, _) { process.send(subject, n) })
-
-  emit_via_forwarder(fwd, ev, 7, Nil)
-  process.receive(subject, 200) |> should.equal(Ok(7))
+pub fn readme_scope_test() {
+  let event = http_request_event()
+  let assert Ok(completion) =
+    count_requests(event, fn() {
+      sinal.emit(
+        event,
+        HttpMeasurements(duration_ms: 1, bytes_sent: 1),
+        HttpMetadata(method: Get, route: "/", status: 200),
+      )
+      42
+    })
+  completion.work_result |> should.equal(42)
+  completion.cleanup_failures |> should.equal([])
 }
 
-pub fn readme_routing_example_test() {
-  let fwd = build_supervisor(process.new_name("readme-routing-example"))
-  let assert Ok(ev) =
-    sinal.event(
-      [atom.create("my_library"), atom.create("request")],
-      fields.empty(),
-      fields.empty(),
-    )
-  let assert Ok(id) = sinal.handler_id("readme-routing-observer")
+pub fn readme_span_test() {
+  traced_query("SELECT 1") |> should.equal(["row for SELECT 1"])
+}
+
+pub fn readme_isolation_test() {
+  let event =
+    sinal.event(["my_library", "request"], fields.int("n"), fields.empty())
   let subject = process.new_subject()
-  let assert Ok(attachment) =
-    sinal.observe(id, ev, fn(_, _) { process.send(subject, process.self()) })
+  let attachment =
+    sinal.observe(event, fn(n, _) {
+      process.send(subject, #(n, process.self()))
+    })
 
-  library_observe(ev, Nil, Nil)
-  let assert Ok(synchronous) = process.receive(subject, 0)
-  synchronous |> should.equal(process.self())
+  sinal.emit(event, 1, Nil)
+  process.receive(subject, 0) |> should.equal(Ok(#(1, process.self())))
 
-  route_library_events(fwd)
-  library_observe(ev, Nil, Nil)
-  let assert Ok(forwarded) = process.receive(subject, 200)
-  { forwarded == process.self() } |> should.equal(False)
+  isolate_library(process.new_name("readme_library_forwarder"))
+  sinal.emit(event, 2, Nil)
+  let assert Ok(#(2, pid)) = process.receive(subject, 500)
+  { pid == process.self() } |> should.be_false()
 
-  forwarder.unroute([atom.create("my_library")])
-  let assert Ok(Nil) = sinal.detach(attachment)
+  forwarder.unroute(["my_library"])
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+}
+
+pub fn readme_owned_forwarder_test() {
+  let event = sinal.event(["readme", "owned"], fields.int("n"), fields.empty())
+  let observations =
+    forwarder.new(process.new_name("readme_owned_forwarder"))
+    |> forwarder.with_capacity(8)
+  let assert Ok(_) =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(forwarder.supervised(observations))
+    |> static_supervisor.start
+  let subject = process.new_subject()
+  let attachment = sinal.observe(event, fn(n, _) { process.send(subject, n) })
+  emit_owned(observations, event)
+  process.receive(subject, 500) |> should.equal(Ok(1))
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
 }
 
 pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(8)
+  list.length(snippets) |> should.equal(7)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)
