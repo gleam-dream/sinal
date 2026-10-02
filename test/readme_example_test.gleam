@@ -199,6 +199,23 @@ pub fn checkout(cart: String, request_id: String) -> Nil {
   )
 }
 
+// --- Snippet 8: A correlation an application event always has ---
+
+pub type TicketMetadata {
+  TicketMetadata(ticket: Correlation, queue: String)
+}
+
+pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
+  fields.record({
+    use ticket <- fields.parameter
+    use queue <- fields.parameter
+    TicketMetadata(ticket:, queue:)
+  })
+  |> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
+  |> fields.and(fields.string("queue"), fn(m) { m.queue })
+  |> fields.build
+}
+
 // --- Runnable tests ---
 
 pub fn readme_common_path_test() {
@@ -295,7 +312,7 @@ pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(8)
+  list.length(snippets) |> should.equal(9)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)
@@ -349,5 +366,18 @@ pub fn readme_correlation_test() {
   let assert Ok(CheckoutMetadata("cart-2", Some(fresh))) =
     process.receive(seen, 100)
   string.length(correlation.to_string(fresh)) |> should.equal(32)
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+}
+
+pub fn readme_required_correlation_test() {
+  let event =
+    sinal.event(["readme", "ticket"], fields.empty(), ticket_metadata())
+  let seen = process.new_subject()
+  let attachment =
+    sinal.observe(event, fn(_, metadata) { process.send(seen, metadata) })
+  let id = correlation.unique()
+  sinal.emit(event, Nil, TicketMetadata(ticket: id, queue: "support"))
+  process.receive(seen, 100)
+  |> should.equal(Ok(TicketMetadata(ticket: id, queue: "support")))
   sinal.detach(attachment) |> should.equal(Ok(Nil))
 }

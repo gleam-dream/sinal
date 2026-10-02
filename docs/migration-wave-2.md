@@ -743,3 +743,56 @@ pub fn correlation_for(
   }
 }
 ```
+
+## Follow-up: `correlation.required_field()`
+
+`correlation.field()` is `Fields(Option(Correlation))`, which fits a library
+whose caller may not have supplied a correlation. An application event that
+always has one had to wrap `Some(..)` on emit and handle an unreachable
+`None` on read. `correlation.required_field()` is new and removes both. The
+existing `field()` is unchanged.
+
+```gleam
+// Before: an always-present correlation held as Option.
+pub type TicketMetadata {
+  TicketMetadata(ticket: Option(Correlation), queue: String)
+}
+|> fields.and(correlation.field(), fn(m: TicketMetadata) { m.ticket })
+sinal.emit(event, Nil, TicketMetadata(ticket: Some(id), queue:))
+// ... and at the reader: case m.ticket { Some(id) -> .. None -> Nil }
+
+// After: required_field() holds the Correlation itself.
+pub type TicketMetadata {
+  TicketMetadata(ticket: Correlation, queue: String)
+}
+|> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
+sinal.emit(event, Nil, TicketMetadata(ticket: id, queue:))
+```
+
+The two functions use the key `correlation` and the same wire encoding, so
+they interoperate: a handler using `field()` (a library's) reads events
+emitted with `required_field()` as `Some(correlation)`, and a handler using
+`required_field()` reads events emitted with `field()` and `Some`. Decoding a
+missing key (an event emitted with `field()` and `None`), an invalid value or
+the atom `nil` with `required_field()` fails like any other decode failure:
+`MalformedMetadata(MissingField("correlation"))` or `InvalidField`, the call
+is skipped and the handler stays attached.
+
+Use `field()` in a library and `required_field()` in an application event
+that always has a correlation. Switching a field from one to the other
+changes the metadata type but not the wire format, so emitters and handlers
+can move independently.
+
+Dependents that use `correlation.field()` on an event that always has one,
+and can switch:
+
+- `oversight/apps/support_desk/src/support_desk/events.gleam` (`TicketMetadata`
+  line 39, `AnswerMetadata` line 58) and its collector in `telemetry.gleam`
+  (the unreachable `None -> Nil` arm).
+- `oversight/apps/secure_mcp/src/secure_mcp/telemetry.gleam` (`McpRequest`
+  line 54, `ReportSubmitted` line 70).
+
+`oversight/apps/webhooks` keeps `field()`: its delivery correlation is `None`
+when the id is too long.
+
+No package under `/code/gleam-dream/*/src` uses `correlation.field()`.

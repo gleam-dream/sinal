@@ -10,10 +10,20 @@
 ////
 //// ## The metadata field
 ////
-//// `field()` is the one codec for it: the key `correlation`, holding a
-//// UTF-8 binary, omitted when there is none. An Erlang or Elixir handler
-//// reads `metadata.correlation` without knowing which package emitted the
-//// event.
+//// The key `correlation` holds a UTF-8 binary. Two codecs share that key and
+//// wire encoding; choose by whether the event always has a correlation.
+////
+//// - `field()` is `Fields(Option(Correlation))`, omitted when there is none.
+////   A library uses it, because a correlation is present only when the
+////   caller supplied one.
+//// - `required_field()` is `Fields(Correlation)`. An application event that
+////   always carries one uses it, so the metadata holds a plain
+////   `Correlation`.
+////
+//// A handler using `field()` reads events emitted with `required_field()`
+//// as `Some(correlation)`, so a library handler needs no change. An Erlang
+//// or Elixir handler reads `metadata.correlation` without knowing which
+//// package emitted the event or which codec wrote it.
 ////
 //// ```gleam
 //// import gleam/option.{type Option}
@@ -36,9 +46,12 @@
 //// }
 //// ```
 ////
+//// An application event that always has one declares
+//// `correlation: Correlation` and `correlation.required_field()` instead.
+////
 //// ## Propagation
 ////
-//// A package with work-scoped events puts `correlation: Option(Correlation)`
+//// A library with work-scoped events puts `correlation: Option(Correlation)`
 //// in their metadata. It accepts the value where the work starts, copies it
 //// into every event of that work, including events from helper processes,
 //// and passes it to every package it calls on the caller's behalf. A span
@@ -100,11 +113,49 @@ pub fn to_string(correlation: Correlation) -> String {
   correlation.value
 }
 
-/// The `correlation` metadata field. `None` omits the key; a missing key,
-/// or the atom `nil` or `undefined`, decodes as `None`. A value that is not
-/// a binary of 1 to 128 bytes fails to decode.
+/// The `correlation` metadata field for an event that may have none: a
+/// library carries `Option(Correlation)` because the caller may not have
+/// supplied one. `None` omits the key; a missing key, or the atom `nil` or
+/// `undefined`, decodes as `None`. A value that is not a binary of 1 to 128
+/// bytes fails to decode.
+///
+/// An application event that always has a correlation uses
+/// `required_field` instead. Both use the key `correlation` and the same
+/// wire encoding, so a handler that reads `field()` sees the events emitted
+/// with `required_field()` as `Some(correlation)`.
 pub fn field() -> fields.Fields(Option(Correlation)) {
-  fields.optional(fields.field(
+  fields.optional(required_field())
+}
+
+/// The `correlation` metadata field for an event that always has one, such
+/// as an application's own event: the metadata holds a `Correlation`, with
+/// no `Some(..)` on emit and no unreachable `None` on read.
+///
+/// It uses the same key (`correlation`) and wire encoding as `field()`, so a
+/// handler written with `field()`, such as a library's, reads these events
+/// as `Some(correlation)`. Decoding fails like any other field when the key
+/// is missing, or when the value is not a binary of 1 to 128 bytes; the atom
+/// `nil` is not a correlation. A handler that cannot decode the metadata
+/// skips that one call, reports `MalformedMetadata` and stays attached.
+///
+/// ```gleam
+/// pub type TicketMetadata {
+///   TicketMetadata(ticket: Correlation, queue: String)
+/// }
+///
+/// pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
+///   fields.record({
+///     use ticket <- fields.parameter
+///     use queue <- fields.parameter
+///     TicketMetadata(ticket:, queue:)
+///   })
+///   |> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
+///   |> fields.and(fields.string("queue"), fn(m) { m.queue })
+///   |> fields.build
+/// }
+/// ```
+pub fn required_field() -> fields.Fields(Correlation) {
+  fields.field(
     "correlation",
     fn(correlation: Correlation) { dynamic.string(correlation.value) },
     decode.string
@@ -118,7 +169,7 @@ pub fn field() -> fields.Fields(Option(Correlation)) {
             )
         }
       }),
-  ))
+  )
 }
 
 /// Describes a refusal for logs.
