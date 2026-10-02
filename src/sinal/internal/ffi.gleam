@@ -4,6 +4,14 @@ import gleam/erlang/atom.{type Atom}
 @external(erlang, "sinal_ffi", "identity")
 pub fn to_dynamic(value: a) -> Dynamic
 
+/// True while this process runs `decoding`.
+@external(erlang, "sinal_ffi", "is_decoding")
+pub fn is_decoding() -> Bool
+
+/// Runs `decode` with `is_decoding` true, and restores it afterwards.
+@external(erlang, "sinal_ffi", "decoding")
+pub fn decoding(decode: fn() -> a) -> a
+
 @external(erlang, "sinal_ffi", "empty_map")
 pub fn empty_map() -> Dynamic
 

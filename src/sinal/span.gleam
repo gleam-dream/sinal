@@ -355,83 +355,57 @@ fn span_context_field() -> fields.Fields(SpanContext) {
 }
 
 fn start_measurement_fields() -> fields.Fields(StartMeasurements) {
-  fields.record({
-    use system_time <- fields.parameter
-    use monotonic_time <- fields.parameter
-    StartMeasurements(system_time:, monotonic_time:)
+  use system_time <- fields.include(system_time_field(), get: fn(m) {
+    m.system_time
   })
-  |> fields.and(system_time_field(), fn(m: StartMeasurements) { m.system_time })
-  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
-  |> fields.build
+  use monotonic_time <- fields.include(monotonic_time_field(), get: fn(m) {
+    m.monotonic_time
+  })
+  fields.success(StartMeasurements(system_time:, monotonic_time:))
 }
 
 fn stop_measurement_fields(
   extra: fields.Fields(extra),
 ) -> fields.Fields(StopMeasurements(extra)) {
-  fields.record({
-    use duration <- fields.parameter
-    use monotonic_time <- fields.parameter
-    use extra <- fields.parameter
-    StopMeasurements(duration:, monotonic_time:, extra:)
+  use duration <- fields.include(duration_field(), get: fn(m) { m.duration })
+  use monotonic_time <- fields.include(monotonic_time_field(), get: fn(m) {
+    m.monotonic_time
   })
-  |> fields.and(duration_field(), fn(m: StopMeasurements(extra)) { m.duration })
-  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
-  |> fields.and(extra, fn(m) { m.extra })
-  |> fields.build
+  use extra <- fields.include(extra, get: fn(m) { m.extra })
+  fields.success(StopMeasurements(duration:, monotonic_time:, extra:))
 }
 
 fn exception_measurement_fields() -> fields.Fields(ExceptionMeasurements) {
-  fields.record({
-    use duration <- fields.parameter
-    use monotonic_time <- fields.parameter
-    ExceptionMeasurements(duration:, monotonic_time:)
+  use duration <- fields.include(duration_field(), get: fn(m) { m.duration })
+  use monotonic_time <- fields.include(monotonic_time_field(), get: fn(m) {
+    m.monotonic_time
   })
-  |> fields.and(duration_field(), fn(m: ExceptionMeasurements) { m.duration })
-  |> fields.and(monotonic_time_field(), fn(m) { m.monotonic_time })
-  |> fields.build
+  fields.success(ExceptionMeasurements(duration:, monotonic_time:))
 }
 
 fn start_metadata_fields(
   metadata: fields.Fields(metadata),
 ) -> fields.Fields(StartMetadata(metadata)) {
-  fields.record({
-    use metadata <- fields.parameter
-    use context <- fields.parameter
-    StartMetadata(metadata:, context:)
-  })
-  |> fields.and(metadata, fn(m: StartMetadata(metadata)) { m.metadata })
-  |> fields.and(span_context_field(), fn(m) { m.context })
-  |> fields.build
+  use metadata <- fields.include(metadata, get: fn(m) { m.metadata })
+  use context <- fields.include(span_context_field(), get: fn(m) { m.context })
+  fields.success(StartMetadata(metadata:, context:))
 }
 
 fn stop_metadata_fields(
   metadata: fields.Fields(metadata),
 ) -> fields.Fields(StopMetadata(metadata)) {
-  fields.record({
-    use metadata <- fields.parameter
-    use context <- fields.parameter
-    StopMetadata(metadata:, context:)
-  })
-  |> fields.and(metadata, fn(m: StopMetadata(metadata)) { m.metadata })
-  |> fields.and(span_context_field(), fn(m) { m.context })
-  |> fields.build
+  use metadata <- fields.include(metadata, get: fn(m) { m.metadata })
+  use context <- fields.include(span_context_field(), get: fn(m) { m.context })
+  fields.success(StopMetadata(metadata:, context:))
 }
 
 fn exception_metadata_fields(
   metadata: fields.Fields(metadata),
 ) -> fields.Fields(ExceptionMetadata(metadata)) {
-  fields.record({
-    use metadata <- fields.parameter
-    use context <- fields.parameter
-    use kind <- fields.parameter
-    use reason <- fields.parameter
-    use stacktrace <- fields.parameter
-    ExceptionMetadata(metadata:, context:, kind:, reason:, stacktrace:)
-  })
-  |> fields.and(metadata, fn(m: ExceptionMetadata(metadata)) { m.metadata })
-  |> fields.and(span_context_field(), fn(m) { m.context })
-  |> fields.and(kind_field(), fn(m) { m.kind })
-  |> fields.and(
+  use metadata <- fields.include(metadata, get: fn(m) { m.metadata })
+  use context <- fields.include(span_context_field(), get: fn(m) { m.context })
+  use kind <- fields.include(kind_field(), get: fn(m) { m.kind })
+  use reason <- fields.include(
     fields.field(
       "reason",
       fn(reason) {
@@ -440,9 +414,9 @@ fn exception_metadata_fields(
       },
       decode.dynamic |> decode.map(ExceptionReason),
     ),
-    fn(m) { m.reason },
+    get: fn(m) { m.reason },
   )
-  |> fields.and(
+  use stacktrace <- fields.include(
     fields.field(
       "stacktrace",
       fn(stacktrace) {
@@ -451,9 +425,15 @@ fn exception_metadata_fields(
       },
       decode.dynamic |> decode.map(ExceptionStacktrace),
     ),
-    fn(m) { m.stacktrace },
+    get: fn(m) { m.stacktrace },
   )
-  |> fields.build
+  fields.success(ExceptionMetadata(
+    metadata:,
+    context:,
+    kind:,
+    reason:,
+    stacktrace:,
+  ))
 }
 
 fn kind_field() -> fields.Fields(ExceptionKind) {

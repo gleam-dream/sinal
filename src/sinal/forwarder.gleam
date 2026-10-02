@@ -319,24 +319,22 @@ fn emit_dropped(forwarder: Forwarder, dropped: Dropped) -> Nil {
 pub fn dropped_event() -> Event(Dropped, DroppedMetadata) {
   sinal.event(
     ["sinal", "forwarder", "dropped"],
-    fields.record({
-      use rejected <- fields.parameter
-      use lost <- fields.parameter
-      use unavailable <- fields.parameter
-      Dropped(rejected:, lost:, unavailable:)
-    })
-      |> fields.and(fields.int("rejected"), fn(d: Dropped) { d.rejected })
-      |> fields.and(fields.int("lost"), fn(d) { d.lost })
-      |> fields.and(fields.int("unavailable"), fn(d) { d.unavailable })
-      |> fields.build,
-    fields.record({
-      use forwarder <- fields.parameter
-      DroppedMetadata(forwarder:)
-    })
-      |> fields.and(fields.string("forwarder"), fn(m: DroppedMetadata) {
+    {
+      use rejected <- fields.include(fields.int("rejected"), get: fn(d) {
+        d.rejected
+      })
+      use lost <- fields.include(fields.int("lost"), get: fn(d) { d.lost })
+      use unavailable <- fields.include(fields.int("unavailable"), get: fn(d) {
+        d.unavailable
+      })
+      fields.success(Dropped(rejected:, lost:, unavailable:))
+    },
+    {
+      use forwarder <- fields.include(fields.string("forwarder"), get: fn(m) {
         m.forwarder
       })
-      |> fields.build,
+      fields.success(DroppedMetadata(forwarder:))
+    },
   )
 }
 

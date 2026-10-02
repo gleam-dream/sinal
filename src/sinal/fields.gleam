@@ -6,8 +6,9 @@
 //// each declare one key; `enum` declares a key whose value is one of a
 //// fixed set; `optional` makes a one-key field absent-able; `field` covers
 //// any other value with an encoder and a `gleam/dynamic/decode` decoder.
-//// `record`, `parameter`, `and` and `build` join several fields into one
-//// record, one line per field. `empty` declares no keys.
+//// A record codec is a `use` block: each `include` adds one field and
+//// binds its value by name, and `success` builds the record. `empty`
+//// declares no keys.
 ////
 //// ```gleam
 //// import sinal/fields
@@ -17,19 +18,20 @@
 //// }
 ////
 //// pub fn request_fields() -> fields.Fields(Request) {
-////   fields.record({
-////     use method <- fields.parameter
-////     use status <- fields.parameter
-////     Request(method:, status:)
+////   use method <- fields.include(fields.string("method"), get: fn(r) {
+////     r.method
 ////   })
-////   |> fields.and(fields.string("method"), fn(r: Request) { r.method })
-////   |> fields.and(fields.int("status"), fn(r) { r.status })
-////   |> fields.build
+////   use status <- fields.include(fields.int("status"), get: fn(r) { r.status })
+////   fields.success(Request(method:, status:))
 //// }
 //// ```
 ////
-//// Only the first getter needs a type annotation: the record type is not
-//// known until `build`.
+//// Each value goes to the constructor parameter it is bound to, so the
+//// fields may be listed in any order and two fields of one type cannot
+//// swap. Each getter is passed with its `get:` label and needs no type
+//// annotation: the rest of the block, which ends in `success`, fixes the
+//// record type first. This is the shape of `json/blueprint/codec`'s
+//// `field` and `success`.
 ////
 //// ## Keys are atoms
 ////
@@ -71,32 +73,35 @@ pub type FieldError {
 
 /// A codec between a Gleam value and the keys it writes to a native map.
 pub opaque type Fields(a) {
-  Fields(
+  Fields(plan: fn() -> Plan(a), decode: fn(Dynamic) -> Result(a, FieldError))
+}
+
+// What a codec writes, independent of any value. A record's plan comes from
+// running its `use` block with placeholder values, once, when the record is
+// defined; encoding then only calls the getters and the plans of its fields.
+type Plan(a) {
+  Plan(
+    // The keys in declaration order.
     keys: List(Atom),
-    put: fn(a, Dynamic) -> Dynamic,
-    decode: fn(Dynamic) -> Result(a, FieldError),
+    write: fn(a, Dynamic) -> Dynamic,
+    // Reports an `enum` value missing from its list; `None` when the codec
+    // has no `enum`.
     check: Option(fn(a) -> Result(Nil, FieldError)),
+    // Any value of `a`, used only to run a `use` block for its plan.
+    placeholder: fn() -> a,
   )
 }
 
 /// Declares no keys. It decodes any map as `Nil` and rejects a term that is
-/// not a map.
+/// not a map. It is the same codec as `success(Nil)`.
 pub fn empty() -> Fields(Nil) {
-  Fields(
-    keys: [],
-    put: fn(_, map) { map },
-    decode: fn(raw) {
-      case ffi.is_map(raw) {
-        True -> Ok(Nil)
-        False -> Error(NotAMap)
-      }
-    },
-    check: None,
-  )
+  success(Nil)
 }
 
 /// Declares one key whose value is written by `encode` and read by
 /// `decoder`. Use it for a value the other constructors do not cover.
+/// Inside a record, sinal runs `decoder` once against `nil` where the
+/// record is defined, for a placeholder value, so keep it free of effects.
 ///
 /// ```gleam
 /// fields.field("attempt", dynamic.int, decode.int)
@@ -106,17 +111,17 @@ pub fn field(
   encode: fn(a) -> Dynamic,
   decoder: decode.Decoder(a),
 ) -> Fields(a) {
-  single(key, "sinal/fields.field", encode, decoder)
+  single(key, "sinal/fields.field", encode, decoder, fn() { zero(decoder) })
 }
 
 /// Declares a key holding a UTF-8 binary.
 pub fn string(key: String) -> Fields(String) {
-  single(key, "sinal/fields.string", dynamic.string, decode.string)
+  single(key, "sinal/fields.string", dynamic.string, decode.string, fn() { "" })
 }
 
 /// Declares a key holding an integer.
 pub fn int(key: String) -> Fields(Int) {
-  single(key, "sinal/fields.int", dynamic.int, decode.int)
+  single(key, "sinal/fields.int", dynamic.int, decode.int, fn() { 0 })
 }
 
 /// Declares a key holding a float. Decoding also accepts an integer, which
@@ -128,12 +133,13 @@ pub fn float(key: String) -> Fields(Float) {
     "sinal/fields.float",
     dynamic.float,
     decode.one_of(decode.float, [decode.int |> decode.map(int.to_float)]),
+    fn() { 0.0 },
   )
 }
 
 /// Declares a key holding a boolean.
 pub fn bool(key: String) -> Fields(Bool) {
-  single(key, "sinal/fields.bool", dynamic.bool, decode.bool)
+  single(key, "sinal/fields.bool", dynamic.bool, decode.bool, fn() { False })
 }
 
 /// Declares a key holding one of `values`, written as the UTF-8 binary
@@ -187,6 +193,22 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
     Error(Nil) -> Nil
   }
   let expected = "one of " <> string.join(names, ", ")
+  let decoder =
+    decode.one_of(decode.string, [atom.decoder() |> decode.map(atom.to_string)])
+    |> decode.then(fn(found) {
+      case list.key_find(named, found) {
+        Ok(value) -> decode.success(value)
+        Error(Nil) -> decode.failure(first, expected)
+      }
+    })
+  let field =
+    single(
+      key,
+      "sinal/fields.enum",
+      fn(value) { dynamic.string(name(value)) },
+      decoder,
+      fn() { first },
+    )
   let check = fn(value) {
     let found = name(value)
     case list.contains(names, found) {
@@ -203,23 +225,8 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
         )
     }
   }
-  let decoder =
-    decode.one_of(decode.string, [atom.decoder() |> decode.map(atom.to_string)])
-    |> decode.then(fn(found) {
-      case list.key_find(named, found) {
-        Ok(value) -> decode.success(value)
-        Error(Nil) -> decode.failure(first, expected)
-      }
-    })
-  Fields(
-    ..single(
-      key,
-      "sinal/fields.enum",
-      fn(value) { dynamic.string(name(value)) },
-      decoder,
-    ),
-    check: Some(check),
-  )
+  let plan = Plan(..field.plan(), check: Some(check))
+  Fields(..field, plan: fn() { plan })
 }
 
 /// Makes a one-key field absent-able. Encoding `None` omits the key.
@@ -232,7 +239,8 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
 ///
 /// Panics when `inner` declares other than exactly one key.
 pub fn optional(inner: Fields(a)) -> Fields(Option(a)) {
-  let key = case inner.keys {
+  let inner_plan = inner.plan()
+  let key = case inner_plan.keys {
     [key] -> key
     other ->
       panic as {
@@ -240,133 +248,156 @@ pub fn optional(inner: Fields(a)) -> Fields(Option(a)) {
         <> string.inspect(list.map(other, atom.to_string))
       }
   }
-  Fields(
-    keys: inner.keys,
-    put: fn(value, map) {
-      case value {
-        None -> map
-        Some(actual) -> inner.put(actual, map)
-      }
-    },
-    decode: fn(raw) {
-      case ffi.map_lookup(raw, key) {
-        ffi.NotAMap -> Error(NotAMap)
-        ffi.Absent -> Ok(None)
-        ffi.Present(value) ->
-          case ffi.is_missing_marker(value) {
-            True -> Ok(None)
-            False ->
-              case inner.decode(raw) {
-                Ok(value) -> Ok(Some(value))
-                Error(error) -> Error(error)
-              }
-          }
-      }
-    },
-    check: option.map(inner.check, fn(check) {
-      fn(value) {
+  let plan =
+    Plan(
+      keys: inner_plan.keys,
+      write: fn(value, map) {
         case value {
-          None -> Ok(Nil)
-          Some(actual) -> check(actual)
+          None -> map
+          Some(actual) -> inner_plan.write(actual, map)
         }
-      }
-    }),
-  )
+      },
+      check: option.map(inner_plan.check, fn(check) {
+        fn(value) {
+          case value {
+            None -> Ok(Nil)
+            Some(actual) -> check(actual)
+          }
+        }
+      }),
+      placeholder: fn() { None },
+    )
+  Fields(plan: fn() { plan }, decode: fn(raw) {
+    case ffi.map_lookup(raw, key) {
+      ffi.NotAMap -> Error(NotAMap)
+      ffi.Absent -> Ok(None)
+      ffi.Present(value) ->
+        case ffi.is_missing_marker(value) {
+          True -> Ok(None)
+          False ->
+            case inner.decode(raw) {
+              Ok(value) -> Ok(Some(value))
+              Error(error) -> Error(error)
+            }
+        }
+    }
+  })
 }
 
-/// A record codec under construction. `record` starts it, each `and` adds a
-/// field and consumes one parameter of the constructor, and `build` ends it.
-pub opaque type Record(record, constructor) {
-  Record(
-    keys: List(Atom),
-    puts: List(fn(record, Dynamic) -> Dynamic),
-    decode: fn(Dynamic) -> Result(constructor, FieldError),
-    checks: List(fn(record) -> Result(Nil, FieldError)),
-  )
-}
-
-/// Starts a record codec from a curried constructor, usually written with
-/// `use x <- fields.parameter` for each field.
-pub fn record(constructor: constructor) -> Record(record, constructor) {
-  Record(
-    keys: [],
-    puts: [],
-    decode: fn(raw) {
-      case ffi.is_map(raw) {
-        True -> Ok(constructor)
-        False -> Error(NotAMap)
-      }
-    },
-    checks: [],
-  )
-}
-
-/// Turns the rest of a `use` block into one parameter of a curried record
-/// constructor.
-pub fn parameter(next: fn(a) -> rest) -> fn(a) -> rest {
-  next
-}
-
-/// Adds the next field of the record: `field` encodes and decodes the
-/// value, and `get` reads it from the record when encoding. Add fields in
-/// the constructor's parameter order.
+/// Adds one field to a record codec and binds its decoded value by name for
+/// the rest of the `use` block, which ends in `success`:
 ///
-/// Panics when `field` declares a key the record already has.
-pub fn and(
-  record: Record(record, fn(a) -> rest),
+/// ```gleam
+/// use status <- fields.include(fields.int("status"), get: fn(r) { r.status })
+/// ```
+///
+/// `field` writes its keys from the value that `get` reads from the record.
+/// It is usually one key, but it can be another record codec, whose keys
+/// are written into the same map. The fields of a record may be listed in
+/// any order: each value goes to the constructor parameter it is bound to.
+///
+/// Pass the getter with its `get:` label. Gleam checks arguments in
+/// parameter order, and `next` (the rest of the `use` block) comes before
+/// `get`, so the record type is known from `success` by the time the getter
+/// is checked and the getter needs no annotation. Without the label the
+/// getter fills the `then` slot and the call fails to compile.
+///
+/// The record's keys and encoder are fixed once, where the record is
+/// defined, by running the `use` block with placeholder values: the zero
+/// value of each field's decoder (`fields.field` runs its decoder against
+/// `nil` for it). So keep the block to `include` calls and a `success`
+/// constructor, and do not choose a field from a value bound before it.
+/// Decoding runs the block again with the decoded values.
+///
+/// Panics when `field` declares a key the rest of the record already has.
+pub fn include(
   field: Fields(a),
-  get: fn(record) -> a,
-) -> Record(record, rest) {
-  case list.find(field.keys, fn(key) { list.contains(record.keys, key) }) {
+  then next: fn(a) -> Fields(r),
+  get get: fn(r) -> a,
+) -> Fields(r) {
+  let decode = fn(raw) {
+    case field.decode(raw) {
+      Error(error) -> Error(error)
+      Ok(value) -> next(value).decode(raw)
+    }
+  }
+  // Decoding runs the block again with the decoded values, and the records
+  // it builds then only decode: their plans stay unbuilt, so a decode costs
+  // one pass over the block instead of one pass per field.
+  case ffi.is_decoding() {
+    True -> Fields(plan: fn() { include_plan(field, next, get) }, decode:)
+    False -> {
+      let plan = include_plan(field, next, get)
+      Fields(plan: fn() { plan }, decode:)
+    }
+  }
+}
+
+fn include_plan(
+  field: Fields(a),
+  next: fn(a) -> Fields(r),
+  get: fn(r) -> a,
+) -> Plan(r) {
+  let own = field.plan()
+  let rest = next(own.placeholder()).plan()
+  case list.find(own.keys, list.contains(rest.keys, _)) {
     Ok(duplicate) ->
       panic as {
-        "sinal/fields.and: key "
+        "sinal/fields.include: key "
         <> string.inspect(atom.to_string(duplicate))
         <> " is declared twice in one record"
       }
     Error(Nil) -> Nil
   }
-  let previous = record.decode
-  Record(
-    keys: list.append(record.keys, field.keys),
-    puts: [fn(value, map) { field.put(get(value), map) }, ..record.puts],
-    decode: fn(raw) {
-      case previous(raw) {
-        Error(error) -> Error(error)
-        Ok(constructor) ->
-          case field.decode(raw) {
+  Plan(
+    keys: list.append(own.keys, rest.keys),
+    write: fn(record, map) { rest.write(record, own.write(get(record), map)) },
+    check: case own.check, rest.check {
+      None, None -> None
+      Some(check), None -> Some(fn(record) { check(get(record)) })
+      None, Some(_) -> rest.check
+      Some(check), Some(others) ->
+        Some(fn(record) {
+          case check(get(record)) {
+            Ok(Nil) -> others(record)
             Error(error) -> Error(error)
-            Ok(value) -> Ok(constructor(value))
           }
-      }
+        })
     },
-    checks: case field.check {
-      None -> record.checks
-      Some(check) -> [fn(value) { check(get(value)) }, ..record.checks]
-    },
+    placeholder: rest.placeholder,
   )
 }
 
-/// Ends a record codec once every constructor parameter has a field.
-pub fn build(record: Record(record, record)) -> Fields(record) {
-  let puts = list.reverse(record.puts)
-  Fields(
-    keys: record.keys,
-    put: fn(value, map) {
-      list.fold(puts, map, fn(map, put) { put(value, map) })
-    },
-    decode: record.decode,
-    check: case list.reverse(record.checks) {
-      [] -> None
-      checks ->
-        Some(fn(value) { list.try_each(checks, fn(check) { check(value) }) })
-    },
-  )
+/// Ends a record codec with the record built from the values that the
+/// `include` calls before it bound:
+///
+/// ```gleam
+/// pub fn request_fields() -> fields.Fields(Request) {
+///   use method <- fields.include(fields.string("method"), get: fn(r) {
+///     r.method
+///   })
+///   use status <- fields.include(fields.int("status"), get: fn(r) { r.status })
+///   fields.success(Request(method:, status:))
+/// }
+/// ```
+///
+/// Alone, `success(value)` declares no keys and decodes any map as `value`.
+pub fn success(value: r) -> Fields(r) {
+  let plan =
+    Plan(keys: [], write: fn(_, map) { map }, check: None, placeholder: fn() {
+      value
+    })
+  Fields(plan: fn() { plan }, decode: fn(raw) {
+    case ffi.is_map(raw) {
+      True -> Ok(value)
+      False -> Error(NotAMap)
+    }
+  })
 }
 
 /// The keys `fields` writes, in declaration order.
 pub fn keys(fields: Fields(a)) -> List(String) {
-  list.map(fields.keys, atom.to_string)
+  list.map(fields.plan().keys, atom.to_string)
 }
 
 /// Encodes `value` into the native map that `sinal.emit` would send. Use it
@@ -374,7 +405,7 @@ pub fn keys(fields: Fields(a)) -> List(String) {
 /// It writes an `enum` value missing from its list without complaint; the
 /// emit paths report it.
 pub fn encode(fields: Fields(a), value: a) -> Dynamic {
-  fields.put(value, ffi.empty_map())
+  fields.plan().write(value, ffi.empty_map())
 }
 
 /// Encodes `value` for an emit path. When an `enum` value is missing from
@@ -388,7 +419,8 @@ pub fn encode_for_emit(
   caller caller: String,
   event event: fn() -> List(String),
 ) -> Dynamic {
-  case fields.check {
+  let plan = fields.plan()
+  case plan.check {
     None -> Nil
     Some(check) ->
       case check(value) {
@@ -404,13 +436,13 @@ pub fn encode_for_emit(
           )
       }
   }
-  fields.put(value, ffi.empty_map())
+  plan.write(value, ffi.empty_map())
 }
 
 /// Decodes a native map the way a handler would, reading only the
 /// declared keys.
 pub fn decode(fields: Fields(a), raw: Dynamic) -> Result(a, FieldError) {
-  fields.decode(raw)
+  ffi.decoding(fn() { fields.decode(raw) })
 }
 
 /// Describes a decoding failure for logs.
@@ -440,24 +472,41 @@ fn single(
   caller: String,
   encode: fn(a) -> Dynamic,
   decoder: decode.Decoder(a),
+  placeholder: fn() -> a,
 ) -> Fields(a) {
-  let native_key = grammar.to_atom(key, caller:, what: "key")
-  Fields(
-    check: None,
-    keys: [native_key],
-    put: fn(value, map) { ffi.map_put(map, native_key, encode(value)) },
-    decode: fn(raw) {
-      case ffi.map_lookup(raw, native_key) {
-        ffi.NotAMap -> Error(NotAMap)
-        ffi.Absent -> Error(MissingField(key))
-        ffi.Present(value) ->
-          case decode.run(value, decoder) {
-            Ok(decoded) -> Ok(decoded)
-            Error(errors) -> Error(InvalidField(key, errors))
-          }
-      }
-    },
-  )
+  // A decode runs a record's `use` block again with the decoded values; the
+  // keys it builds were checked when the record was defined.
+  let native_key = case ffi.is_decoding() {
+    True -> atom.create(key)
+    False -> grammar.to_atom(key, caller:, what: "key")
+  }
+  let plan =
+    Plan(
+      keys: [native_key],
+      write: fn(value, map) { ffi.map_put(map, native_key, encode(value)) },
+      check: None,
+      placeholder:,
+    )
+  Fields(plan: fn() { plan }, decode: fn(raw) {
+    case ffi.map_lookup(raw, native_key) {
+      ffi.NotAMap -> Error(NotAMap)
+      ffi.Absent -> Error(MissingField(key))
+      ffi.Present(value) ->
+        case decode.run(value, decoder) {
+          Ok(decoded) -> Ok(decoded)
+          Error(errors) -> Error(InvalidField(key, errors))
+        }
+    }
+  })
+}
+
+/// A value of `a` from `decoder`. A `gleam/dynamic/decode` decoder that
+/// fails still returns a value of its type (the zero value of `failure`),
+/// so this ignores the errors of a run against `nil`.
+fn zero(decoder: decode.Decoder(a)) -> a {
+  let assert Ok(value) =
+    decode.run(dynamic.nil(), decode.map_errors(decoder, fn(_) { [] }))
+  value
 }
 
 fn first_duplicate(

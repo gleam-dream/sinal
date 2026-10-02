@@ -35,14 +35,11 @@
 //// }
 ////
 //// pub fn request_metadata() -> fields.Fields(RequestMetadata) {
-////   fields.record({
-////     use route <- fields.parameter
-////     use correlation <- fields.parameter
-////     RequestMetadata(route:, correlation:)
+////   use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+////   use correlation <- fields.include(correlation.field(), get: fn(m) {
+////     m.correlation
 ////   })
-////   |> fields.and(fields.string("route"), fn(m: RequestMetadata) { m.route })
-////   |> fields.and(correlation.field(), fn(m) { m.correlation })
-////   |> fields.build
+////   fields.success(RequestMetadata(route:, correlation:))
 //// }
 //// ```
 ////
@@ -144,14 +141,11 @@ pub fn field() -> fields.Fields(Option(Correlation)) {
 /// }
 ///
 /// pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
-///   fields.record({
-///     use ticket <- fields.parameter
-///     use queue <- fields.parameter
-///     TicketMetadata(ticket:, queue:)
+///   use ticket <- fields.include(correlation.required_field(), get: fn(m) {
+///     m.ticket
 ///   })
-///   |> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
-///   |> fields.and(fields.string("queue"), fn(m) { m.queue })
-///   |> fields.build
+///   use queue <- fields.include(fields.string("queue"), get: fn(m) { m.queue })
+///   fields.success(TicketMetadata(ticket:, queue:))
 /// }
 /// ```
 pub fn required_field() -> fields.Fields(Correlation) {

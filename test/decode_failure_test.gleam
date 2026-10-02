@@ -154,18 +154,14 @@ pub fn scoped_subscription_and_span_handlers_survive_decode_failures_test() {
 }
 
 pub fn emit_reports_an_unlisted_enum_value_at_the_emit_site_test() {
-  let metadata =
-    fields.record({
-      use outcome <- fields.parameter
-      use previous <- fields.parameter
-      #(outcome, previous)
-    })
-    |> fields.and(incomplete_outcome(), fn(m: #(Outcome, _)) { m.0 })
-    |> fields.and(
+  let metadata = {
+    use outcome <- fields.include(incomplete_outcome(), get: fn(m) { m.0 })
+    use previous <- fields.include(
       fields.optional(fields.enum("previous", [Delivered], outcome_name)),
-      fn(m) { m.1 },
+      get: fn(m) { m.1 },
     )
-    |> fields.build
+    fields.success(#(outcome, previous))
+  }
   let ev =
     sinal.event(["decode_failure", "emit_site"], fields.empty(), metadata)
   let #(Nil, logs) =

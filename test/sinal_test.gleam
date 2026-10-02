@@ -3,7 +3,7 @@ import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -173,15 +173,11 @@ pub fn span_name_definition_bugs_panic_test() {
 }
 
 pub fn record_builder_round_trips_and_rejects_a_duplicate_key_test() {
-  let codec =
-    fields.record({
-      use a <- fields.parameter
-      use b <- fields.parameter
-      #(a, b)
-    })
-    |> fields.and(fields.int("field_a"), fn(p: #(Int, String)) { p.0 })
-    |> fields.and(fields.string("field_b"), fn(p) { p.1 })
-    |> fields.build
+  let codec = {
+    use a <- fields.include(fields.int("field_a"), get: fn(p) { p.0 })
+    use b <- fields.include(fields.string("field_b"), get: fn(p) { p.1 })
+    fields.success(#(a, b))
+  }
   fields.keys(codec) |> should.equal(["field_a", "field_b"])
   let raw = fields.encode(codec, #(1, "one"))
   raw
@@ -196,14 +192,172 @@ pub fn record_builder_round_trips_and_rejects_a_duplicate_key_test() {
   |> should.equal(Error(fields.MissingField("field_b")))
   fields.decode(codec, dynamic.int(3)) |> should.equal(Error(fields.NotAMap))
 
+  let twice = fn() {
+    use a <- fields.include(fields.int("field_a"), get: fn(p) { p.0 })
+    use b <- fields.include(fields.int("field_a"), get: fn(p) { p.1 })
+    fields.success(#(a, b))
+  }
+  let message =
+    Ok("sinal/fields.include: key \"field_a\" is declared twice in one record")
+  panic_message(twice) |> should.equal(message)
+  // A nested record's keys count as the outer record's keys.
   panic_message(fn() {
-    fields.record(fn(a) { fn(b) { #(a, b) } })
-    |> fields.and(fields.int("field_a"), fn(p: #(Int, Int)) { p.0 })
-    |> fields.and(fields.int("field_a"), fn(p) { p.1 })
+    use a <- fields.include(fields.int("field_a"), get: fn(p) { p.0 })
+    use b <- fields.include(fields.int("field_b"), get: fn(p) { p.1 })
+    use c <- fields.include(
+      {
+        use c <- fields.include(fields.int("field_c"), get: fn(p) { p })
+        use _ <- fields.include(fields.int("field_a"), get: fn(p) { p })
+        fields.success(c)
+      },
+      get: fn(p) { p.2 },
+    )
+    fields.success(#(a, b, c))
+  })
+  |> should.equal(message)
+}
+
+// A decode marks the process while it runs a record's block again, so the
+// records built there skip their encoding plans. The mark must not outlive
+// a decoder that raises: a record defined afterwards still checks its keys.
+pub fn a_raising_decoder_does_not_leave_the_process_decoding_test() {
+  let fragile =
+    fields.field(
+      "attempt",
+      dynamic.int,
+      decode.int
+        |> decode.then(fn(n) {
+          case n {
+            13 -> panic as "unlucky"
+            _ -> decode.success(n)
+          }
+        }),
+    )
+  let codec = {
+    use attempt <- fields.include(fragile, get: fn(p) { p.0 })
+    use route <- fields.include(fields.string("route"), get: fn(p) { p.1 })
+    fields.success(#(attempt, route))
+  }
+  let raw =
+    native_map([#("attempt", dynamic.int(13)), #("route", dynamic.string("/"))])
+  panic_message(fn() { fields.decode(codec, raw) })
+  |> should.equal(Ok("unlucky"))
+  panic_message(fn() {
+    use a <- fields.include(fields.int("twice"), get: fn(p) { p.0 })
+    use b <- fields.include(fields.int("twice"), get: fn(p) { p.1 })
+    fields.success(#(a, b))
   })
   |> should.equal(Ok(
-    "sinal/fields.and: key \"field_a\" is declared twice in one record",
+    "sinal/fields.include: key \"twice\" is declared twice in one record",
   ))
+  fields.decode(
+    codec,
+    native_map([#("attempt", dynamic.int(1)), #("route", dynamic.string("/"))]),
+  )
+  |> should.equal(Ok(#(1, "/")))
+}
+
+pub type Window {
+  Window(start: Int, end: Int)
+}
+
+// Regression: the old builder bound fields to constructor parameters by
+// position, so these two Int fields, listed in the other order than the
+// constructor's, decoded `start` as `end` and back. `include` binds each by
+// name.
+pub fn record_fields_of_one_type_bind_by_name_in_any_order_test() {
+  let window = {
+    use end <- fields.include(fields.int("end"), get: fn(w) { w.end })
+    use start <- fields.include(fields.int("start"), get: fn(w) { w.start })
+    fields.success(Window(start:, end:))
+  }
+  fields.keys(window) |> should.equal(["end", "start"])
+  fields.encode(window, Window(start: 1, end: 2))
+  |> should.equal(
+    native_map([#("start", dynamic.int(1)), #("end", dynamic.int(2))]),
+  )
+  fields.decode(
+    window,
+    native_map([#("start", dynamic.int(1)), #("end", dynamic.int(2))]),
+  )
+  |> should.equal(Ok(Window(start: 1, end: 2)))
+  fields.decode(window, fields.encode(window, Window(start: 3, end: 4)))
+  |> should.equal(Ok(Window(start: 3, end: 4)))
+}
+
+pub type Delivery {
+  Delivery(
+    route: String,
+    status: Int,
+    method: Method,
+    retried: Bool,
+    ratio: Float,
+    note: Option(String),
+  )
+}
+
+// Every getter here is unannotated: the rest of each `use` block, which
+// ends in `success`, fixes the record type before the getter is checked.
+fn delivery_fields() -> fields.Fields(Delivery) {
+  use route <- fields.include(fields.string("route"), get: fn(d) { d.route })
+  use status <- fields.include(fields.int("status"), get: fn(d) { d.status })
+  use method <- fields.include(method_field(), get: fn(d) { d.method })
+  use retried <- fields.include(fields.bool("retried"), get: fn(d) { d.retried })
+  use ratio <- fields.include(fields.float("ratio"), get: fn(d) { d.ratio })
+  use note <- fields.include(fields.optional(fields.string("note")), get: fn(d) {
+    d.note
+  })
+  fields.success(Delivery(route:, status:, method:, retried:, ratio:, note:))
+}
+
+fn method_field() -> fields.Fields(Method) {
+  fields.enum("method", [Get, Post], fn(m) {
+    case m {
+      Get -> "get"
+      Post -> "post"
+    }
+  })
+}
+
+pub fn annotation_free_multi_field_record_round_trips_test() {
+  let codec = delivery_fields()
+  fields.keys(codec)
+  |> should.equal(["route", "status", "method", "retried", "ratio", "note"])
+  let delivery =
+    Delivery(
+      route: "/users",
+      status: 200,
+      method: Post,
+      retried: False,
+      ratio: 0.5,
+      note: None,
+    )
+  let raw = fields.encode(codec, delivery)
+  raw
+  |> should.equal(
+    native_map([
+      #("route", dynamic.string("/users")),
+      #("status", dynamic.int(200)),
+      #("method", dynamic.string("post")),
+      #("retried", dynamic.bool(False)),
+      #("ratio", dynamic.float(0.5)),
+    ]),
+  )
+  fields.decode(codec, raw) |> should.equal(Ok(delivery))
+  let noted = Delivery(..delivery, note: Some("slow"))
+  fields.decode(codec, fields.encode(codec, noted)) |> should.equal(Ok(noted))
+  // The first field that fails, in declaration order, is reported.
+  fields.decode(codec, native_map([#("status", dynamic.int(200))]))
+  |> should.equal(Error(fields.MissingField("route")))
+}
+
+pub fn success_alone_declares_no_keys_test() {
+  let codec = fields.success(Get)
+  fields.keys(codec) |> should.equal([])
+  fields.encode(codec, Post) |> should.equal(native_map([]))
+  fields.decode(codec, native_map([#("other", dynamic.int(1))]))
+  |> should.equal(Ok(Get))
+  fields.decode(codec, dynamic.int(1)) |> should.equal(Error(fields.NotAMap))
 }
 
 pub fn field_keeps_the_decoder_errors_test() {
@@ -324,15 +478,11 @@ pub fn optional_rejects_inner_with_other_than_one_key_test() {
   |> should.equal(Ok(
     "sinal/fields.optional: the inner field must declare exactly one key, got []",
   ))
-  let two_keys =
-    fields.record({
-      use a <- fields.parameter
-      use b <- fields.parameter
-      #(a, b)
-    })
-    |> fields.and(fields.int("a"), fn(p: #(Int, Int)) { p.0 })
-    |> fields.and(fields.int("b"), fn(p) { p.1 })
-    |> fields.build
+  let two_keys = {
+    use a <- fields.include(fields.int("a"), get: fn(p) { p.0 })
+    use b <- fields.include(fields.int("b"), get: fn(p) { p.1 })
+    fields.success(#(a, b))
+  }
   panic_message(fn() { fields.optional(two_keys) })
   |> should.equal(Ok(
     "sinal/fields.optional: the inner field must declare exactly one key, got [\"a\", \"b\"]",
@@ -1308,17 +1458,13 @@ fn create_test_span() -> span.Span(
   SpanTestExtraMeasurements,
   SpanTestStopMetadata,
 ) {
-  let start_meta =
-    fields.record({
-      use method <- fields.parameter
-      use route <- fields.parameter
-      SpanTestStartMetadata(method:, route:)
-    })
-    |> fields.and(fields.string("method"), fn(m: SpanTestStartMetadata) {
+  let start_meta = {
+    use method <- fields.include(fields.string("method"), get: fn(m) {
       m.method
     })
-    |> fields.and(fields.string("route"), fn(m) { m.route })
-    |> fields.build
+    use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+    fields.success(SpanTestStartMetadata(method:, route:))
+  }
   let extra_meas =
     fields.field(
       "bytes",

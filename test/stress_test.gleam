@@ -55,15 +55,11 @@ pub fn repeated_attach_emit_detach_stress_test() {
 }
 
 pub fn concurrent_emitters_high_throughput_stress_test() {
-  let meas_fields =
-    fields.record({
-      use worker_id <- fields.parameter
-      use seq <- fields.parameter
-      #(worker_id, seq)
-    })
-    |> fields.and(fields.int("worker_id"), fn(m: #(Int, Int)) { m.0 })
-    |> fields.and(fields.int("seq"), fn(m) { m.1 })
-    |> fields.build
+  let meas_fields = {
+    use worker_id <- fields.include(fields.int("worker_id"), get: fn(m) { m.0 })
+    use seq <- fields.include(fields.int("seq"), get: fn(m) { m.1 })
+    fields.success(#(worker_id, seq))
+  }
   let ev =
     sinal.event(["stress", "concurrent_flood"], meas_fields, fields.empty())
 

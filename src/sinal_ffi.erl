@@ -17,11 +17,31 @@
     unique_correlation/0,
     event_parts/1,
     identity/1,
+    is_decoding/0,
+    decoding/1,
     log_warning/1
 ]).
 
 identity(X) ->
     X.
+
+%% True while this process runs sinal/fields.decode. A record built during
+%% a decode leaves its encoding plan unbuilt, because only its decoder runs.
+is_decoding() ->
+    get(sinal_fields_decoding) =:= true.
+
+decoding(Decode) ->
+    case get(sinal_fields_decoding) of
+        true ->
+            Decode();
+        _ ->
+            put(sinal_fields_decoding, true),
+            try
+                Decode()
+            after
+                erase(sinal_fields_decoding)
+            end
+    end.
 
 empty_map() ->
     #{}.

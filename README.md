@@ -63,7 +63,7 @@ A definition that breaks a rule is a programmer error, so the constructor panics
 
 ## Records as measurements and metadata
 
-`fields.record` builds the codec of a record, one line per field. `fields.enum` covers a closed set of values, and `fields.field` covers anything else with an encoder and a `gleam/dynamic/decode` decoder:
+A record codec is a `use` block: each `fields.include` adds one field and binds its decoded value by name, and `fields.success` builds the record. `fields.enum` covers a closed set of values, and `fields.field` covers anything else with an encoder and a `gleam/dynamic/decode` decoder:
 
 ```gleam
 pub type HttpMeasurements {
@@ -80,32 +80,25 @@ pub type HttpMetadata {
 }
 
 pub fn http_request_event() -> sinal.Event(HttpMeasurements, HttpMetadata) {
-  let measurements =
-    fields.record({
-      use duration_ms <- fields.parameter
-      use bytes_sent <- fields.parameter
-      HttpMeasurements(duration_ms:, bytes_sent:)
-    })
-    |> fields.and(fields.int("duration_ms"), fn(m: HttpMeasurements) {
+  let measurements = {
+    use duration_ms <- fields.include(fields.int("duration_ms"), get: fn(m) {
       m.duration_ms
     })
-    |> fields.and(fields.int("bytes_sent"), fn(m) { m.bytes_sent })
-    |> fields.build
-
-  let metadata =
-    fields.record({
-      use method <- fields.parameter
-      use route <- fields.parameter
-      use status <- fields.parameter
-      HttpMetadata(method:, route:, status:)
+    use bytes_sent <- fields.include(fields.int("bytes_sent"), get: fn(m) {
+      m.bytes_sent
     })
-    |> fields.and(
+    fields.success(HttpMeasurements(duration_ms:, bytes_sent:))
+  }
+
+  let metadata = {
+    use method <- fields.include(
       fields.enum("method", [Get, Post], method_name),
-      fn(m: HttpMetadata) { m.method },
+      get: fn(m) { m.method },
     )
-    |> fields.and(fields.string("route"), fn(m) { m.route })
-    |> fields.and(fields.int("status"), fn(m) { m.status })
-    |> fields.build
+    use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+    use status <- fields.include(fields.int("status"), get: fn(m) { m.status })
+    fields.success(HttpMetadata(method:, route:, status:))
+  }
 
   sinal.event(["http", "server", "request"], measurements, metadata)
 }
@@ -118,7 +111,7 @@ fn method_name(method: Method) -> String {
 }
 ```
 
-Only the first getter needs a type annotation, because the record type is not known until `build`.
+Each value goes to the constructor parameter it is bound to, so the fields may be listed in any order and two fields of one type cannot swap. Getters need no type annotation: each is passed with its `get:` label after the rest of the block, which ends in `fields.success` and fixes the record type. A field can itself be a record codec, whose keys go into the same map. The block also runs with placeholder values when sinal lists the record's keys, so keep it to `include` calls and a `success` constructor. This is the shape of `json/blueprint/codec`'s `field` and `success`.
 
 The compiler checks that `method_name` covers every `Method`, but not that the list `[Get, Post]` does. A constructor missing from the list compiles; when it is emitted, the emit call logs a warning naming the event and the value, and every sinal handler of the event reports `MalformedMetadata`, skips that event and stays attached. Keep the list next to the type, and test that each constructor round-trips through `fields.encode` and `fields.decode`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
 
@@ -132,15 +125,13 @@ pub type CheckoutMetadata {
 }
 
 pub fn checkout_event() -> sinal.Event(Nil, CheckoutMetadata) {
-  let metadata =
-    fields.record({
-      use cart <- fields.parameter
-      use correlation <- fields.parameter
-      CheckoutMetadata(cart:, correlation:)
+  let metadata = {
+    use cart <- fields.include(fields.string("cart"), get: fn(m) { m.cart })
+    use correlation <- fields.include(correlation.field(), get: fn(m) {
+      m.correlation
     })
-    |> fields.and(fields.string("cart"), fn(m: CheckoutMetadata) { m.cart })
-    |> fields.and(correlation.field(), fn(m) { m.correlation })
-    |> fields.build
+    fields.success(CheckoutMetadata(cart:, correlation:))
+  }
   sinal.event(["shop", "checkout"], fields.empty(), metadata)
 }
 
@@ -173,14 +164,11 @@ pub type TicketMetadata {
 }
 
 pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
-  fields.record({
-    use ticket <- fields.parameter
-    use queue <- fields.parameter
-    TicketMetadata(ticket:, queue:)
+  use ticket <- fields.include(correlation.required_field(), get: fn(m) {
+    m.ticket
   })
-  |> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
-  |> fields.and(fields.string("queue"), fn(m) { m.queue })
-  |> fields.build
+  use queue <- fields.include(fields.string("queue"), get: fn(m) { m.queue })
+  fields.success(TicketMetadata(ticket:, queue:))
 }
 ```
 

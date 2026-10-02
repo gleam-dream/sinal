@@ -103,15 +103,15 @@ pub type Job {
 }
 
 pub fn correlation_travels_in_event_metadata_test() {
-  let metadata =
-    fields.record({
-      use queue <- fields.parameter
-      use correlation <- fields.parameter
-      Job(queue:, correlation:)
+  let metadata = {
+    use queue <- fields.include(fields.string("queue"), get: fn(job) {
+      job.queue
     })
-    |> fields.and(fields.string("queue"), fn(job: Job) { job.queue })
-    |> fields.and(correlation.field(), fn(job) { job.correlation })
-    |> fields.build
+    use correlation <- fields.include(correlation.field(), get: fn(job) {
+      job.correlation
+    })
+    fields.success(Job(queue:, correlation:))
+  }
   let event = sinal.event(["correlation_test", "job"], fields.empty(), metadata)
   let seen = process.new_subject()
   let attachment = sinal.observe(event, fn(_, job) { process.send(seen, job) })
@@ -180,25 +180,19 @@ pub type Ticket {
 }
 
 fn ticket_metadata() -> fields.Fields(Ticket) {
-  fields.record({
-    use queue <- fields.parameter
-    use ticket <- fields.parameter
-    Ticket(queue:, ticket:)
+  use queue <- fields.include(fields.string("queue"), get: fn(t) { t.queue })
+  use ticket <- fields.include(correlation.required_field(), get: fn(t) {
+    t.ticket
   })
-  |> fields.and(fields.string("queue"), fn(t: Ticket) { t.queue })
-  |> fields.and(correlation.required_field(), fn(t) { t.ticket })
-  |> fields.build
+  fields.success(Ticket(queue:, ticket:))
 }
 
 fn library_metadata() -> fields.Fields(Job) {
-  fields.record({
-    use queue <- fields.parameter
-    use correlation <- fields.parameter
-    Job(queue:, correlation:)
+  use queue <- fields.include(fields.string("queue"), get: fn(job) { job.queue })
+  use correlation <- fields.include(correlation.field(), get: fn(job) {
+    job.correlation
   })
-  |> fields.and(fields.string("queue"), fn(job: Job) { job.queue })
-  |> fields.and(correlation.field(), fn(job) { job.correlation })
-  |> fields.build
+  fields.success(Job(queue:, correlation:))
 }
 
 pub fn a_field_handler_reads_events_emitted_with_required_field_test() {

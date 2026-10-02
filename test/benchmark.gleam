@@ -128,15 +128,11 @@ fn bench_single_handler() {
 }
 
 fn bench_codec() {
-  let pair_codec =
-    fields.record({
-      use user_id <- fields.parameter
-      use active <- fields.parameter
-      #(user_id, active)
-    })
-    |> fields.and(fields.int("user_id"), fn(p: #(Int, Bool)) { p.0 })
-    |> fields.and(fields.bool("active"), fn(p) { p.1 })
-    |> fields.build
+  let pair_codec = {
+    use user_id <- fields.include(fields.int("user_id"), get: fn(p) { p.0 })
+    use active <- fields.include(fields.bool("active"), get: fn(p) { p.1 })
+    fields.success(#(user_id, active))
+  }
 
   let warmup = 10_000
   let samples = 50_000

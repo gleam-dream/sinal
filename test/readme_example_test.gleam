@@ -45,32 +45,25 @@ pub type HttpMetadata {
 }
 
 pub fn http_request_event() -> sinal.Event(HttpMeasurements, HttpMetadata) {
-  let measurements =
-    fields.record({
-      use duration_ms <- fields.parameter
-      use bytes_sent <- fields.parameter
-      HttpMeasurements(duration_ms:, bytes_sent:)
-    })
-    |> fields.and(fields.int("duration_ms"), fn(m: HttpMeasurements) {
+  let measurements = {
+    use duration_ms <- fields.include(fields.int("duration_ms"), get: fn(m) {
       m.duration_ms
     })
-    |> fields.and(fields.int("bytes_sent"), fn(m) { m.bytes_sent })
-    |> fields.build
-
-  let metadata =
-    fields.record({
-      use method <- fields.parameter
-      use route <- fields.parameter
-      use status <- fields.parameter
-      HttpMetadata(method:, route:, status:)
+    use bytes_sent <- fields.include(fields.int("bytes_sent"), get: fn(m) {
+      m.bytes_sent
     })
-    |> fields.and(
+    fields.success(HttpMeasurements(duration_ms:, bytes_sent:))
+  }
+
+  let metadata = {
+    use method <- fields.include(
       fields.enum("method", [Get, Post], method_name),
-      fn(m: HttpMetadata) { m.method },
+      get: fn(m) { m.method },
     )
-    |> fields.and(fields.string("route"), fn(m) { m.route })
-    |> fields.and(fields.int("status"), fn(m) { m.status })
-    |> fields.build
+    use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
+    use status <- fields.include(fields.int("status"), get: fn(m) { m.status })
+    fields.success(HttpMetadata(method:, route:, status:))
+  }
 
   sinal.event(["http", "server", "request"], measurements, metadata)
 }
@@ -174,15 +167,13 @@ pub type CheckoutMetadata {
 }
 
 pub fn checkout_event() -> sinal.Event(Nil, CheckoutMetadata) {
-  let metadata =
-    fields.record({
-      use cart <- fields.parameter
-      use correlation <- fields.parameter
-      CheckoutMetadata(cart:, correlation:)
+  let metadata = {
+    use cart <- fields.include(fields.string("cart"), get: fn(m) { m.cart })
+    use correlation <- fields.include(correlation.field(), get: fn(m) {
+      m.correlation
     })
-    |> fields.and(fields.string("cart"), fn(m: CheckoutMetadata) { m.cart })
-    |> fields.and(correlation.field(), fn(m) { m.correlation })
-    |> fields.build
+    fields.success(CheckoutMetadata(cart:, correlation:))
+  }
   sinal.event(["shop", "checkout"], fields.empty(), metadata)
 }
 
@@ -206,14 +197,11 @@ pub type TicketMetadata {
 }
 
 pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
-  fields.record({
-    use ticket <- fields.parameter
-    use queue <- fields.parameter
-    TicketMetadata(ticket:, queue:)
+  use ticket <- fields.include(correlation.required_field(), get: fn(m) {
+    m.ticket
   })
-  |> fields.and(correlation.required_field(), fn(m: TicketMetadata) { m.ticket })
-  |> fields.and(fields.string("queue"), fn(m) { m.queue })
-  |> fields.build
+  use queue <- fields.include(fields.string("queue"), get: fn(m) { m.queue })
+  fields.success(TicketMetadata(ticket:, queue:))
 }
 
 // --- Runnable tests ---
