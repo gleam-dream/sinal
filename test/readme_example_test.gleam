@@ -1,6 +1,4 @@
 import gleam/bit_array
-import gleam/dynamic
-import gleam/dynamic/decode
 import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
@@ -45,31 +43,11 @@ pub fn http_request_event() -> Result(
   sinal.Event(HttpMeasurements, HttpMetadata),
   sinal.EventError,
 ) {
-  let dur_field =
-    fields.field(
-      atom.create("duration_ms"),
-      fn(i: Int) { Ok(dynamic.int(i)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(i) -> Ok(i)
-          Error(_) -> Error(fields.FieldDecodeError("expected int duration_ms"))
-        }
-      },
+  let assert Ok(meas_pair) =
+    fields.pair(
+      fields.int(atom.create("duration_ms")),
+      fields.int(atom.create("bytes_sent")),
     )
-
-  let bytes_field =
-    fields.field(
-      atom.create("bytes_sent"),
-      fn(b: Int) { Ok(dynamic.int(b)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(i) -> Ok(i)
-          Error(_) -> Error(fields.FieldDecodeError("expected int bytes_sent"))
-        }
-      },
-    )
-
-  let assert Ok(meas_pair) = fields.pair(dur_field, bytes_field)
   let meas_fields =
     fields.imap(
       meas_pair,
@@ -77,34 +55,13 @@ pub fn http_request_event() -> Result(
       fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
     )
 
-  let method_field = fields.string(atom.create("method"))
-
-  let route_field =
-    fields.field(
-      atom.create("route"),
-      fn(r: String) { Ok(dynamic.string(r)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.string) {
-          Ok(s) -> Ok(s)
-          Error(_) -> Error(fields.FieldDecodeError("expected string route"))
-        }
-      },
+  let assert Ok(method_route) =
+    fields.pair(
+      fields.string(atom.create("method")),
+      fields.string(atom.create("route")),
     )
-
-  let status_field =
-    fields.field(
-      atom.create("status"),
-      fn(s: Int) { Ok(dynamic.int(s)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(s) -> Ok(s)
-          Error(_) -> Error(fields.FieldDecodeError("expected int status"))
-        }
-      },
-    )
-
-  let assert Ok(method_route) = fields.pair(method_field, route_field)
-  let assert Ok(meta_triple) = fields.pair(method_route, status_field)
+  let assert Ok(meta_triple) =
+    fields.pair(method_route, fields.int(atom.create("status")))
   let meta_fields =
     fields.imap(
       meta_triple,
@@ -182,17 +139,9 @@ pub type QueryMeta {
 }
 
 pub fn query_meta_fields() -> fields.Fields(QueryMeta) {
-  let query_key = atom.create("sql")
-  fields.field(
-    query_key,
-    fn(q: QueryMeta) { Ok(dynamic.string(q.sql)) },
-    fn(dyn) {
-      case decode.run(dyn, decode.string) {
-        Ok(s) -> Ok(QueryMeta(s))
-        Error(_) -> Error(fields.FieldDecodeError("expected string sql"))
-      }
-    },
-  )
+  fields.imap(fields.string(atom.create("sql")), QueryMeta, fn(q: QueryMeta) {
+    q.sql
+  })
 }
 
 pub fn run_database_query(query_str: String) -> String {

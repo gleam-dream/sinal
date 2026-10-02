@@ -6,24 +6,6 @@ A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead
 
 ---
 
-## Target and Support Matrix
-
-| Target            | Status                        | Notes                                                                                                                  |
-| :---------------- | :---------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
-| **Erlang / BEAM** | **Initial release candidate** | Full initial facade implemented. CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                       |
-| **JavaScript**    | **Unsupported**               | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
-
----
-
-## Architecture and Core Design
-
-1. **Direct Native Binding**: Measurements and metadata are decoded directly from native Erlang maps into typed Gleam records via explicit field codecs at the callback boundary.
-2. **Atom Safety**: Event prefixes and field names use Erlang atoms. Atoms must be trusted constants or pre-validated identifiers; never dynamically construct atoms from untrusted user strings.
-3. **Same-Process Synchronous Dispatch**: Telemetry handlers execute synchronously inside the emitting process.
-4. **Honest Failure Isolation**: Handler errors and malformed maps notify a local typed observer and emit the standard native `[telemetry, handler, failure]` event before removing the failing handler, without crashing the emitter.
-
----
-
 ## Getting Started
 
 The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` 1.4.2 is a direct dependency; applications do not need to declare it separately. The dependency declaration below is for the planned initial release:
@@ -32,6 +14,8 @@ The manifest targets Gleam 1.18 or newer and Erlang/BEAM only. `telemetry` 1.4.2
 [dependencies]
 sinal = ">= 0.1.0 and < 1.0.0"
 ```
+
+The `telemetry` OTP application must be running before handlers are attached. `gleam run` and `gleam test` start it. An application started another way starts it with the application, for example by listing `telemetry` among its release's applications or calling `application:ensure_all_started(telemetry)`. Without it, `attach`, `observe` and `detach` exit the caller with `noproc`, and `emit` reaches no handler.
 
 ---
 
@@ -49,14 +33,13 @@ Common imports used across examples:
 - `import sinal/forwarder`
 - `import gleam/erlang/atom`
 - `import gleam/erlang/process`
-- `import gleam/dynamic`
-- `import gleam/dynamic/decode`
 - `import gleam/otp/static_supervisor`
 
 For ordinary events, use `sinal.event` and the primitive `fields.string`,
-`fields.int`, and `fields.bool` constructors. Keys and event names must be
-trusted, application-defined atoms. Use `fields.field` for custom native
-fields with explicit encode and decode functions.
+`fields.int`, and `fields.bool` constructors; join several with `fields.pair`
+and map them to a record with `fields.imap`. Keys and event names must be
+trusted, application-defined atoms. Use `fields.field` only for a value the
+primitive constructors do not cover, with explicit encode and decode functions.
 
 An infallible observer needs only the decoded measurements and metadata:
 
@@ -103,31 +86,11 @@ pub fn http_request_event() -> Result(
   sinal.Event(HttpMeasurements, HttpMetadata),
   sinal.EventError,
 ) {
-  let dur_field =
-    fields.field(
-      atom.create("duration_ms"),
-      fn(i: Int) { Ok(dynamic.int(i)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(i) -> Ok(i)
-          Error(_) -> Error(fields.FieldDecodeError("expected int duration_ms"))
-        }
-      },
+  let assert Ok(meas_pair) =
+    fields.pair(
+      fields.int(atom.create("duration_ms")),
+      fields.int(atom.create("bytes_sent")),
     )
-
-  let bytes_field =
-    fields.field(
-      atom.create("bytes_sent"),
-      fn(b: Int) { Ok(dynamic.int(b)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(i) -> Ok(i)
-          Error(_) -> Error(fields.FieldDecodeError("expected int bytes_sent"))
-        }
-      },
-    )
-
-  let assert Ok(meas_pair) = fields.pair(dur_field, bytes_field)
   let meas_fields =
     fields.imap(
       meas_pair,
@@ -135,34 +98,13 @@ pub fn http_request_event() -> Result(
       fn(m: HttpMeasurements) { #(m.duration_ms, m.bytes_sent) },
     )
 
-  let method_field = fields.string(atom.create("method"))
-
-  let route_field =
-    fields.field(
-      atom.create("route"),
-      fn(r: String) { Ok(dynamic.string(r)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.string) {
-          Ok(s) -> Ok(s)
-          Error(_) -> Error(fields.FieldDecodeError("expected string route"))
-        }
-      },
+  let assert Ok(method_route) =
+    fields.pair(
+      fields.string(atom.create("method")),
+      fields.string(atom.create("route")),
     )
-
-  let status_field =
-    fields.field(
-      atom.create("status"),
-      fn(s: Int) { Ok(dynamic.int(s)) },
-      fn(dyn) {
-        case decode.run(dyn, decode.int) {
-          Ok(s) -> Ok(s)
-          Error(_) -> Error(fields.FieldDecodeError("expected int status"))
-        }
-      },
-    )
-
-  let assert Ok(method_route) = fields.pair(method_field, route_field)
-  let assert Ok(meta_triple) = fields.pair(method_route, status_field)
+  let assert Ok(meta_triple) =
+    fields.pair(method_route, fields.int(atom.create("status")))
   let meta_fields =
     fields.imap(
       meta_triple,
@@ -267,17 +209,9 @@ pub type QueryMeta {
 }
 
 pub fn query_meta_fields() -> fields.Fields(QueryMeta) {
-  let query_key = atom.create("sql")
-  fields.field(
-    query_key,
-    fn(q: QueryMeta) { Ok(dynamic.string(q.sql)) },
-    fn(dyn) {
-      case decode.run(dyn, decode.string) {
-        Ok(s) -> Ok(QueryMeta(s))
-        Error(_) -> Error(fields.FieldDecodeError("expected string sql"))
-      }
-    },
-  )
+  fields.imap(fields.string(atom.create("sql")), QueryMeta, fn(q: QueryMeta) {
+    q.sql
+  })
 }
 
 pub fn run_database_query(query_str: String) -> String {
@@ -440,6 +374,24 @@ emits its own `dropped_event` directly with `sinal.emit`, so a route (even
 
 ---
 
+## Target and Support Matrix
+
+| Target            | Status                        | Notes                                                                                                                  |
+| :---------------- | :---------------------------- | :--------------------------------------------------------------------------------------------------------------------- |
+| **Erlang / BEAM** | **Initial release candidate** | Full initial facade implemented. CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                       |
+| **JavaScript**    | **Unsupported**               | Explicitly unsupported. `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes, and atom tables. |
+
+---
+
+## Architecture and Core Design
+
+1. **Direct Native Binding**: Measurements and metadata are decoded directly from native Erlang maps into typed Gleam records via explicit field codecs at the callback boundary.
+2. **Atom Safety**: Event prefixes and field names use Erlang atoms. Atoms must be trusted constants or pre-validated identifiers; never dynamically construct atoms from untrusted user strings.
+3. **Same-Process Synchronous Dispatch**: Telemetry handlers execute synchronously inside the emitting process.
+4. **Honest Failure Isolation**: Handler errors and malformed maps notify a local typed observer and emit the standard native `[telemetry, handler, failure]` event before removing the failing handler, without crashing the emitter.
+
+---
+
 ## Operational Limits and Semantics
 
 - **Span event names**: `span.events(sp)` exposes typed `start`, `stop`, and `exception` descriptors for a span prefix. Attach observers before calling `run_span` or `run_span_result` when those events must be seen. Native telemetry owns the lifecycle and timing fields.
@@ -448,7 +400,7 @@ emits its own `dropped_event` directly with `sinal.emit`, so a route (even
 - **Unspecified Handler Order**: When multiple handlers are attached to an event, the order in which `:telemetry` calls them is explicitly unspecified.
 - **Non-Quiescence on Detach**: Detaching a handler prevents it from being selected for subsequent event emissions. However, if a callback is already executing in flight in another process, detaching does not wait for or abort that in-flight execution.
 - **Uncatchable VM Exits**: Abrupt process exits or untrappable signals (`kill`) bypass cleanup hooks.
-- **Storage Migration**: Handlers initially live in ETS tables. Calling `:telemetry.persist/0` compiles them into `persistent_term` for read-optimized lookup without interrupting event delivery.
+- **Handler storage**: native telemetry keeps attached handlers in an ETS table. `sinal` has no wrapper for `:telemetry.persist/0`, which moves them into `persistent_term`; an application that wants it declares its own `@external(erlang, "telemetry", "persist")` and calls it after attaching its long-lived handlers.
 - **No Network Export or Unbounded Buffering**: `sinal` is an in-process telemetry delivery facade. Network export (OTLP, StatsD, Prometheus) and unbounded batch buffering belong in dedicated adapter processes. `sinal/forwarder` (above) is the one in-core exception, and it is deliberately narrow: a bounded, best-effort, in-process hop, not a queue, not export, and not a substitute for a real buffering adapter.
 - **Forwarder delivery is best-effort**: `forwarder.emit` never blocks and never retries. A send that would exceed capacity, or that targets a forwarder not currently running, is dropped and reported rather than queued.
 - **Forwarder ordering is per-producer, not global**: native BEAM message ordering guarantees a single producer's forwarded events are dispatched in the order it sent them. Interleaving across producers is unspecified, as it already is for native telemetry handler order.
@@ -459,6 +411,27 @@ emits its own `dropped_event` directly with `sinal.emit`, so a route (even
 - **Drop reporting is best effort**: `rejected` counts capacity refusals and `unavailable` counts sends made without a published target. These diagnostic counters survive restarts. `lost` snapshots outstanding work when a replacement starts; races with producers and handler completion can over- or under-count it. Reports can themselves be lost when their process stops. Observation success is never a delivery receipt.
 - **Capacity belongs to an incarnation**: a one-row named ETS table publishes a direct event subject together with fresh admission counters after initialisation. The table is owned by the actor and disappears on its death. A delayed producer retains the old subject and counters and cannot send into a replacement actor. Before publication, sends return `ForwarderUnavailable`. Admission counts pending events plus the executing handler. An incarnation also has one coalesced drop-notice flag and an optional startup report; delayed drop notices keep the old direct destination. An existing ETS table with the forwarder name makes startup fail with `InitFailed`.
 - **Concurrent emitters may see a spurious, safe rejection near the capacity boundary**: admission is a single atomic increment-then-check, so it never over-admits, but under concurrent load at the boundary it can reject a send that would have fit under a different ordering. It never admits past capacity.
+
+---
+
+## Defaults
+
+| Operation                                 | Default                                                                                      |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Handler run inside `emit`                 | Synchronous in the emitting process, with no timeout; a slow handler blocks the emitter      |
+| `forwarder.emit` and routed `emit_routed` | Never waits; drops and counts the event when over capacity or when the forwarder is down     |
+| Forwarder capacity (queued + executing)   | Required argument to `forwarder.new`; below 1 returns `InvalidCapacity`                      |
+| Forwarder initialisation                  | 1000 ms                                                                                      |
+| Forwarder shutdown                        | No drain; in-flight events are lost and reported as `Dropped(lost:)` by the next incarnation |
+| Drop reporting                            | Coalesced per drain cycle; counters survive restarts                                         |
+| Routes                                    | No limit on count; stored in `persistent_term`, so each change is a node-wide update         |
+| `attach` / `observe` / `detach`           | A `gen_server` call to native telemetry with the default 5000 ms timeout                     |
+| Atoms for event names and field keys      | Created by the caller with `atom.create`; nothing bounds them                                |
+| Decoding a native map                     | Reads declared keys only; other keys are ignored                                             |
+
+Synchronous dispatch is the only unbounded default, and `sinal` cannot bound
+it. Route a library's event prefix to a forwarder (section 7) to take its
+handlers off the emitting process.
 
 ---
 

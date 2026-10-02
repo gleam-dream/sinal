@@ -1,3 +1,34 @@
+//// Runs work inside a native telemetry span, which emits typed start, stop
+//// and exception events around it.
+////
+//// Use this module to time a unit of work and report how it ended. An
+//// `EventPrefix` names the span; `define_span` adds `sinal/fields` codecs
+//// for start metadata, extra stop measurements and stop metadata, and
+//// rejects fields the span protocol reserves. `run_span` and
+//// `run_span_result` run the work: `[prefix, start]` is emitted before it,
+//// then `[prefix, stop]` on return or `[prefix, exception]` on a raised
+//// exception, which is re-raised. `run_span_result` returns encoding
+//// failures as values and keeps the work's result; `run_span` raises them.
+//// `events` returns the three typed descriptors, so handlers can be attached
+//// with `sinal.observe` or `sinal.attach`. Native telemetry measures the
+//// timing fields; the `*_in` functions read them in an explicit `TimeUnit`.
+//// A span runs in one process and cannot go through `sinal/forwarder`.
+////
+//// ```gleam
+//// import gleam/erlang/atom
+//// import sinal/fields
+//// import sinal/span
+////
+//// let assert Ok(prefix) =
+////   span.event_prefix([atom.create("db"), atom.create("query")])
+//// let sql = fields.string(atom.create("sql"))
+//// let assert Ok(query) = span.define_span(prefix, sql, fields.empty(), sql)
+//// let rows =
+////   span.run_span(query, "SELECT 1", fn() {
+////     span.Completion(result: run("SELECT 1"), measurements: Nil, metadata: "SELECT 1")
+////   })
+//// ```
+
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}

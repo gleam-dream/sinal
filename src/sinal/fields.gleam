@@ -1,3 +1,35 @@
+//// Builds the typed codecs that turn a Gleam value into a native telemetry
+//// map of measurements or metadata, and back.
+////
+//// Use this module to give a `sinal.Event` or a `sinal/span` span its
+//// measurement and metadata types. `string`, `int` and `bool` cover one
+//// atom key each; `optional` makes a single-key field absent-able; `pair`
+//// joins two field groups with distinct keys, and `imap` maps the result
+//// to a record. `field` builds a custom key with explicit encode and decode
+//// functions, for values the primitive constructors do not cover. `empty`
+//// declares no keys. Decoding reads only the declared keys and ignores any
+//// others in the map.
+////
+//// ```gleam
+//// import gleam/erlang/atom
+//// import sinal/fields
+////
+//// pub type Request {
+////   Request(method: String, status: Int)
+//// }
+////
+//// pub fn request_fields() -> fields.Fields(Request) {
+////   let assert Ok(pair) =
+////     fields.pair(
+////       fields.string(atom.create("method")),
+////       fields.int(atom.create("status")),
+////     )
+////   fields.imap(pair, fn(p) { Request(p.0, p.1) }, fn(r: Request) {
+////     #(r.method, r.status)
+////   })
+//// }
+//// ```
+
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
 import gleam/erlang/atom.{type Atom}

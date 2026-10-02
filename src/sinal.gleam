@@ -1,3 +1,41 @@
+//// Defines typed telemetry events, attaches handlers to them, and emits
+//// them through native BEAM `:telemetry`.
+////
+//// Use this module to describe an event once, as an `Event(measurements,
+//// metadata)` built from `sinal/fields` codecs, then `emit` it and
+//// `observe` or `attach` handlers to it. Handlers run synchronously in the
+//// emitting process. A malformed native map or a handler failure removes
+//// that handler and emits telemetry's standard
+//// `[telemetry, handler, failure]` event; the emitter does not crash.
+//// `with_subscriptions` attaches a group of handlers for the duration of
+//// one function call. `sinal/span` wraps work in start, stop and exception
+//// events, and `sinal/forwarder` moves handler execution off the emitting
+//// process.
+////
+//// The `telemetry` OTP application must be running before handlers are
+//// attached. `gleam run` and `gleam test` start it; otherwise start it
+//// with the application, for example by listing it among the release's
+//// applications. Without it, `attach`, `observe` and `detach` exit the
+//// caller with `noproc`, and `emit` reaches no handler.
+////
+//// ```gleam
+//// import gleam/erlang/atom
+//// import sinal
+//// import sinal/fields
+////
+//// let assert Ok(finished) =
+////   sinal.event(
+////     [atom.create("request"), atom.create("finished")],
+////     fields.int(atom.create("duration_ms")),
+////     fields.string(atom.create("route")),
+////   )
+//// let assert Ok(id) = sinal.handler_id("request-finished-observer")
+//// let assert Ok(attachment) =
+////   sinal.observe(id, finished, fn(duration_ms, route) { record(route, duration_ms) })
+//// let assert Ok(Nil) = sinal.emit(finished, 42, "/users")
+//// let assert Ok(Nil) = sinal.detach(attachment)
+//// ```
+
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/list
