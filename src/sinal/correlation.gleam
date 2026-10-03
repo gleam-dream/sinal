@@ -2,8 +2,10 @@
 //// event metadata, so one unit of work can be followed across packages.
 ////
 //// A `Correlation` is an opaque string of 1 to 128 bytes. It can be any
-//// application id (an order id, a job id, a request id), a value read from
-//// an untrusted header with `from_string`, or a fresh `unique()` value. A
+//// application id (an order id, a job id, a request id) through `from_key`,
+//// which derives a stable value from a key of any length, a value read from
+//// an untrusted header with `from_string`, which refuses one that does not
+//// fit, or a fresh `unique()` value. A
 //// W3C trace id (32 lowercase hexadecimal characters) is a valid
 //// correlation, and `unique()` returns one of that shape, so a tracing
 //// adapter can use the trace id as the correlation.
@@ -82,11 +84,10 @@ pub type CorrelationError {
 
 /// Accepts `value` as a correlation when it has 1 to 128 bytes.
 ///
-/// An application id can be longer, for example one joined from publisher
-/// input. Derive a stable value that fits instead of dropping the
-/// correlation: the lowercase hexadecimal SHA-256 digest of the id (64
-/// characters, from `gleam_crypto`'s `crypto.hash(crypto.Sha256, ..)`)
-/// maps the same id to the same correlation.
+/// Use it for a value that must be carried verbatim, where a refusal
+/// matters: an id read from an untrusted header that another service will
+/// look up as sent. To derive a correlation from an application key of any
+/// length, which must never fall back to `unique()`, use `from_key`.
 pub fn from_string(value: String) -> Result(Correlation, CorrelationError) {
   let bytes = string.byte_size(value)
   case bytes {
@@ -95,6 +96,33 @@ pub fn from_string(value: String) -> Result(Correlation, CorrelationError) {
     _ -> Ok(Correlation(value))
   }
 }
+
+/// Derives a correlation from any application key, such as an order id, a
+/// job id or an id joined from publisher input. It always succeeds and is
+/// stable: the same key gives the same correlation on every node and run.
+///
+/// - A key of 1 to 128 bytes is the correlation itself, the value
+///   `from_string` accepts, so a correlation derived here equals one that
+///   another emitter built with `from_string` from the same id.
+/// - A longer key, or the empty key, becomes the lowercase hexadecimal
+///   SHA-256 digest of its bytes: 64 characters. Every event with an empty
+///   key therefore shares one correlation.
+///
+/// Use `from_string` instead when an over-long or empty value must be
+/// refused rather than hashed.
+///
+/// ```gleam
+/// let correlation = correlation.from_key(order.id)
+/// ```
+pub fn from_key(key: String) -> Correlation {
+  case from_string(key) {
+    Ok(correlation) -> correlation
+    Error(_) -> Correlation(sha256_hex(key))
+  }
+}
+
+@external(erlang, "sinal_ffi", "sha256_hex")
+fn sha256_hex(value: String) -> String
 
 /// A fresh correlation: 128 random bits as 32 lowercase hexadecimal
 /// characters, the shape of a W3C trace id. Values are unique across nodes.
@@ -134,6 +162,12 @@ pub fn field() -> fields.Fields(Option(Correlation)) {
 /// is missing, or when the value is not a binary of 1 to 128 bytes; the atom
 /// `nil` is not a correlation. A handler that cannot decode the metadata
 /// skips that one call, reports `MalformedMetadata` and stays attached.
+///
+/// So a handler reading an event with `required_field()` skips, and
+/// reports, every event that another emitter sent without a correlation,
+/// for example a library that emits the same event with `field()` and
+/// `None`. Read with `required_field()` only an event your own code emits
+/// with it; a handler of a library's events reads `field()`.
 ///
 /// ```gleam
 /// pub type TicketMetadata {

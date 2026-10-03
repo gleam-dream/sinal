@@ -35,6 +35,49 @@ pub fn from_string_accepts_one_to_128_bytes_test() {
   correlation.max_bytes |> should.equal(128)
 }
 
+pub fn from_key_keeps_a_key_that_fits_test() {
+  let assert Ok(expected) = correlation.from_string("order-42")
+  correlation.from_key("order-42") |> should.equal(expected)
+  let longest = string.repeat("a", 128)
+  correlation.from_key(longest)
+  |> correlation.to_string
+  |> should.equal(longest)
+}
+
+pub fn from_key_hashes_a_key_that_does_not_fit_test() {
+  // The SHA-256 digest of the empty string and of 129 "a"s, from
+  // `shasum -a 256`.
+  correlation.from_key("")
+  |> correlation.to_string
+  |> should.equal(
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  )
+  let long = string.repeat("a", 129)
+  let derived = correlation.to_string(correlation.from_key(long))
+  string.length(derived) |> should.equal(64)
+  derived
+  |> should.equal(
+    "c12cb024a2e5551cca0e08fce8f1c5e314555cc3fef6329ee994a3db752166ae",
+  )
+  // Stable: the same key gives the same correlation.
+  correlation.from_key(long) |> should.equal(correlation.from_key(long))
+  // A key that differs in one byte gives another correlation.
+  correlation.from_key(long <> "b")
+  |> should.not_equal(correlation.from_key(long))
+  // The bound is in bytes, as in from_string: 43 "€" are 129 bytes.
+  correlation.from_key(string.repeat("€", 43))
+  |> correlation.to_string
+  |> string.length
+  |> should.equal(64)
+}
+
+pub fn a_derived_correlation_decodes_with_both_fields_test() {
+  let derived = correlation.from_key(string.repeat("x", 500))
+  let raw = fields.encode(correlation.required_field(), derived)
+  fields.decode(correlation.required_field(), raw) |> should.equal(Ok(derived))
+  fields.decode(correlation.field(), raw) |> should.equal(Ok(Some(derived)))
+}
+
 pub fn a_w3c_trace_id_is_a_valid_correlation_test() {
   let trace_id = "4bf92f3577b34da6a3ce929d0e0e4736"
   let assert Ok(value) = correlation.from_string(trace_id)

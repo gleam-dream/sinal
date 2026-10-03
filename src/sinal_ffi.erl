@@ -15,6 +15,7 @@
     convert_native_time/2,
     unique_handler_id/0,
     unique_correlation/0,
+    sha256_hex/1,
     event_parts/1,
     identity/1,
     is_decoding/0,
@@ -125,6 +126,10 @@ unique_correlation() ->
         <<0:128>> -> unique_correlation();
         Bytes -> binary:encode_hex(Bytes, lowercase)
     end.
+
+%% The lowercase hexadecimal SHA-256 digest of a binary: 64 characters.
+sha256_hex(Value) ->
+    binary:encode_hex(crypto:hash(sha256, Value), lowercase).
 
 %% The name and codecs of a `sinal.Event`, for the forwarder, which encodes
 %% an event without going through `sinal.emit`'s routes.

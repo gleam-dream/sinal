@@ -149,7 +149,15 @@ pub fn checkout(cart: String, request_id: String) -> Nil {
 }
 ```
 
-Any application id of 1 to 128 bytes works; `from_string` returns `CorrelationTooLong` for a longer one, and both correlation fields refuse to decode one. Derive a longer id, such as one joined from publisher input, into a stable value that fits: a SHA-256 digest from `gleam_crypto` is 64 hexadecimal characters (see [the migration guide](docs/migration-wave-2.md#sinalcorrelation-new) for a snippet). `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation.
+Choose the constructor by where the value comes from:
+
+| Constructor                      | Use it for                                                                                              | Result                                                                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `correlation.from_key(key)`      | an application key of any length (an order id, a job id, an id joined from publisher input)             | always a `Correlation`: the key itself when it has 1 to 128 bytes, otherwise its 64-character lowercase hex SHA-256 digest |
+| `correlation.from_string(value)` | a value that must be carried verbatim, such as an untrusted header another service will look up as sent | `Error(EmptyCorrelation)` or `Error(CorrelationTooLong(..))` when it does not fit                                          |
+| `correlation.unique()`           | work with no id of its own                                                                              | a fresh random value                                                                                                       |
+
+`from_key` is stable, so the same key gives the same correlation on every node, and it agrees with `from_string` for a key that fits. Both correlation fields refuse to decode a value longer than 128 bytes. `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation.
 
 Two fields share the key `correlation` and one wire encoding. Choose by whether the event always has a correlation:
 
@@ -172,7 +180,7 @@ pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
 }
 ```
 
-A handler that reads `field()` sees the events emitted with `required_field()` as `Some(correlation)`, so a library's handler works unchanged with an application's events. `required_field()` fails to decode like any other field when the key is missing or the value is not a binary of 1 to 128 bytes; the atom `nil` is not a correlation there. A handler that gets such an event skips that one call, reports `MalformedMetadata` and stays attached. An Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary with either field. A library with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
+A handler that reads `field()` sees the events emitted with `required_field()` as `Some(correlation)`, so a library's handler works unchanged with an application's events. `required_field()` fails to decode like any other field when the key is missing or the value is not a binary of 1 to 128 bytes; the atom `nil` is not a correlation there. A handler that gets such an event skips that one call, reports `MalformedMetadata` and stays attached. So a `required_field()` handler skips, and reports, every event that another emitter sent without a correlation, such as a library emitting the same event with `field()` and `None`: read with `required_field()` only the events your own code emits with it. An Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary with either field. A library with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
 
 ## Handlers
 
