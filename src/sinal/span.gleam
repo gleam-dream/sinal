@@ -39,6 +39,7 @@ import gleam/list
 import gleam/string
 import sinal
 import sinal/fields
+import sinal/internal/emit
 import sinal/internal/ffi
 import sinal/internal/name as grammar
 
@@ -265,7 +266,7 @@ pub fn run(
 ) -> a {
   ffi.telemetry_span(
     list.map(span.name, atom.create),
-    fields.encode_for_emit(
+    emit.encode(
       span.start_metadata,
       start_metadata,
       caller: "sinal/span.run",
@@ -275,13 +276,13 @@ pub fn run(
       let Completion(result:, measurements:, metadata:) = work()
       #(
         result,
-        fields.encode_for_emit(
+        emit.encode(
           span.stop_measurements,
           measurements,
           caller: "sinal/span.run",
           event: fn() { list.append(span.name, ["stop"]) },
         ),
-        fields.encode_for_emit(
+        emit.encode(
           span.stop_metadata,
           metadata,
           caller: "sinal/span.run",

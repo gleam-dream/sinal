@@ -113,7 +113,23 @@ fn method_name(method: Method) -> String {
 
 Each value goes to the constructor parameter it is bound to, so the fields may be listed in any order and two fields of one type cannot swap. Getters need no type annotation: each is passed with its `get:` label after the rest of the block, which ends in `fields.success` and fixes the record type. A field can itself be a record codec, whose keys go into the same map. The block also runs with placeholder values when sinal lists the record's keys, so keep it to `include` calls and a `success` constructor. This is the shape of `json/blueprint/codec`'s `field` and `success`.
 
-The compiler checks that `method_name` covers every `Method`, but not that the list `[Get, Post]` does. A constructor missing from the list compiles; when it is emitted, the emit call logs a warning naming the event and the value, and every sinal handler of the event reports `MalformedMetadata`, skips that event and stays attached. Keep the list next to the type, and test that each constructor round-trips through `fields.encode` and `fields.decode`. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests.
+The compiler checks that `method_name` covers every `Method`, but not that the list `[Get, Post]` does. A constructor missing from the list compiles; when it is emitted, the emit call logs a warning naming the event and the value, and every sinal handler of the event reports `MalformedMetadata`, skips that event and stays attached. Keep the list next to the type, and give the application a test that names every constructor and round-trips it. `sinal.metadata_fields(event)` and `sinal.measurement_fields(event)` return an event's codecs, and `fields.check` returns the error that `emit` would log, so the test needs no handler:
+
+```gleam
+pub fn every_method_is_listed_test() {
+  let metadata = sinal.metadata_fields(http_request_event())
+  // One entry per constructor of Method.
+  list.each([Get, Post], fn(method) {
+    let sample = HttpMetadata(method:, route: "/", status: 200)
+    let assert Ok(Nil) = fields.check(metadata, sample)
+    let assert Ok(decoded) =
+      fields.decode(metadata, fields.encode(metadata, sample))
+    assert decoded == sample
+  })
+}
+```
+
+The compiler cannot list a type's constructors, so the test names them itself; one that the `fields.enum` list lacks fails both `check` and the decode. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests: `fields.encode(sinal.metadata_fields(event), value)` is the metadata map that `emit` sends.
 
 ## Correlation
 

@@ -20,6 +20,11 @@
 //// let _ = sinal.detach(attachment)
 //// ```
 ////
+//// `measurement_fields` and `metadata_fields` return an event's codecs, so
+//// a test can pin the native maps that `emit` sends with `fields.encode`,
+//// or assert with `fields.check` that no value would be skipped, without
+//// attaching a handler.
+////
 //// ## Delivery
 ////
 //// Handlers run synchronously in the emitting process, unless the
@@ -65,6 +70,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 import sinal/fields.{type FieldError, type Fields}
+import sinal/internal/emit
 import sinal/internal/ffi
 import sinal/internal/name as grammar
 import sinal/internal/route
@@ -100,6 +106,23 @@ pub fn name(event: Event(m, d)) -> List(String) {
   list.map(event.name, atom.to_string)
 }
 
+/// The codec of the event's measurements. A test can encode a value with
+/// it to pin the native map that `emit` sends, without attaching a native
+/// handler:
+///
+/// ```gleam
+/// fields.encode(sinal.measurement_fields(finished), 42)
+/// ```
+pub fn measurement_fields(event: Event(m, d)) -> Fields(m) {
+  event.measurements
+}
+
+/// The codec of the event's metadata, for `fields.encode`, `fields.decode`,
+/// `fields.check` and `fields.keys`.
+pub fn metadata_fields(event: Event(m, d)) -> Fields(d) {
+  event.metadata
+}
+
 /// Emits an event. Handlers run in the caller before `emit` returns,
 /// unless the application routed a prefix of the event's name with
 /// `sinal/forwarder.route`. A routed event is handed to that forwarder and
@@ -108,19 +131,16 @@ pub fn name(event: Event(m, d)) -> List(String) {
 /// `dropped_event`. Handler failures never reach the caller.
 pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
   let raw_measurements =
-    fields.encode_for_emit(
+    emit.encode(
       event.measurements,
       measurements,
       caller: "sinal.emit",
       event: fn() { name(event) },
     )
   let raw_metadata =
-    fields.encode_for_emit(
-      event.metadata,
-      metadata,
-      caller: "sinal.emit",
-      event: fn() { name(event) },
-    )
+    emit.encode(event.metadata, metadata, caller: "sinal.emit", event: fn() {
+      name(event)
+    })
   case route.find(event.name) {
     Ok(send) -> send(event.name, raw_measurements, raw_metadata)
     Error(Nil) ->

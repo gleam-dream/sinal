@@ -192,3 +192,71 @@ fn native_emit(
   measurements: Dynamic,
   metadata: Dynamic,
 ) -> Nil
+
+pub fn check_reports_an_unlisted_enum_value_test() {
+  let codec = incomplete_outcome()
+  fields.check(codec, Delivered) |> should.equal(Ok(Nil))
+  let assert Error(fields.InvalidField("outcome", [error])) =
+    fields.check(codec, Retried)
+  error.expected |> should.equal("one of delivered")
+  error.found |> should.equal("\"retried\"")
+  // A codec without an enum accepts every value.
+  fields.check(fields.int("attempt"), -1) |> should.equal(Ok(Nil))
+}
+
+pub type Report {
+  Report(attempt: Int, outcome: Outcome, previous: option.Option(Outcome))
+}
+
+fn report_fields() -> fields.Fields(Report) {
+  use attempt <- fields.include(fields.int("attempt"), get: fn(r) { r.attempt })
+  use outcome <- fields.include(incomplete_outcome(), get: fn(r) { r.outcome })
+  use previous <- fields.include(
+    fields.optional(fields.enum("previous", [Delivered], outcome_name)),
+    get: fn(r) { r.previous },
+  )
+  fields.success(Report(attempt:, outcome:, previous:))
+}
+
+pub fn check_finds_an_unlisted_value_inside_a_record_test() {
+  let codec = report_fields()
+  fields.check(codec, Report(1, Delivered, None)) |> should.equal(Ok(Nil))
+  let assert Error(fields.InvalidField("outcome", _)) =
+    fields.check(codec, Report(1, Retried, None))
+  let assert Error(fields.InvalidField("previous", _)) =
+    fields.check(codec, Report(1, Delivered, Some(Retried)))
+  // The event's own codec is reachable from the event, so a test checks
+  // what `emit` would warn about without attaching a handler.
+  let event = sinal.event(["decode_failure", "report"], fields.empty(), codec)
+  fields.check(sinal.metadata_fields(event), Report(2, Retried, None))
+  |> should.be_error()
+}
+
+/// The pattern `fields.enum` documents: the test names every constructor
+/// and round-trips each one, so an incomplete list fails the test.
+fn every_outcome_is_listed(
+  codec: fields.Fields(Outcome),
+) -> Result(Nil, Outcome) {
+  // One entry per constructor of Outcome.
+  list.try_each([Delivered, Retried], fn(outcome) {
+    case fields.check(codec, outcome) {
+      Error(_) -> Error(outcome)
+      Ok(Nil) ->
+        case fields.decode(codec, fields.encode(codec, outcome)) {
+          Ok(decoded) if decoded == outcome -> Ok(Nil)
+          _ -> Error(outcome)
+        }
+    }
+  })
+}
+
+pub fn the_documented_round_trip_pattern_catches_an_incomplete_list_test() {
+  every_outcome_is_listed(incomplete_outcome())
+  |> should.equal(Error(Retried))
+  every_outcome_is_listed(fields.enum(
+    "outcome",
+    [Delivered, Retried],
+    outcome_name,
+  ))
+  |> should.equal(Ok(Nil))
+}

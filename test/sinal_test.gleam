@@ -351,6 +351,54 @@ pub fn annotation_free_multi_field_record_round_trips_test() {
   |> should.equal(Error(fields.MissingField("route")))
 }
 
+pub fn event_codecs_pin_the_native_maps_without_a_handler_test() {
+  let event =
+    sinal.event(
+      ["sinal_test", "delivery"],
+      fields.int("duration_ms"),
+      delivery_fields(),
+    )
+  fields.encode(sinal.measurement_fields(event), 42)
+  |> should.equal(native_map([#("duration_ms", dynamic.int(42))]))
+  let delivery =
+    Delivery(
+      route: "/users",
+      status: 201,
+      method: Get,
+      retried: True,
+      ratio: 1.0,
+      note: Some("first"),
+    )
+  fields.encode(sinal.metadata_fields(event), delivery)
+  |> should.equal(
+    native_map([
+      #("route", dynamic.string("/users")),
+      #("status", dynamic.int(201)),
+      #("method", dynamic.string("get")),
+      #("retried", dynamic.bool(True)),
+      #("ratio", dynamic.float(1.0)),
+      #("note", dynamic.string("first")),
+    ]),
+  )
+  fields.keys(sinal.metadata_fields(event))
+  |> should.equal(["route", "status", "method", "retried", "ratio", "note"])
+
+  // The same map reaches a native handler of the event.
+  let seen = process.new_subject()
+  let attachment =
+    sinal.observe(
+      sinal.event(
+        ["sinal_test", "delivery"],
+        fields.field("duration_ms", dynamic.int, decode.int),
+        fields.field("route", dynamic.string, decode.string),
+      ),
+      fn(duration, route) { process.send(seen, #(duration, route)) },
+    )
+  sinal.emit(event, 42, delivery)
+  process.receive(seen, 100) |> should.equal(Ok(#(42, "/users")))
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+}
+
 pub fn success_alone_declares_no_keys_test() {
   let codec = fields.success(Get)
   fields.keys(codec) |> should.equal([])

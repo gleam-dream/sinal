@@ -107,6 +107,7 @@ import gleam/otp/supervision
 import gleam/result
 import sinal.{type Event}
 import sinal/fields.{type Fields}
+import sinal/internal/emit
 import sinal/internal/ffi
 import sinal/internal/name as grammar
 import sinal/internal/route
@@ -353,13 +354,13 @@ pub fn emit(
   forward(
     forwarder,
     name,
-    fields.encode_for_emit(
+    emit.encode(
       measurement_fields,
       measurements,
       caller: "sinal/forwarder.emit",
       event: fn() { list.map(name, atom.to_string) },
     ),
-    fields.encode_for_emit(
+    emit.encode(
       metadata_fields,
       metadata,
       caller: "sinal/forwarder.emit",

@@ -204,6 +204,20 @@ pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
   fields.success(TicketMetadata(ticket:, queue:))
 }
 
+// --- Snippet: every enum constructor is listed ---
+
+pub fn every_method_is_listed_test() {
+  let metadata = sinal.metadata_fields(http_request_event())
+  // One entry per constructor of Method.
+  list.each([Get, Post], fn(method) {
+    let sample = HttpMetadata(method:, route: "/", status: 200)
+    let assert Ok(Nil) = fields.check(metadata, sample)
+    let assert Ok(decoded) =
+      fields.decode(metadata, fields.encode(metadata, sample))
+    assert decoded == sample
+  })
+}
+
 // --- Runnable tests ---
 
 pub fn readme_common_path_test() {
@@ -300,7 +314,7 @@ pub fn readme_snippets_match_source_test() {
   let assert Ok(readme_bytes) = read_file("README.md")
   let assert Ok(readme_str) = bit_array.to_string(readme_bytes)
   let snippets = extract_gleam_snippets(readme_str)
-  list.length(snippets) |> should.equal(9)
+  list.length(snippets) |> should.equal(10)
 
   let assert Ok(source_bytes) = read_file("test/readme_example_test.gleam")
   let assert Ok(source_str) = bit_array.to_string(source_bytes)

@@ -47,8 +47,8 @@
 //// Decoding reads only the declared keys and ignores any others in the map.
 //// It fails with a `FieldError` when the term is not a map, a required key
 //// is missing, or a value does not decode. Encoding cannot fail; an `enum`
-//// value missing from its list is reported when it is emitted (see
-//// `enum`).
+//// value missing from its list is reported when it is emitted, and `check`
+//// returns the same error to a test (see `enum`).
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
@@ -154,8 +154,26 @@ pub fn bool(key: String) -> Fields(Bool) {
 /// then fails to decode it, reports `MalformedMetadata` (or
 /// `MalformedMeasurements`) to its failure observer, skips that one
 /// invocation and stays attached. The event is lost to typed handlers
-/// until the list is fixed, so keep `values` next to the type and add a
-/// test that emits each constructor.
+/// until the list is fixed.
+///
+/// So keep `values` next to the type, and give the application a test that
+/// names every constructor and round-trips it through the codec. The
+/// compiler cannot list a type's constructors, so the test names them
+/// itself; when it names one that `values` lacks, `check` returns the error
+/// and the decode fails:
+///
+/// ```gleam
+/// pub fn every_method_is_listed_test() {
+///   let codec = method_field()
+///   // One entry per constructor of Method.
+///   list.each([Get, Post], fn(method) {
+///     let assert Ok(Nil) = fields.check(codec, method)
+///     let assert Ok(decoded) =
+///       fields.decode(codec, fields.encode(codec, method))
+///     assert decoded == method
+///   })
+/// }
+/// ```
 ///
 /// ```gleam
 /// pub type Method {
@@ -408,35 +426,21 @@ pub fn encode(fields: Fields(a), value: a) -> Dynamic {
   fields.plan().write(value, ffi.empty_map())
 }
 
-/// Encodes `value` for an emit path. When an `enum` value is missing from
-/// its list, it logs a warning that names `caller` and the event (`event`
-/// runs only then), and still writes the name, so Erlang and Elixir
-/// handlers receive it.
-@internal
-pub fn encode_for_emit(
-  fields: Fields(a),
-  value: a,
-  caller caller: String,
-  event event: fn() -> List(String),
-) -> Dynamic {
-  let plan = fields.plan()
-  case plan.check {
-    None -> Nil
-    Some(check) ->
-      case check(value) {
-        Ok(Nil) -> Nil
-        Error(error) ->
-          ffi.log_warning(
-            caller
-            <> ": event "
-            <> string.inspect(event())
-            <> " carries a value that its fields.enum list does not name ("
-            <> describe_error(error)
-            <> "); every sinal handler of the event will skip it as malformed",
-          )
-      }
+/// Reports a value that every sinal handler would fail to decode although
+/// it encodes: an `enum` value missing from its list, anywhere in `fields`.
+/// It returns the `InvalidField` error the handler would report, and
+/// `Ok(Nil)` for any other value. The emit paths log a warning for the
+/// same values; `check` only returns the error, so a test can assert it.
+///
+/// ```gleam
+/// fields.check(method_field(), Delete)
+/// // -> Error(InvalidField("method", [..])) when Delete is not listed
+/// ```
+pub fn check(fields: Fields(a), value: a) -> Result(Nil, FieldError) {
+  case fields.plan().check {
+    None -> Ok(Nil)
+    Some(check) -> check(value)
   }
-  plan.write(value, ffi.empty_map())
 }
 
 /// Decodes a native map the way a handler would, reading only the
