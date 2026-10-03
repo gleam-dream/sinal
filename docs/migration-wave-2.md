@@ -905,3 +905,143 @@ Prose mentions, not code: `oversight/apps/extractor/FEEDBACK.md`,
 saga, grind, http_gun, warden, llm_wire, relay and fabric at their current
 heads, and of the four apps against the wave 2 heads, compiles with
 `--warnings-as-errors`, and every test suite passes unchanged.
+
+## Wave 3 additions
+
+Wave 3 adds to the API above; nothing that compiled stops compiling. Each
+item is additive except the one marked **Changed**. Commits: `c6e2d36`
+(`from_key`), `0d019ea` (event codecs, `fields.check`, internal emit),
+`42dd684` (handler labels).
+
+| Item                                                              | Kind                    | Replaces                                                                 |
+| ----------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------ |
+| `correlation.from_key(String) -> Correlation`                     | new                     | `from_string(id)` with a `unique()` fallback, or a `gleam_crypto` digest |
+| `correlation.required_field()` docs                               | docs                    | nothing; states that its handler skips events sent without a correlation |
+| `sinal.measurement_fields(event)`, `sinal.metadata_fields(event)` | new                     | a native `:telemetry` handler (test FFI) to see the wire maps            |
+| `fields.check(fields, value) -> Result(Nil, FieldError)`          | new                     | `fields.decode(f, fields.encode(f, v))` to spot an unlisted `enum` value |
+| `sinal.with_label(subscription, label)`                           | new                     | `with_id` plus a random suffix and `let assert Ok(..)`                   |
+| `sinal.observe_labelled(event, label, run) -> Attachment`         | new                     | the same, for `observe`                                                  |
+| `fields.encode_for_emit`                                          | **Changed**: not public | nothing; it was `@internal`, now `sinal/internal/emit.encode`            |
+
+### `correlation.from_key`
+
+`from_key` derives a correlation from any application key and always
+succeeds. A key of 1 to 128 bytes is the correlation itself, equal to what
+`from_string` returns, so an emitter on either function agrees for an id
+that fits. A longer or empty key becomes its lowercase hex SHA-256 digest (64
+characters); every empty key therefore shares one correlation. Keep
+`from_string` for a value that must be carried verbatim or refused, such as
+an untrusted header that another service looks up as sent.
+
+```gleam
+// Before: an id that did not fit fell back to an unrelated random value.
+correlation.from_string(document_id)
+|> result.lazy_unwrap(correlation.unique)
+
+// After: the same id always gives the same correlation.
+correlation.from_key(document_id)
+```
+
+Dependents that can adopt it (none must):
+
+- `oversight/apps/extractor/src/extractor/telemetry.gleam:152`
+  (`begin_attempt`, the `unique()` fallback above).
+- `oversight/apps/webhooks/src/webhooks/telemetry.gleam:100`
+  (`delivery_correlation`, `from_string |> option.from_result`; with
+  `from_key` the event always has a correlation and can move to
+  `required_field()`).
+- `oversight/apps/research_agent/src/research_agent/events.gleam:59` and
+  `remote.gleam:35` (an id that does not fit is not announced).
+- `oversight/apps/checkout/src/checkout/telemetry.gleam:66, 74`,
+  `checkout/web.gleam:101` and `oversight/apps/support_desk/src/support_desk.gleam:101`
+  (`let assert Ok(..) = from_string(..)` on an application id).
+
+`oversight/apps/secure_mcp/src/secure_mcp/web.gleam:204` validates an
+incoming header and keeps `from_string`.
+
+### `required_field()` and events without a correlation
+
+A handler that reads an event with `required_field()` skips, and reports as
+`MalformedMetadata(MissingField("correlation"))`, every event that another
+emitter sent without a correlation, such as a library emitting the same
+event with `field()` and `None`. This was already the behavior; the docs of
+`required_field()` and the README now say so. Read with `required_field()`
+only the events your own code emits with it.
+
+### Event codecs and `fields.check`
+
+`sinal.measurement_fields(event)` and `sinal.metadata_fields(event)` return
+the event's codecs, so a test pins the native maps that `emit` sends without
+attaching a native handler:
+
+```gleam
+// Before: attach a native :telemetry handler from a test FFI
+// (fabric/test/fabric_test_ffi.erl native_attach/native_received),
+// emit, and receive the map.
+
+// After:
+fields.encode(sinal.measurement_fields(event), measurements)
+|> should.equal(expected_native_map)
+```
+
+`fields.check(fields, value)` returns the `InvalidField` error that every
+handler would report for an `enum` value missing from its list, anywhere in
+a record, without the warning the emit paths log. With it, the test that
+`fields.enum` documents names every constructor and round-trips it, so an
+incomplete list fails the application's own tests:
+
+```gleam
+pub fn every_method_is_listed_test() {
+  let metadata = sinal.metadata_fields(http_request_event())
+  // One entry per constructor of Method.
+  list.each([Get, Post], fn(method) {
+    let sample = HttpMetadata(method:, route: "/", status: 200)
+    let assert Ok(Nil) = fields.check(metadata, sample)
+    let assert Ok(decoded) =
+      fields.decode(metadata, fields.encode(metadata, sample))
+    assert decoded == sample
+  })
+}
+```
+
+The compiler cannot list a type's constructors, so the test names them; no
+helper can do it for the application.
+
+Dependents that can adopt it: `fabric/test/fabric/observation_test.gleam`
+146–152 (its `native_attach`, `native_received` and `native_detach` FFI), and
+any app with a `fields.enum` (webhooks' delivery outcome lost an unlisted
+`Retried` this way).
+
+### Handler labels
+
+`with_label(subscription, label)` names a handler in
+`:telemetry.list_handlers/1`: its id becomes `{sinal_handler, <<"label">>, N}`
+instead of `{sinal_handler, N}`. The id stays fresh, so a label need not be
+unique, any string is accepted, and attaching a labelled subscription never
+returns an error. `observe_labelled(event, label, run)` is `observe` with a
+label. `with_id` still replaces the whole id; a subscription with both uses
+the `with_id` id. Unlabelled ids are unchanged.
+
+```gleam
+// Before: a readable id needed with_id, a unique suffix and a Result.
+let assert Ok(attachment) =
+  sinal.attach(
+    sinal.subscription(event, run)
+    |> sinal.with_id("sso-portal-warden-" <> suffix),
+  )
+
+// After:
+let attachment = sinal.observe_labelled(event, "sso_portal_warden", run)
+```
+
+Dependents that can adopt it: `oversight/apps/sso_portal` (its FEEDBACK
+asked for it), and any app that reads `telemetry:list_handlers`.
+
+### `fields.encode_for_emit` (Changed)
+
+`fields.encode_for_emit` was `@internal` in the public `sinal/fields`
+module, against convention 9. It is now `sinal/internal/emit.encode`, built
+on the public `fields.check` and `fields.encode`. A grep of
+`/code/gleam-dream/*/src`, `*/test`, `*/integrations`, `*/consumers` and
+`oversight/apps` finds no caller outside sinal. A caller would use
+`fields.check` and `fields.encode`.
