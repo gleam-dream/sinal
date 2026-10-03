@@ -71,6 +71,11 @@ pub fn telemetry_span(
 @external(erlang, "sinal_ffi", "unique_handler_id")
 pub fn unique_handler_id() -> Dynamic
 
+/// A handler id no other sinal registration uses, naming `label`:
+/// `{sinal_handler, Label, N}`.
+@external(erlang, "sinal_ffi", "labelled_handler_id")
+pub fn labelled_handler_id(label: String) -> Dynamic
+
 /// Logs `message` at warning level from the calling process, in the
 /// `[sinal]` logger domain.
 @external(erlang, "sinal_ffi", "log_warning")

@@ -47,7 +47,7 @@ pub fn observe_request_example() {
 | Drop reporting                             | Coalesced per drain; counters shared by every `Forwarder` of one name and kept for the life of the node |
 | Routes                                     | No limit on count; stored in `persistent_term`, so each change is a node-wide update                    |
 | `attach` / `observe` / `detach`            | A `gen_server` call to native telemetry with its default 5,000 ms timeout                               |
-| Handler ids                                | Fresh for every attachment; `with_id` sets a stable one                                                 |
+| Handler ids                                | Fresh for every attachment, `{sinal_handler, N}`; `with_label` adds a label, `with_id` sets a stable id |
 | Event names and field keys                 | Atoms; each segment must match `[a-z][a-z0-9_]{0,62}`; a definition that breaks it panics               |
 | Correlation size                           | 1 to 128 bytes, checked by `correlation.from_string` and when either field decodes                      |
 | Decoding a native map                      | Reads declared keys only; other keys are ignored; no size bound                                         |
@@ -231,6 +231,7 @@ pub fn attach_metrics(
 - `sinal.subscription(event, run)` is the `Subscription` form of `observe`.
 - `sinal.handler(events, run, on_failure)` registers one handler for several events of the same shape. `run` receives the event that fired and may return an error. `on_failure` receives a `HandlerFailure`. After `MalformedMeasurements` or `MalformedMetadata`, the handler skips that one event and stays attached. After `HandlerReturned`, or a crash, telemetry removes the handler and emits `[telemetry, handler, failure]`.
 - `sinal.subscription` and `observe` have no `on_failure`: they log a warning for a malformed native map, skip the event and stay attached.
+- `sinal.with_label(subscription, label)` names the handler in `:telemetry.list_handlers/1`: its id becomes `{sinal_handler, <<"label">>, N}` instead of `{sinal_handler, N}`. The id stays fresh, so labels need not be unique and attaching cannot fail. `sinal.observe_labelled(event, "billing_metrics", run)` is `observe` with a label.
 - `sinal.with_id(subscription, id)` replaces the fresh handler id with a stable binary id, so Erlang or Elixir code can detach it. `attach` returns `AlreadyExists(id)` while another handler holds the id.
 - `detach` returns `Error(Nil)` when the handler was no longer attached, for example because telemetry removed it after it crashed or returned an error.
 

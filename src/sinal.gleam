@@ -42,10 +42,12 @@
 //// `observe` attaches an infallible handler to one event. A `Subscription`
 //// describes any registration: `subscription` for one event, `handler`
 //// for several same-shaped events with a fallible handler and a typed
-//// failure observer, and `with_id` for a stable native handler id. `attach`
-//// installs one for the long term; `with_subscriptions` installs a group
-//// for the duration of one function call. Sinal gives every handler a
-//// fresh id unless `with_id` names one.
+//// failure observer, `with_label` to name the handler in
+//// `:telemetry.list_handlers`, and `with_id` for a stable native handler
+//// id. `attach` installs one for the long term; `with_subscriptions`
+//// installs a group for the duration of one function call. Sinal gives
+//// every handler a fresh id unless `with_id` names one, so only `with_id`
+//// can make `attach` fail; `observe_labelled` is `observe` with a label.
 ////
 //// ## Names are atoms
 ////
@@ -178,7 +180,11 @@ pub type CleanupFailure {
 /// A registration that `attach` or `with_subscriptions` installs. Building
 /// one has no effect.
 pub opaque type Subscription {
-  Subscription(id: Option(String), install: fn(Dynamic) -> Result(Nil, Nil))
+  Subscription(
+    id: Option(String),
+    label: Option(String),
+    install: fn(Dynamic) -> Result(Nil, Nil),
+  )
 }
 
 /// Attaches an infallible handler to one event and returns its attachment.
@@ -188,10 +194,33 @@ pub opaque type Subscription {
 /// crash removes it and emits telemetry's `[telemetry, handler, failure]`
 /// event.
 pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
-  case attach(subscription(event, run)) {
+  install_fresh(subscription(event, run), "sinal.observe")
+}
+
+/// `observe` with a label that names the handler in
+/// `:telemetry.list_handlers/1`, as `with_label` describes. It cannot fail:
+/// the id stays fresh, so labels need not be unique.
+///
+/// ```gleam
+/// sinal.observe_labelled(finished, "billing_metrics", fn(duration_ms, route) {
+///   record(route, duration_ms)
+/// })
+/// ```
+pub fn observe_labelled(
+  event: Event(m, d),
+  label: String,
+  run: fn(m, d) -> Nil,
+) -> Attachment {
+  install_fresh(
+    subscription(event, run) |> with_label(label),
+    "sinal.observe_labelled",
+  )
+}
+
+fn install_fresh(subscription: Subscription, caller: String) -> Attachment {
+  case attach(subscription) {
     Ok(attachment) -> attachment
-    Error(error) ->
-      panic as { "sinal.observe: " <> describe_attach_error(error) }
+    Error(error) -> panic as { caller <> ": " <> describe_attach_error(error) }
   }
 }
 
@@ -250,7 +279,7 @@ pub fn handler(
   let callback = fn(name, raw_measurements, raw_metadata) {
     dispatch(name, raw_measurements, raw_metadata, events, run, on_failure)
   }
-  Subscription(id: None, install: fn(id) {
+  Subscription(id: None, label: None, install: fn(id) {
     ffi.telemetry_attach_many(id, names, callback)
   })
 }
@@ -267,13 +296,27 @@ pub fn with_id(subscription: Subscription, id: String) -> Subscription {
   }
 }
 
+/// Names the handler in `:telemetry.list_handlers/1`, so an application can
+/// tell its handlers apart: its native id becomes
+/// `{sinal_handler, <<"label">>, N}` instead of `{sinal_handler, N}`. The id
+/// stays fresh, so a label need not be unique, any string is accepted, and
+/// `attach` never refuses a labelled subscription. `with_id` replaces the
+/// whole id, so a subscription with both uses the `with_id` id.
+///
+/// The label is for people reading the handler table; never build it from
+/// unbounded input.
+pub fn with_label(subscription: Subscription, label: String) -> Subscription {
+  Subscription(..subscription, label: Some(label))
+}
+
 /// Installs a subscription until `detach`. Starts the `telemetry`
 /// application when it is not running.
 pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
-  let Subscription(id:, install:) = subscription
-  let raw_id = case id {
-    Some(id) -> ffi.to_dynamic(id)
-    None -> ffi.unique_handler_id()
+  let Subscription(id:, label:, install:) = subscription
+  let raw_id = case id, label {
+    Some(id), _ -> ffi.to_dynamic(id)
+    None, Some(label) -> ffi.labelled_handler_id(label)
+    None, None -> ffi.unique_handler_id()
   }
   case install(raw_id), id {
     Ok(Nil), _ -> Ok(Attachment(raw_id))

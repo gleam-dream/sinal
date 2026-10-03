@@ -4,6 +4,7 @@ import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -119,6 +120,82 @@ pub fn observe_callback_panic_keeps_native_failure_isolation_test() {
   failure.has_stacktrace |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
   sinal.detach(attachment) |> should.equal(Error(Nil))
+}
+
+@external(erlang, "telemetry", "list_handlers")
+fn list_handlers(prefix: List(atom.Atom)) -> List(Dynamic)
+
+/// The native ids of the handlers attached to `name`.
+fn handler_ids(name: List(String)) -> List(Dynamic) {
+  list_handlers(list.map(name, atom.create))
+  |> list.filter_map(fn(handler) {
+    decode.run(
+      handler,
+      decode.field(atom.create("id"), decode.dynamic, decode.success),
+    )
+  })
+}
+
+fn label_of(id: Dynamic) -> Result(String, Nil) {
+  let decoder = {
+    use tag <- decode.field(0, atom.decoder())
+    use label <- decode.field(1, decode.string)
+    use _n <- decode.field(2, decode.int)
+    case atom.to_string(tag) {
+      "sinal_handler" -> decode.success(label)
+      _ -> decode.failure("", "a labelled sinal handler id")
+    }
+  }
+  decode.run(id, decoder) |> result.replace_error(Nil)
+}
+
+pub fn a_label_names_the_handler_in_list_handlers_test() {
+  let ev =
+    sinal.event(["sinal_test", "labelled"], fields.int("n"), fields.empty())
+  let seen = process.new_subject()
+  // Two handlers may share a label: the id stays fresh.
+  let first =
+    sinal.observe_labelled(ev, "billing_metrics", fn(n, _) {
+      process.send(seen, #("first", n))
+    })
+  let assert Ok(second) =
+    sinal.attach(
+      sinal.subscription(ev, fn(n, _) { process.send(seen, #("second", n)) })
+      |> sinal.with_label("billing_metrics"),
+    )
+  let unlabelled = sinal.observe(ev, fn(_, _) { Nil })
+
+  let ids = handler_ids(["sinal_test", "labelled"])
+  list.length(ids) |> should.equal(3)
+  list.filter_map(ids, label_of)
+  |> should.equal(["billing_metrics", "billing_metrics"])
+
+  sinal.emit(ev, 7, Nil)
+  let assert Ok(#(_, 7)) = process.receive(seen, 100)
+  let assert Ok(#(_, 7)) = process.receive(seen, 100)
+
+  sinal.detach(first) |> should.equal(Ok(Nil))
+  sinal.detach(second) |> should.equal(Ok(Nil))
+  sinal.detach(unlabelled) |> should.equal(Ok(Nil))
+  handler_ids(["sinal_test", "labelled"]) |> should.equal([])
+}
+
+pub fn any_string_is_a_label_and_with_id_wins_test() {
+  let ev =
+    sinal.event(["sinal_test", "label_id"], fields.empty(), fields.empty())
+  let empty = sinal.observe_labelled(ev, "", fn(_, _) { Nil })
+  let assert Ok(named) =
+    sinal.attach(
+      sinal.subscription(ev, fn(_, _) { Nil })
+      |> sinal.with_label("ignored")
+      |> sinal.with_id("sinal-test-label-id"),
+    )
+  let ids = handler_ids(["sinal_test", "label_id"])
+  list.filter_map(ids, label_of) |> should.equal([""])
+  list.contains(ids, dynamic.string("sinal-test-label-id"))
+  |> should.be_true()
+  sinal.detach(empty) |> should.equal(Ok(Nil))
+  sinal.detach(named) |> should.equal(Ok(Nil))
 }
 
 pub fn with_id_rejects_an_empty_id_test() {

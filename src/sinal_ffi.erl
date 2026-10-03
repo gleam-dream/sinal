@@ -14,6 +14,7 @@
     telemetry_span/3,
     convert_native_time/2,
     unique_handler_id/0,
+    labelled_handler_id/1,
     unique_correlation/0,
     sha256_hex/1,
     event_parts/1,
@@ -118,6 +119,9 @@ convert_native_time(Value, Unit) -> erlang:convert_time_unit(Value, native, Unit
 
 unique_handler_id() ->
     {sinal_handler, erlang:unique_integer([positive])}.
+
+labelled_handler_id(Label) ->
+    {sinal_handler, Label, erlang:unique_integer([positive])}.
 
 %% 128 random bits as 32 lowercase hex characters: the shape of a W3C trace
 %% id. All zeros is not a valid trace id, so it is redrawn.
