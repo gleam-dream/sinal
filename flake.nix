@@ -54,10 +54,18 @@
           settings.global.excludes = [
             "**/*.pdf"
             ".render/**"
+            ".artifacts/**"
+            "build/**"
+            "docs/benchmarks/*-provenance.json"
           ];
           programs.gleam.enable = true;
           programs.nixfmt.enable = true;
           programs.prettier.enable = true;
+          settings.formatter.ruff-format = {
+            command = "${pkgs.ruff}/bin/ruff";
+            options = [ "format" ];
+            includes = [ "dev/*.py" ];
+          };
         };
       in
       {
@@ -72,12 +80,31 @@
             beam28Packages.erlang
             rebar3
             python3
+            actionlint
+            shellcheck
+            ruff
           ];
         };
 
         formatter = treefmtEval.config.build.wrapper;
 
         checks.formatting = treefmtEval.config.build.check ./.;
+        checks.tooling =
+          pkgs.runCommand "sinal-tooling"
+            {
+              nativeBuildInputs = [
+                pkgs.actionlint
+                pkgs.shellcheck
+                pkgs.ruff
+              ];
+            }
+            ''
+              cd ${./.}
+              actionlint -shellcheck=${pkgs.shellcheck}/bin/shellcheck .github/workflows/*.yml
+              shellcheck --shell=bash .envrc
+              ruff check --no-cache dev
+              touch "$out"
+            '';
       }
     );
 }

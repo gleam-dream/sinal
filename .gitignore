@@ -4,3 +4,5 @@ erl_crash.dump
 .direnv/
 .render/
 **/.render/
+.artifacts/
+__pycache__/

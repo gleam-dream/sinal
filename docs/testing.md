@@ -7,6 +7,33 @@
 - `nix fmt` formats the package. `nix flake check` checks the configured formatted-tree gate. `git diff --check` catches whitespace errors in the proposed diff.
 - `nix run .#design-gate-render -- docs/design docs/design/design-layer.pdf` rebuilds the single aggregate PDF. `nix run .#design-gate-check -- docs/design .` checks its artifact and link contracts. Read the rendered document as part of a design change; a successful syntax gate does not prove semantic fidelity.
 
+## Validation profiles
+
+```sh
+nix develop --command python3 dev/gate.py fast
+nix develop --command python3 dev/gate.py full
+nix develop --command python3 dev/gate.py benchmark --artifacts .artifacts/benchmark
+```
+
+- `dev/gate.py` owns the profiles used by local checks and CI. `fast` checks full-tree formatting, authored tooling lint, Gleam formatting/build, independent native compilation, gate controls and the package test suite. `full` cleans the build and adds focused native behavior, stress, all synchronized forwarder races and the design gate.
+- Native compilation uses `erlc -Werror` for authored production/test Erlang and the race probe asset, with downloaded dependency include paths and generated BEAM code paths. Gleam's `--warnings-as-errors` does not promote native Erlang warnings to failures. Gate controls compile a valid module and require an unused-variable module to fail with its intended diagnostic.
+- The gate requires one nonempty successful Gleeunit summary. Controls reject empty, missing, failed, skipped and ambiguous summaries. Fault tests may emit native error reports; runtime logs are retained without a blanket warning filter.
+- `nix flake check --print-build-logs` checks the original tree without formatting it. Nix pins actionlint, ShellCheck and Ruff through `flake.lock`; actionlint invokes ShellCheck for workflow shell commands, and ShellCheck also checks `.envrc`. Ruff checks authored `dev/*.py` for import, syntax and undefined/unused-name errors (E4/E7/E9/F), and treefmt applies Ruff formatting to that same scope.
+- Formatting excludes generated build output, `.render`, PDF artifacts, transient `.artifacts` and frozen benchmark provenance JSON. Compiler rejection fixtures exist only in temporary directories; recorded benchmark output and oracle provenance remain evidence rather than generated replacements.
+- `.artifacts/gate` retains each check's raw log and `summary.json`, including command, exit code, elapsed time and successful test count. A failed or timed-out command fails the profile and leaves the collected evidence. `--artifacts` selects another evidence directory.
+- The `CI` workflow runs `full` on every push, pull request and manual dispatch. Its final `CI` job accepts only a successful validation job, so failure, cancellation and skipping cannot pass the complete status. Validation artifacts are retained for 14 days, including failed runs; missing expected evidence fails artifact collection.
+- The separate benchmark workflow runs weekly and on manual dispatch. `benchmark` compiles Gleam and authored Erlang, then retains raw benchmark output, source SHA-256 hashes and command metadata for 30 days. It records observational results without latency thresholds; its scheduled result is separate from the required `CI` status.
+
+| Obligation                                         | Authority                                         | Check / exact command                                                                         | Profile and owner                                | Enforcement                                 | Evidence                                                 |
+| -------------------------------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------- | ------------------------------------------------ | ------------------------------------------- | -------------------------------------------------------- |
+| Canonical formatting and tooling correctness       | Agent tooling rules; verification and maintenance | `nix flake check --print-build-logs`; `gleam format --check src test`                         | fast/full; Nix checks and package                | mechanism                                   | `nix-checks.log`, `gleam-format.log`                     |
+| Warning-free authored build                        | Package compiler policy                           | `gleam build --warnings-as-errors`; gate's `erlc -Werror` command                             | fast/full/benchmark; package                     | mechanism                                   | `gleam-build.log`, `native-build.log`                    |
+| Gate refusal and nonempty test execution           | Validation profiles above                         | `python3 dev/test_gate.py`; `gleam test`                                                      | fast/full; gate and package suite                | mechanism                                   | `gate-controls.log`, `package-tests.log`, passed count   |
+| Native dispatch, concurrency and incarnation races | Verification and maintenance; ADR 0008            | `gleam run -m focused_behavior`; `gleam run -m stress_test`; `python3 dev/check_forwarder.py` | full; native harnesses                           | mechanism for the bounded scenarios         | Separate native and race logs                            |
+| Design artifact integrity                          | Agent design gate contract                        | `nix run .#design-gate-check -- docs/design .`                                                | full; design gate                                | mechanism for artifact/reference checks     | `design.log`                                             |
+| Workload-dependent performance observation         | Testing benchmarks; verification and maintenance  | `gleam run -m benchmark`                                                                      | scheduled/manual; benchmark program              | partial; no universal latency claim         | `.artifacts/benchmark/benchmark.log`, hashes and summary |
+| Semantic design fidelity and separate consumer use | Verification and maintenance                      | Owning design review and Oversight consumers                                                  | Relevant boundary changes; package and consumers | convention here; separate consumer evidence | Owning review and consumer receipts                      |
+
 ## Focused native checks
 
 ```sh
