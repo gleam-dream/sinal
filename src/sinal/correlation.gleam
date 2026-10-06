@@ -1,13 +1,12 @@
-//// The correlation value that every gleam-dream package carries in its
-//// event metadata, so one unit of work can be followed across packages.
+//// A shared correlation value for event metadata, so one unit of work
+//// can be followed across packages.
 ////
 //// A `Correlation` is an opaque string of 1 to 128 bytes. It can be any
 //// application id (an order id, a job id, a request id) through `from_key`,
 //// which derives a stable value from a key of any length, a value read from
 //// an untrusted header with `from_string`, which refuses one that does not
-//// fit, or a fresh `unique()` value. A
-//// W3C trace id (32 lowercase hexadecimal characters) is a valid
-//// correlation, and `unique()` returns one of that shape, so a tracing
+//// fit, or a fresh `unique()` value. A W3C trace id (32 lowercase
+//// hexadecimal characters) is a valid correlation, and `unique()` returns one of that shape, so a tracing
 //// adapter can use the trace id as the correlation.
 ////
 //// ## The metadata field
@@ -125,7 +124,8 @@ pub fn from_key(key: String) -> Correlation {
 fn sha256_hex(value: String) -> String
 
 /// A fresh correlation: 128 random bits as 32 lowercase hexadecimal
-/// characters, the shape of a W3C trace id. Values are unique across nodes.
+/// characters, the shape of a W3C trace id. Uniqueness is probabilistic;
+/// no shared registry coordinates values across nodes.
 pub fn unique() -> Correlation {
   Correlation(unique_value())
 }

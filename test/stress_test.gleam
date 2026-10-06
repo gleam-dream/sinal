@@ -27,7 +27,6 @@ pub fn repeated_attach_emit_detach_stress_test() {
     sinal.event(["stress", "lifecycle_churn"], iter_field, fields.empty())
   let subject = process.new_subject()
 
-  // 50 rapid sequential attach -> emit -> detach cycles with unique IDs
   list.each(range(1, 50), fn(i) {
     let handler = fn(_ev, iter: Int, _meta) {
       process.send(subject, iter)
@@ -39,17 +38,14 @@ pub fn repeated_attach_emit_detach_stress_test() {
         |> sinal.with_id("stress-churn-handler-" <> int.to_string(i)),
       )
 
-    // Emit and verify exact delivery
     sinal.emit(ev, i, Nil)
     let assert Ok(received) = process.receive(subject, 100)
     received |> should.equal(i)
 
-    // Detach and verify post-detach emission does not invoke handler
     let assert Ok(Nil) = sinal.detach(att)
     sinal.emit(ev, i, Nil)
     process.receive(subject, 20) |> should.be_error()
 
-    // Repeated detach reports the handler as not attached
     sinal.detach(att) |> should.equal(Error(Nil))
   })
 }
@@ -73,7 +69,6 @@ pub fn concurrent_emitters_high_throughput_stress_test() {
   let events_per_worker = 50
   let total_events = num_workers * events_per_worker
 
-  // Spawn num_workers concurrent emitter processes
   list.each(range(1, num_workers), fn(w) {
     process.spawn(fn() {
       list.each(range(1, events_per_worker), fn(s) {
@@ -82,17 +77,16 @@ pub fn concurrent_emitters_high_throughput_stress_test() {
     })
   })
 
-  // Collect all total_events deterministically
   let received_events =
     list.map(range(1, total_events), fn(_) {
       let assert Ok(event) = process.receive(collector_subject, 2000)
       event
     })
 
-  // Verify total count
   list.length(received_events) |> should.equal(total_events)
 
-  // Verify every worker emitted all their sequential items
+  // Delivery from concurrent workers has no global order; verify each
+  // worker/sequence pair without assuming an arrival order.
   list.each(range(1, num_workers), fn(w) {
     list.each(range(1, events_per_worker), fn(s) {
       list.contains(received_events, #(w, s))
@@ -100,7 +94,6 @@ pub fn concurrent_emitters_high_throughput_stress_test() {
     })
   })
 
-  // Clean detachment
   sinal.detach(att) |> should.equal(Ok(Nil))
 }
 
@@ -151,7 +144,6 @@ pub fn concurrent_spans_stress_test() {
 
   let num_spans = 20
 
-  // Run num_spans concurrent spans
   list.each(range(1, num_spans), fn(i) {
     process.spawn(fn() {
       let result =
@@ -167,7 +159,6 @@ pub fn concurrent_spans_stress_test() {
     })
   })
 
-  // Collect all start and stop events
   let starts =
     list.map(range(1, num_spans), fn(_) {
       let assert Ok(item) = process.receive(start_subject, 2000)
@@ -182,8 +173,8 @@ pub fn concurrent_spans_stress_test() {
   list.length(starts) |> should.equal(num_spans)
   list.length(stops) |> should.equal(num_spans)
 
-  // Verify that for every span worker, start.context == stop.context
-  // and each context is a valid BEAM native reference
+  // One worker's start and stop share a native reference; other workers
+  // must have distinct contexts.
   list.each(range(1, num_spans), fn(i) {
     let assert Ok(#(_, start_ctx)) =
       list.find(starts, fn(item: #(Int, span.SpanContext)) { item.0 == i })
@@ -194,14 +185,12 @@ pub fn concurrent_spans_stress_test() {
     |> should.equal(True)
   })
 
-  // Collect all contexts and assert all worker contexts are mutually distinct
   let start_contexts = list.map(starts, fn(item) { item.1 })
   let stop_contexts = list.map(stops, fn(item) { item.1 })
 
   list.length(list.unique(start_contexts)) |> should.equal(num_spans)
   list.length(list.unique(stop_contexts)) |> should.equal(num_spans)
 
-  // Pairwise mutual distinctness verification across distinct workers
   list.each(range(1, num_spans), fn(i) {
     let assert Ok(#(_, ctx_i)) =
       list.find(starts, fn(item: #(Int, span.SpanContext)) { item.0 == i })

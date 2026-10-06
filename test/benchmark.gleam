@@ -55,10 +55,8 @@ fn bench_zero_handler() {
   let warmup = 10_000
   let samples = 50_000
 
-  // Warmup
   loop_n(warmup, fn(i) { sinal.emit(ev, i, Nil) })
 
-  // Sample
   let start_t = monotonic_nanos()
   loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
   let end_t = monotonic_nanos()
@@ -93,10 +91,8 @@ fn bench_single_handler() {
   let warmup = 10_000
   let samples = 50_000
 
-  // Warmup
   loop_n(warmup, fn(i) { sinal.emit(ev, i, Nil) })
 
-  // Sample
   let start_t = monotonic_nanos()
   loop_n(samples, fn(i) { sinal.emit(ev, i, Nil) })
   let end_t = monotonic_nanos()
@@ -137,14 +133,12 @@ fn bench_codec() {
   let warmup = 10_000
   let samples = 50_000
 
-  // Warmup
   loop_n(warmup, fn(i) {
     let encoded = fields.encode(pair_codec, #(i, True))
     let assert Ok(_) = fields.decode(pair_codec, encoded)
     Nil
   })
 
-  // Sample
   let start_t = monotonic_nanos()
   loop_n(samples, fn(i) {
     let encoded = fields.encode(pair_codec, #(i, True))
@@ -199,7 +193,6 @@ fn bench_span() {
   let warmup = 5000
   let samples = 20_000
 
-  // Warmup
   loop_n(warmup, fn(_) {
     let _ =
       span.run(sp, BenchSpanMeta("query"), fn() {
@@ -208,7 +201,6 @@ fn bench_span() {
     Nil
   })
 
-  // Sample
   let start_t = monotonic_nanos()
   loop_n(samples, fn(_) {
     let _ =

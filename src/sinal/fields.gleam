@@ -4,7 +4,7 @@
 //// Use this module to give a `sinal.Event` or a `sinal/span` span its
 //// measurement and metadata types. `string`, `int`, `float` and `bool`
 //// each declare one key; `enum` declares a key whose value is one of a
-//// fixed set; `optional` makes a one-key field absent-able; `field` covers
+//// fixed set; `optional` makes a one-key field optional; `field` covers
 //// any other value with an encoder and a `gleam/dynamic/decode` decoder.
 //// A record codec is a `use` block: each `include` adds one field and
 //// binds its value by name, and `success` builds the record. `empty`
@@ -46,8 +46,9 @@
 ////
 //// Decoding reads only the declared keys and ignores any others in the map.
 //// It fails with a `FieldError` when the term is not a map, a required key
-//// is missing, or a value does not decode. Encoding cannot fail; an `enum`
-//// value missing from its list is reported when it is emitted, and `check`
+//// is missing, or a value does not decode. Encoding has no typed error
+//// return; custom getters and encoders can still raise. An `enum` value
+//// missing from its list is reported when it is emitted, and `check`
 //// returns the same error to a test (see `enum`).
 
 import gleam/dynamic.{type Dynamic}
@@ -150,11 +151,11 @@ pub fn bool(key: String) -> Fields(Bool) {
 /// check `values`: a constructor missing from the list compiles. Encoding
 /// still writes its name, and every emit path (`sinal.emit`,
 /// `forwarder.emit`, `span.run`) logs a warning in the emitting process
-/// that names the event and the value. Every sinal handler of the event
-/// then fails to decode it, reports `MalformedMetadata` (or
+/// that names the event and the value. A handler using this enum
+/// fails to decode it, reports `MalformedMetadata` (or
 /// `MalformedMeasurements`) to its failure observer, skips that one
-/// invocation and stays attached. The event is lost to typed handlers
-/// until the list is fixed.
+/// invocation and stays attached when failure reporting returns normally.
+/// Those handlers skip the unlisted value until the list is fixed.
 ///
 /// So keep `values` next to the type, and give the application a test that
 /// names every constructor and round-trips it through the codec. The
@@ -247,7 +248,7 @@ pub fn enum(key: String, values: List(a), name: fn(a) -> String) -> Fields(a) {
   Fields(..field, plan: fn() { plan })
 }
 
-/// Makes a one-key field absent-able. Encoding `None` omits the key.
+/// Makes a one-key field optional. Encoding `None` omits the key.
 /// Decoding reads a missing key, or the atom `nil` or `undefined` that a
 /// native producer may write instead, as `None`; any other value decodes
 /// through `inner`.
@@ -426,8 +427,8 @@ pub fn encode(fields: Fields(a), value: a) -> Dynamic {
   fields.plan().write(value, ffi.empty_map())
 }
 
-/// Reports a value that every sinal handler would fail to decode although
-/// it encodes: an `enum` value missing from its list, anywhere in `fields`.
+/// Reports an `enum` value missing from its declared list anywhere in
+/// `fields`. It encodes, but a handler using these fields cannot decode it.
 /// It returns the `InvalidField` error the handler would report, and
 /// `Ok(Nil)` for any other value. The emit paths log a warning for the
 /// same values; `check` only returns the error, so a test can assert it.

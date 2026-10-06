@@ -1,19 +1,21 @@
 # sinal
 
-A strongly-typed take on Erlang `:telemetry`, built for Gleam's generics instead of dynamic maps and atoms.
+Sinal emits and observes typed telemetry events on Erlang/BEAM. Measurements and metadata stay as Gleam values; Erlang and Elixir handlers receive ordinary `:telemetry` names and maps.
 
-`sinal` wraps native BEAM `:telemetry` (1.4.2 or a later 1.x). You describe an event once, with typed codecs for its measurements and metadata, and then emit and observe Gleam values. Erlang and Elixir code sees ordinary telemetry events with atom names and maps.
+## Use this checkout
+
+This is the initial unreleased API. In a consumer beside the Sinal checkout, add a local dependency:
 
 ```toml
 [dependencies]
-sinal = ">= 0.1.0 and < 1.0.0"
+sinal = { path = "../sinal" }
 ```
 
-`telemetry` (`>= 1.4.2 and < 2.0.0`) comes with sinal; an application does not declare it. `attach`, `observe` and `with_subscriptions` start the `telemetry` OTP application when it is not running.
+Sinal requires Gleam 1.18 or newer and telemetry 1.4.2 or a later 1.x. Telemetry is included as a dependency. `attach`, `observe` and `with_subscriptions` start its OTP application when needed.
 
-## The common path
+## Observe an event
 
-Define an event, observe it, emit it, and detach:
+Import `sinal` and `sinal/fields`, then define an event, observe it, emit a value and detach the handler:
 
 ```gleam
 pub fn observe_request_example() {
@@ -33,37 +35,31 @@ pub fn observe_request_example() {
 }
 ```
 
-`sinal.event` takes the native event name and one codec for the measurements and one for the metadata. `observe` attaches a handler with a fresh handler id and returns its `Attachment`. `emit` encodes the values and runs every attached handler in the caller before it returns. Nothing a handler does crashes the emitter. A native map that does not decode skips that one invocation and leaves the handler attached; `observe` logs a warning that names the event and the field. A crashing handler is removed, and telemetry emits its `[telemetry, handler, failure]` event.
+An `Event(measurements, metadata)` binds a native event name to two field codecs. `observe` returns an `Attachment` with a fresh handler id. Reuse the event definition in producers and observers.
 
-## Defaults
+Without a matching route, handlers run in the emitting process before `emit` returns. Native telemetry catches callback errors, exits and throws, removes the failed registration and emits `[telemetry, handler, failure]`. Untrappable termination can still stop that process. A malformed native map skips one invocation; the handler stays attached when failure reporting returns normally.
 
-| Operation                                  | Default                                                                                                 |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------- |
-| Handler run inside `emit`                  | Synchronous in the emitting process, with no timeout; a slow handler blocks the emitter                 |
-| `emit` of a routed event                   | Handed to the route's forwarder; never waits; dropped and counted when the forwarder is full or down    |
-| Forwarder capacity (queued plus executing) | 1,024 events (`forwarder.default_capacity`); `forwarder.with_capacity(n)`; below 1 fails the start      |
-| Forwarder initialisation                   | 1,000 ms                                                                                                |
-| Forwarder shutdown                         | No drain; in-flight events are lost and reported as `Dropped(lost:)` by the next incarnation            |
-| Drop reporting                             | Coalesced per drain; counters shared by every `Forwarder` of one name and kept for the life of the node |
-| Routes                                     | No limit on count; stored in `persistent_term`, so each change is a node-wide update                    |
-| `attach` / `observe` / `detach`            | A `gen_server` call to native telemetry with its default 5,000 ms timeout                               |
-| Handler ids                                | Fresh for every attachment, `{sinal_handler, N}`; `with_label` adds a label, `with_id` sets a stable id |
-| Event names and field keys                 | Atoms; each segment must match `[a-z][a-z0-9_]{0,62}`; a definition that breaks it panics               |
-| Correlation size                           | 1 to 128 bytes, checked by `correlation.from_string` and when either field decodes                      |
-| Decoding a native map                      | Reads declared keys only; other keys are ignored; no size bound                                         |
-| A native map that does not decode          | Skips that one invocation; the handler stays attached; `on_failure` gets it, `observe` logs a warning   |
+## Defaults and ownership
 
-Synchronous dispatch is the only unbounded default, and sinal cannot bound it: native telemetry runs handlers inline. An application bounds it by routing a library's events to a forwarder (see [Isolating a library's events](#isolating-a-librarys-events)).
+| Operation                | Default                                                                                         |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| Unrouted emission        | Synchronous; a slow handler blocks the emitter, with no handler timeout                         |
+| Routed emission          | Returns without waiting for handlers; full or unavailable destinations drop and count the event |
+| Forwarder capacity       | 1,024 events, including queued and executing events; `with_capacity(n)` changes it              |
+| Forwarder lifecycle      | Application-owned name and supervision; 1,000 ms initialization limit; shutdown does not drain  |
+| Native attach and detach | Synchronous registry calls with the native default 5,000 ms timeout                             |
+| Native map decoding      | Declared keys only; extra keys ignored; no map-size bound                                       |
 
-## Names are atoms
+Names and field keys become permanent BEAM atoms. Each segment must match `[a-z][a-z0-9_]{0,62}`. Write them in source code; never build them from input. Invalid definitions panic at construction. Payload bytes, name counts, route counts and handler execution time are unbounded.
 
-Every event name segment and field key becomes an atom of the native event, and the BEAM never frees an atom. Sinal checks each one against `[a-z][a-z0-9_]{0,62}` when the event or codec is defined, so a URL, an email address or a name with spaces fails at definition instead of growing the atom table. The check does not stop a deliberate `"tenant_" <> id`: write names and keys in source code, never build them from input.
+## More examples
 
-A definition that breaks a rule is a programmer error, so the constructor panics with a message that names the offending value: an invalid segment or key, an empty event name, a key declared twice in one record, an `optional` over anything but one key, an `enum` with no values or a repeated name, a span key the span protocol owns, an empty `with_id`, or one event listed twice in `handler`. Any test that builds the definition catches it. Sinal has no fallible constructor for names built at run time, because such names would create atoms from data.
+The examples below are compiled and exercised by [readme_example_test.gleam](test/readme_example_test.gleam). The public modules document the full API: [events and subscriptions](src/sinal.gleam), [fields](src/sinal/fields.gleam), [correlation](src/sinal/correlation.gleam), [spans](src/sinal/span.gleam) and [forwarding](src/sinal/forwarder.gleam).
 
-## Records as measurements and metadata
+<details>
+<summary>Records, enums and optional fields</summary>
 
-A record codec is a `use` block: each `fields.include` adds one field and binds its decoded value by name, and `fields.success` builds the record. `fields.enum` covers a closed set of values, and `fields.field` covers anything else with an encoder and a `gleam/dynamic/decode` decoder:
+A record codec uses `fields.include` to bind decoded fields by name and `fields.success` to build the record. The constructor labels preserve field meaning even when two fields have the same type or appear in a different order.
 
 ```gleam
 pub type HttpMeasurements {
@@ -111,9 +107,9 @@ fn method_name(method: Method) -> String {
 }
 ```
 
-Each value goes to the constructor parameter it is bound to, so the fields may be listed in any order and two fields of one type cannot swap. Getters need no type annotation: each is passed with its `get:` label after the rest of the block, which ends in `fields.success` and fixes the record type. A field can itself be a record codec, whose keys go into the same map. The block also runs with placeholder values when sinal lists the record's keys, so keep it to `include` calls and a `success` constructor. This is the shape of `json/blueprint/codec`'s `field` and `success`.
+Getters need no type annotations when passed with `get:`. Nested record codecs flatten their keys into the same map. Sinal also runs the builder with placeholder values to collect keys, so keep the block to `include` calls and a `success` constructor with pure getters and decoders.
 
-The compiler checks that `method_name` covers every `Method`, but not that the list `[Get, Post]` does. A constructor missing from the list compiles; when it is emitted, the emit call logs a warning naming the event and the value, and every sinal handler of the event reports `MalformedMetadata`, skips that event and stays attached. Keep the list next to the type, and give the application a test that names every constructor and round-trips it. `sinal.metadata_fields(event)` and `sinal.measurement_fields(event)` return an event's codecs, and `fields.check` returns the error that `emit` would log, so the test needs no handler:
+`fields.enum` maps a closed set of values to names. An exhaustive naming function does not prove that its value list is complete. An unlisted value is still emitted for native observers, but Sinal logs a warning and a handler using that enum skips the incompatible invocation. Test every constructor:
 
 ```gleam
 pub fn every_method_is_listed_test() {
@@ -129,11 +125,16 @@ pub fn every_method_is_listed_test() {
 }
 ```
 
-The compiler cannot list a type's constructors, so the test names them itself; one that the `fields.enum` list lacks fails both `check` and the decode. `fields.optional(inner)` makes a one-key field absent-able: `None` omits the key, and a missing key or the atom `nil` or `undefined` decodes as `None`. Encoding never fails. `fields.encode` and `fields.decode` expose the native map, which is useful to pin a package's wire format in its tests: `fields.encode(sinal.metadata_fields(event), value)` is the metadata map that `emit` sends.
+`measurement_fields` and `metadata_fields` expose an event's codecs for `fields.check`, `fields.encode`, `fields.decode` and wire-format tests. `fields.field` accepts a custom encoder and dynamic decoder. Encoding has no typed error return; custom callbacks can still raise.
 
-## Correlation
+`fields.optional(inner)` requires a one-key field. `None` omits the key; a missing key or native `nil` or `undefined` decodes as `None`. Other values decode through `inner`, so its present values must not use those absence markers.
 
-`sinal/correlation` defines the value that follows one unit of work across packages: an opaque string of 1 to 128 bytes, carried as the `correlation` key of event metadata.
+</details>
+
+<details>
+<summary>Shared correlation values</summary>
+
+A `Correlation` identifies one unit of work across package observations. It is an opaque string of 1 to 128 bytes, carried under the metadata key `correlation`.
 
 ```gleam
 pub type CheckoutMetadata {
@@ -165,22 +166,13 @@ pub fn checkout(cart: String, request_id: String) -> Nil {
 }
 ```
 
-Choose the constructor by where the value comes from:
+| Constructor                      | Use                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `correlation.from_string(value)` | Preserve external input verbatim; refuse an empty or oversized value                                               |
+| `correlation.from_key(key)`      | Derive a stable value from an application key; keep a key that fits, otherwise use its 64-character SHA-256 digest |
+| `correlation.unique()`           | Generate 128 random bits as 32 lowercase hexadecimal characters                                                    |
 
-| Constructor                      | Use it for                                                                                              | Result                                                                                                                     |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `correlation.from_key(key)`      | an application key of any length (an order id, a job id, an id joined from publisher input)             | always a `Correlation`: the key itself when it has 1 to 128 bytes, otherwise its 64-character lowercase hex SHA-256 digest |
-| `correlation.from_string(value)` | a value that must be carried verbatim, such as an untrusted header another service will look up as sent | `Error(EmptyCorrelation)` or `Error(CorrelationTooLong(..))` when it does not fit                                          |
-| `correlation.unique()`           | work with no id of its own                                                                              | a fresh random value                                                                                                       |
-
-`from_key` is stable, so the same key gives the same correlation on every node, and it agrees with `from_string` for a key that fits. Both correlation fields refuse to decode a value longer than 128 bytes. `correlation.unique()` returns 128 random bits as 32 lowercase hexadecimal characters, the shape of a W3C trace id; a trace id is itself a valid correlation.
-
-Two fields share the key `correlation` and one wire encoding. Choose by whether the event always has a correlation:
-
-| Field                          | Type                          | Use it                                                                                        |
-| ------------------------------ | ----------------------------- | --------------------------------------------------------------------------------------------- |
-| `correlation.field()`          | `Fields(Option(Correlation))` | in a library, where the caller may not have supplied one; `None` omits the key                |
-| `correlation.required_field()` | `Fields(Correlation)`         | in an application event that always has one, with no `Some(..)` on emit and no `None` on read |
+Libraries use `correlation.field()` for `Option(Correlation)`: `None` omits the key. Application events that always supply a value can use `correlation.required_field()`:
 
 ```gleam
 pub type TicketMetadata {
@@ -196,11 +188,14 @@ pub fn ticket_metadata() -> fields.Fields(TicketMetadata) {
 }
 ```
 
-A handler that reads `field()` sees the events emitted with `required_field()` as `Some(correlation)`, so a library's handler works unchanged with an application's events. `required_field()` fails to decode like any other field when the key is missing or the value is not a binary of 1 to 128 bytes; the atom `nil` is not a correlation there. A handler that gets such an event skips that one call, reports `MalformedMetadata` and stays attached. So a `required_field()` handler skips, and reports, every event that another emitter sent without a correlation, such as a library emitting the same event with `field()` and `None`: read with `required_field()` only the events your own code emits with it. An Erlang or Elixir handler reads `metadata.correlation` as a UTF-8 binary with either field. A library with work-scoped events puts `correlation: Option(Correlation)` in their metadata, copies it into every event of the work, and passes it to the packages it calls. A correlation has unbounded cardinality: never use it as a metric tag.
+Both fields share one encoding. An optional reader accepts a required value as `Some(correlation)`; a required reader rejects missing or invalid values and skips that invocation. Match the producer's possibility of absence. Copy the correlation into each work-scoped event and dependency call, including events from helper processes. Its cardinality is unbounded: never use it as a metric tag.
 
-## Handlers
+</details>
 
-`observe` covers an infallible handler of one event. A `Subscription` describes any other registration, and `attach` installs it until `detach`:
+<details>
+<summary>Fallible handlers, labels and stable ids</summary>
+
+A `Subscription` describes a registration; `attach` installs it until `detach`. `sinal.handler` handles several events with the same measurement and metadata types and reports typed failures:
 
 ```gleam
 pub fn attach_metrics(
@@ -228,16 +223,18 @@ pub fn attach_metrics(
 }
 ```
 
-- `sinal.subscription(event, run)` is the `Subscription` form of `observe`.
-- `sinal.handler(events, run, on_failure)` registers one handler for several events of the same shape. `run` receives the event that fired and may return an error. `on_failure` receives a `HandlerFailure`. After `MalformedMeasurements` or `MalformedMetadata`, the handler skips that one event and stays attached. After `HandlerReturned`, or a crash, telemetry removes the handler and emits `[telemetry, handler, failure]`.
-- `sinal.subscription` and `observe` have no `on_failure`: they log a warning for a malformed native map, skip the event and stay attached.
-- `sinal.with_label(subscription, label)` names the handler in `:telemetry.list_handlers/1`: its id becomes `{sinal_handler, <<"label">>, N}` instead of `{sinal_handler, N}`. The id stays fresh, so labels need not be unique and attaching cannot fail. `sinal.observe_labelled(event, "billing_metrics", run)` is `observe` with a label.
-- `sinal.with_id(subscription, id)` replaces the fresh handler id with a stable binary id, so Erlang or Elixir code can detach it. `attach` returns `AlreadyExists(id)` while another handler holds the id.
-- `detach` returns `Error(Nil)` when the handler was no longer attached, for example because telemetry removed it after it crashed or returned an error.
+`MalformedMeasurements` and `MalformedMetadata` skip one invocation and retain the handler when `on_failure` returns. `HandlerReturned(error)` or a callback exception removes the whole registration. `subscription(event, run)` describes the infallible one-event form of `observe`; both log malformed-map warnings.
 
-## Scoped subscriptions
+`with_label` and `observe_labelled` give fresh handler ids a readable label in `:telemetry.list_handlers/1`. Labels need not be unique. `with_id` instead sets a stable binary id that native code can detach; `attach` returns `AlreadyExists(id)` while that id is in use. Startup and registry failures can raise independently of duplicate-id refusal.
 
-`with_subscriptions` attaches a group of subscriptions for the duration of one function call:
+`detach` returns `Error(Nil)` if the registration is already absent. Detach removes future selection, but does not wait for a callback already selected in another process. Reusing a stable id also lets an old attachment detach its replacement.
+
+</details>
+
+<details>
+<summary>Scoped subscriptions and cleanup failures</summary>
+
+`with_subscriptions` owns registrations for the duration of one function call:
 
 ```gleam
 pub fn count_requests(
@@ -251,11 +248,18 @@ pub fn count_requests(
 }
 ```
 
-Subscriptions attach in list order and detach in reverse order. When one fails to attach, the work does not run, the earlier ones are detached, and `SubscriptionAttachFailed(index:, error:, rollback_failures:)` names it. When the work raises (error, exit or throw), every subscription is detached and the exception is re-raised with its class, reason and stacktrace; `with_exception_cleanup_reporter` reports cleanup failures that happen meanwhile. A completed run returns `SubscriptionCompletion(work_result:, cleanup_failures:)`. Attaching is not atomic, so a concurrent emitter can see a partial set, and a killed process skips cleanup.
+Subscriptions attach in list order and receive cleanup attempts in reverse order. An attachment refusal skips work and returns `SubscriptionAttachFailed(index:, error:, rollback_failures:)`. Normal completion returns `SubscriptionCompletion(work_result:, cleanup_failures:)`.
 
-## Native spans
+A catchable work error, exit or throw triggers cleanup attempts and is re-raised with its original class, reason and stacktrace. `with_exception_cleanup_reporter` receives accompanying cleanup failures; a reporter exception cannot replace the work exception. A killed process skips cleanup.
 
-`sinal/span` wraps work in native telemetry's start, stop and exception events:
+Installation is not atomic and names remain node-wide. A scope neither isolates a request's emissions nor waits for callbacks selected by another process. Keep captured resources valid until those callbacks finish. Install shared application observers at startup.
+
+</details>
+
+<details>
+<summary>Native spans and timing</summary>
+
+`sinal/span` emits native start, stop and exception events around one work call:
 
 ```gleam
 pub fn traced_query(sql: String) -> List(String) {
@@ -277,11 +281,16 @@ pub fn traced_query(sql: String) -> List(String) {
 }
 ```
 
-`span.events(query)` returns the three typed events for `observe` or `handler`. The stop event carries the extra measurements and metadata of the `Completion`; a raised exception emits the exception event and is re-raised unchanged. `duration_in`, `system_time_in` and `monotonic_time_in` read the timing fields in an explicit `TimeUnit`. A span runs in one process and ignores forwarder routes.
+`span.events(query)` returns the three typed events for `observe` or `handler`. A normal work value, including a returned application error, produces a stop event with the completion's measurements and metadata. A catchable exception emits the exception event and is re-raised unchanged.
 
-## Isolating a library's events
+`duration_in`, `system_time_in` and `monotonic_time_in` read timing fields in an explicit `TimeUnit`. A native span context identifies one invocation; it does not supply trace parentage. Spans run in one process and ignore forwarding routes.
 
-Handlers run inside `emit`, so a slow handler of a library's events slows the library. The application isolates the library with one supervised forwarder and one route, once, at start:
+</details>
+
+<details>
+<summary>Supervised forwarding and prefix routes</summary>
+
+The application can move a library's handler execution into a supervised forwarder. Register the route once at application startup:
 
 ```gleam
 pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
@@ -296,17 +305,9 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 }
 ```
 
-From then on, every `sinal.emit` of an event whose name starts with `my_library` hands the event to the forwarder's process and returns. A full or stopped forwarder drops the event and counts it; the forwarder reports the counts in its own `[sinal, forwarder, dropped]` event (`forwarder.dropped_event()`, measurements `Dropped(rejected:, lost:, unavailable:)`). The library itself changes nothing: it emits with `sinal.emit` either way.
+The longest matching prefix wins; `[]` matches every event. Routing a prefix again replaces its destination. `unroute(prefix)` exposes a shorter matching route or restores synchronous delivery. Routes live in `persistent_term`, so changes are node-wide updates and belong at startup or shutdown.
 
-- **Longest prefix wins.** `[]` routes every event. Routing a prefix again replaces its forwarder; `forwarder.unroute(prefix)` restores synchronous delivery.
-- **The handler's `self()` is the forwarder.** Process-dictionary context from the emitter is not carried across the hop.
-- **No loops.** A forwarder's drop report and native spans ignore routes.
-
-Sinal ships no default forwarder application: the application owns the forwarder's name, capacity and supervision.
-
-## A package that owns its forwarder
-
-A package that runs its own forwarder, one per database for example, emits to it directly and sees the refusal:
+A routed refusal drops and counts the event; it never falls back to inline execution. Handlers run in the forwarder process, without the emitter's process-dictionary context. A package that owns its forwarder can inspect a typed refusal directly:
 
 ```gleam
 pub fn emit_owned(
@@ -322,35 +323,32 @@ pub fn emit_owned(
 }
 ```
 
-`forwarder.new(name)` holds 1,024 events; `forwarder.with_capacity(n)` changes that. `forwarder.supervised(forwarder)` returns a `ChildSpecification(Forwarder)`. Create the `process.Name` once at application start: every `Forwarder` built from one name shares its drop counters, which live for the life of the node.
+`forwarder.new(name)` uses the 1,024-event capacity; `with_capacity(n)` changes it and `supervised` returns its child specification. A capacity below one or an existing ETS table with the same name makes startup fail with `InitFailed`. Create each `process.Name` once at application startup: its diagnostic counters live for the node's lifetime.
+
+`dropped_event()` exposes `[sinal, forwarder, dropped]` with `Dropped(rejected:, lost:, unavailable:)`. Reports are coalesced and bypass routes. Shutdown does not drain; a later incarnation reports an estimate of lost in-flight events. Reports are best effort, and counts are diagnostics rather than delivery receipts.
+
+Admission capacity belongs to one incarnation, including queued and executing events. Delayed producers cannot enqueue into a replacement. Concurrent increment-then-check admission can refuse a send that would fit under a different ordering. Admitted events keep per-producer FIFO order for one destination; events split across routes or route changes have no relative-order guarantee.
+
+</details>
 
 ## Operational limits
 
-- **Unspecified handler order.** When several handlers are attached to one event, native telemetry calls them in an unspecified order.
-- **Detach does not wait.** Detaching stops later deliveries but does not wait for, or interrupt, a handler already running in another process.
-- **Uncatchable exits bypass cleanup.** A killed process skips scoped cleanup.
-- **Handler storage.** Native telemetry keeps handlers in an ETS table. Sinal has no wrapper for `:telemetry.persist/0`; an application that wants it declares `@external(erlang, "telemetry", "persist")` and calls it after attaching its long-lived handlers.
-- **No export or unbounded buffering.** Sinal delivers in process. Export (OTLP, StatsD, Prometheus) belongs in a separate adapter. The forwarder is a bounded, best-effort hop, not a queue.
-- **Forwarder delivery is best-effort and per-producer FIFO.** A send beyond capacity or to a stopped forwarder is dropped and counted, never retried. One producer's events to one forwarder keep their order; events split across routes, or across a route change, do not.
-- **A handler's exit can stop the forwarder.** Native telemetry isolates a handler that raises, but not one that receives an exit signal.
-- **Capacity belongs to one incarnation.** A restarted forwarder starts with fresh admission counters, and a delayed producer cannot enqueue into the replacement. An existing ETS table with the forwarder's name, or a capacity below 1, makes the start fail with `InitFailed`.
-- **Admission is one atomic increment.** It never admits past capacity, but under concurrent load at the boundary it can refuse a send that would have fit under another ordering.
+Native telemetry leaves handler order unspecified. Catchable callback failures are isolated, but an exit signal or untrappable kill can still terminate the process running the handler.
 
-## Target and support
+Sinal dispatches within one BEAM node. Export, aggregation, durable buffering and confirmed delivery require an integration with its own capacity and shutdown policy. Native `:telemetry.persist/0` remains available through an application FFI after attaching long-lived handlers; Sinal supplies no wrapper for it.
 
-| Target            | Status                        | Notes                                                                                         |
-| :---------------- | :---------------------------- | :-------------------------------------------------------------------------------------------- |
-| **Erlang / BEAM** | **Initial release candidate** | CI uses Gleam 1.18.1 and Erlang/OTP 28 with `:telemetry` 1.4.2.                               |
-| **JavaScript**    | **Unsupported**               | `:telemetry` relies on BEAM ETS tables, `persistent_term`, process mailboxes and atom tables. |
+The supported target is Erlang/BEAM. CI uses Gleam 1.18.1, OTP 28 and telemetry 1.4.2. JavaScript is unsupported.
 
-## Development, tests and benchmarks
+## Development
 
 ```sh
-nix develop                  # reproducible dev shell
-gleam test                   # unit, README and stress tests
-gleam run -m benchmark       # microbenchmarks
-gleam run -m stress_test     # standalone stress test
-python3 dev/check_forwarder.py   # synchronized forwarder start and restart races
+nix develop
+gleam test
+gleam run -m benchmark
 ```
 
-The README's Gleam snippets are copied verbatim from `test/readme_example_test.gleam`, which compiles and runs them.
+Run commands from the package root. [Testing guidance](docs/testing.md) covers focused native checks, stress tests, forwarder race probes, documentation and benchmark reproduction.
+
+One local run on 2026-10-06 measured 392 ns per zero-handler emission and 1,139 ns per synchronous one-handler emission. [Benchmark results](docs/benchmarks/README.md) retain the complete workloads, iteration counts, runtime and raw receipt; these are harness averages from one run.
+
+The [design](docs/design/design-layer.pdf), [source](docs/design/design.typ), [vocabulary](docs/design/CONTEXT.typ), [coverage](docs/COVERAGE.md) and [ADRs](docs/adr/0001-use-the-native-telemetry-registry.md) describe the maintained contracts and their rationale.

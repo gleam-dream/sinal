@@ -1,0 +1,7 @@
+# Share a small correlation value
+
+<a id="adr-0007"></a>
+
+- Sinal owns one opaque correlation value and its native `correlation` metadata field. A bounded UTF-8 string lets applications reuse business identifiers without package-specific join tables, while a W3C trace identifier fits the same representation. Full `traceparent` and parent-child propagation were deferred until a tracing adapter establishes their requirements.
+- Restricting the value to `traceparent` would force business-id joins and introduce trace-span semantics throughout otherwise independent libraries. The optional field serves libraries whose caller supplied no value; the required field gives always-correlated application events the same native representation without an impossible absence arm.
+- Verbatim external input uses `from_string`; arbitrary application keys use stable `from_key` hashing instead of a random fallback that breaks joins. Evidence is [`43279b3a19c53bc8029fa27437ca8ffd8b104a95`](https://github.com/gleam-dream/sinal/commit/43279b3a19c53bc8029fa27437ca8ffd8b104a95), [`f9cca3796c3c54e76f74f553a4196c7283983513`](https://github.com/gleam-dream/sinal/commit/f9cca3796c3c54e76f74f553a4196c7283983513), and [`c6e2d36ee26da16d00dd8daeab9ea011676a6df6`](https://github.com/gleam-dream/sinal/commit/c6e2d36ee26da16d00dd8daeab9ea011676a6df6), all dated 2026-10-02. Oversight release decision 3 records the alternatives; no causation capability is implied by these commits.

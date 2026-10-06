@@ -1,0 +1,41 @@
+warning: Git tree '/code/gleam-dream/sinal' is dirty
+gleam 1.18.1
+OTP 28 ERTS 16.4.0.6 architecture aarch64-unknown-linux-gnu schedulers 4
+Linux aarch64
+   Compiled in 0.44s
+    Running benchmark.main
+================================================================================
+Sinal Baseline Microbenchmarks
+Erlang/OTP Release: 28
+Target: BEAM Native (direct :telemetry binding)
+================================================================================
+1. Zero-handler emission (sinal.emit with no attached handlers):
+   Samples:    50000 iterations (warmup: 10000)
+   Total time: 19 ms
+   Latency:    392 ns/op
+   Throughput: 2545181 ops/sec
+
+2. Synchronous emission with 1 typed handler (sinal.emit + decode):
+   Samples:    50000 iterations (warmup: 10000)
+   Total time: 56 ms
+   Latency:    1139 ns/op
+   Throughput: 877917 ops/sec
+
+3. Pure typed field encoding + decoding (fields.encode + decode):
+   Samples:    50000 iterations (warmup: 10000)
+   Total time: 25 ms
+   Latency:    509 ns/op
+   Throughput: 1963832 ops/sec
+
+4. Native span execution (span.run with start + stop events):
+   Samples:    20000 iterations (warmup: 5000)
+   Total time: 24 ms
+   Latency:    1211 ns/op
+   Throughput: 825178 ops/sec
+
+5. Route lookup (sinal.emit, three-segment name, no handlers, not routed):
+   Samples:    50000 iterations (warmup: 10000)
+   Latency:    290 ns/op with no routes, 387 ns/op with one route on another prefix
+
+================================================================================
+Baseline benchmarks complete.

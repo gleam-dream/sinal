@@ -75,9 +75,9 @@ decrement_floor(Ref, Index, Current) ->
 
 %% The node's routes live in one `persistent_term` value: a list of
 %% {Prefix, Send} sorted longest prefix first, where Send hands an encoded
-%% event to the route's forwarder, so a lookup on the emit
-%% path takes no lock, copies nothing, allocates nothing, and returns at once
-%% when nothing is routed. Writing the value is expensive (it can trigger a
+%% event to the route's forwarder. Lookup reads this value without a lock
+%% and scans until the first matching prefix; an empty list returns absence.
+%% Writing the value is expensive (it can trigger a
 %% global scan of processes still referencing the old one), which is why
 %% routes are application setup, not something to change per event. Writers
 %% serialise through a node-local `global` lock so concurrent `route` and

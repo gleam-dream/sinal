@@ -30,10 +30,13 @@
 //// Handlers run synchronously in the emitting process, unless the
 //// application routed a prefix of the event's name to a forwarder with
 //// `sinal/forwarder.route`: then `emit` hands the event to that forwarder's
-//// process and returns at once. The emitter never crashes. A native map
-//// that does not decode skips that one invocation: the handler's failure
+//// process and returns without waiting for handlers. Native telemetry
+//// catches callback errors, exits and throws; untrappable termination can
+//// still stop the executing process. A native map that does not decode
+//// skips that one invocation: the handler's failure
 //// observer receives the typed `HandlerFailure` (`observe` logs it), and
-//// the handler stays attached. A handler that returns an error or crashes
+//// the handler stays attached when failure reporting returns normally.
+//// A handler that returns an error or crashes
 //// is removed, and telemetry emits its standard
 //// `[telemetry, handler, failure]` event.
 ////
@@ -46,8 +49,9 @@
 //// `:telemetry.list_handlers`, and `with_id` for a stable native handler
 //// id. `attach` installs one for the long term; `with_subscriptions`
 //// installs a group for the duration of one function call. Sinal gives
-//// every handler a fresh id unless `with_id` names one, so only `with_id`
-//// can make `attach` fail; `observe_labelled` is `observe` with a label.
+//// every handler a fresh id unless `with_id` names one, so duplicate-id
+//// refusal requires `with_id`. Native startup or registry failures can still
+//// raise. `observe_labelled` is `observe` with a label.
 ////
 //// ## Names are atoms
 ////
@@ -130,7 +134,9 @@ pub fn metadata_fields(event: Event(m, d)) -> Fields(d) {
 /// `sinal/forwarder.route`. A routed event is handed to that forwarder and
 /// `emit` returns without waiting; when the forwarder is full or not
 /// running, the event is dropped and counted in the forwarder's
-/// `dropped_event`. Handler failures never reach the caller.
+/// `dropped_event`. Native telemetry catches callback errors, exits and
+/// throws; untrappable termination can still stop the executing process.
+/// Custom getters and encoders can raise before dispatch.
 pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
   let raw_measurements =
     emit.encode(
@@ -178,7 +184,7 @@ pub type CleanupFailure {
 }
 
 /// A registration that `attach` or `with_subscriptions` installs. Building
-/// one has no effect.
+/// one installs no handler.
 pub opaque type Subscription {
   Subscription(
     id: Option(String),
@@ -198,8 +204,9 @@ pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
 }
 
 /// `observe` with a label that names the handler in
-/// `:telemetry.list_handlers/1`, as `with_label` describes. It cannot fail:
-/// the id stays fresh, so labels need not be unique.
+/// `:telemetry.list_handlers/1`, as `with_label` describes. The id stays
+/// fresh, so labels need not be unique. Native startup or registry failures
+/// can still raise.
 ///
 /// ```gleam
 /// sinal.observe_labelled(finished, "billing_metrics", fn(duration_ms, route) {
@@ -300,7 +307,7 @@ pub fn with_id(subscription: Subscription, id: String) -> Subscription {
 /// tell its handlers apart: its native id becomes
 /// `{sinal_handler, <<"label">>, N}` instead of `{sinal_handler, N}`. The id
 /// stays fresh, so a label need not be unique, any string is accepted, and
-/// `attach` never refuses a labelled subscription. `with_id` replaces the
+/// a fresh labelled id avoids duplicate-id refusal. `with_id` replaces the
 /// whole id, so a subscription with both uses the `with_id` id.
 ///
 /// The label is for people reading the handler table; never build it from
@@ -345,7 +352,7 @@ pub type SubscriptionCleanupFailure {
 }
 
 /// `with_subscriptions` could not attach the subscription at `index`; the
-/// work did not run, and the subscriptions before it were detached.
+/// work did not run, and earlier subscriptions received cleanup attempts.
 pub type SubscriptionScopeError {
   SubscriptionAttachFailed(
     index: Int,
@@ -380,14 +387,15 @@ pub fn with_exception_cleanup_reporter(
   SubscriptionPlan(..plan, exception_cleanup_reporter: reporter)
 }
 
-/// Attaches the plan's subscriptions in order, runs `work`, and detaches
-/// them in reverse order.
+/// Attaches the plan's subscriptions in order, runs `work`, and attempts
+/// to detach them in reverse order.
 ///
-/// - When an attach fails, `work` does not run, the earlier subscriptions
-///   are detached, and the error names the failing index.
-/// - When `work` raises (error, exit or throw), every subscription is
-///   detached and the exception is re-raised with its class, reason and
-///   stacktrace.
+/// - When an attach is refused, `work` does not run, earlier subscriptions
+///   receive cleanup attempts, and the error names the failing index and
+///   any rollback failures.
+/// - When `work` raises a catchable error, exit or throw, every acquired
+///   subscription receives a cleanup attempt and the exception is re-raised
+///   with its class, reason and stacktrace.
 /// - Attaching is not atomic: a concurrent emitter can see a partial set.
 ///   Detaching does not wait for a handler already running in another
 ///   process. A killed process skips cleanup.

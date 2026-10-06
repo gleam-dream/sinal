@@ -15,3 +15,15 @@ jobs:
       - run: gleam build --warnings-as-errors
       - run: gleam test
       - run: python3 dev/check_forwarder.py
+
+  design:
+    name: Design layer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+      - run: nix run .#design-gate-check -- docs/design .

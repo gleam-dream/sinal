@@ -1,0 +1,8 @@
+# Check source definitions at construction
+
+<a id="adr-0002"></a>
+
+- Event names, field keys and registration descriptions are definitions written in source code. Sinal returns their values directly and panics on a definition bug with the offending name or key, because the earlier fallible constructors were normally asserted by every caller. Runtime correlation input retains typed refusal because that refusal is an application decision.
+- Returning `Result` for every source definition made correct call sites repeat assertions; retaining an invalid definition until emission would move a source error into a runtime path with no error return. Grammar validation also excludes many accidental input-derived atoms, but it does not establish that a syntactically valid name is trusted.
+- The same cleanup makes custom encoding a trusted total function and keeps foreign decoding fallible. Earlier `EmitError`, `SpanOutcome`, completion-encoding errors and `run_span_result` existed to represent fallible codec encoding. The release API review's SINAL-R3 removes that reason for separate raising and result paths. A custom encoder can still raise through a programming bug; that native exception follows the ordinary span boundary and does not return a retained completion result. This is the accepted replacement for the earlier control contract's non-panicking instrumentation result, rather than an unimplemented copy of that older API.
+- Implementation evidence is [`1ff1c18ba52f91407269f5e4f51a8bc8e1e5ffda`](https://github.com/gleam-dream/sinal/commit/1ff1c18ba52f91407269f5e4f51a8bc8e1e5ffda), dated 2026-10-02. The alternatives are recorded in oversight's release decision 4; this record reconstructs that rationale and does not invent a separate approval date.

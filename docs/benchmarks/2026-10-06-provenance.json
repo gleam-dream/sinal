@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-06",
+  "head": "44c5395938ce6da85378c475d8695f0ede492631",
+  "worktree": "Uncommitted documentation and tooling changes; hashes are before prose/comment cleanup.",
+  "command": "nix develop --command gleam run -m benchmark",
+  "runtime": {
+    "gleam": "1.18.1",
+    "otp": "28",
+    "erts": "16.4.0.6",
+    "architecture": "aarch64-unknown-linux-gnu",
+    "os": "Linux",
+    "schedulers": 4,
+    "telemetry": "1.4.2"
+  },
+  "hardware": {
+    "cpu_model": "ARM Cortex-A76",
+    "logical_cpus": 4,
+    "reported_max_mhz": 2400,
+    "source": "lscpu inspected separately after the run; frequency and competing load during the run were not recorded."
+  },
+  "aggregation": "One monotonic elapsed measurement per timed loop; integer division by iteration count; no per-operation samples or percentiles.",
+  "sha256": {
+    "gleam.toml": "92ba7d884c80dc33c506e24467be9be10cf2133f247f803972d07e798e9c6af1",
+    "manifest.toml": "50e749ddc80f019e0499cb2144a9bf537e51d1d00570eba07440dea416e9fa09",
+    "src/sinal.gleam": "4598453ca87ef64feeb64e9b95887e4239b8a8a98b73cc667c35f383b1eb41c9",
+    "src/sinal/correlation.gleam": "efe71e32fec6dc523e6742021cc0fbb7ae86f5f4011dd7caff3c3ae773069e10",
+    "src/sinal/fields.gleam": "379f4b49f9d2a37c061ff808ea2dcec9acc4a0a9812e10c40cfbfb317e5af3f5",
+    "src/sinal/forwarder.gleam": "af77ce0a864866b906f7391a5a15f8303cb40ee61d301011d3a2f1e66c87f273",
+    "src/sinal/internal/emit.gleam": "64ba8af3a1dff3d2d4bb0dd1dbcd3be8663cb0b8f8374ef9cf5f10f04331303b",
+    "src/sinal/internal/ffi.gleam": "455a98f99f34cdcc202126d887eec1b97b04ffe63f387f80844b58089a88ff12",
+    "src/sinal/internal/name.gleam": "bebc1136dd24cd5e7988b6a3389653d941ccdbc587eb71f8f08c3dce9ccbc826",
+    "src/sinal/internal/route.gleam": "279ffc7662fad7b8cee0a5fa4a9044fa6f994d3d85eae4d31c50b28941ecf7ab",
+    "src/sinal/span.gleam": "1208654f95c7ae397b9a9a20a69268cdf54d2e55a6a32b49c6d8869de959ddf0",
+    "src/sinal_ffi.erl": "7418873aa62fca389f42e0095591c741a6fda135882846f28ec7a1038a677485",
+    "src/sinal_forwarder_ffi.erl": "778368d9709fe36a8b367358356989b37930bc4d3f6e11a77c1c95d3c5e93c2e",
+    "src/sinal_scope_ffi.erl": "99bad982c4cabb71b35962ccb4b5880805cee242d010193559106a5b2379a343",
+    "test/benchmark.gleam": "cbfdeceff9c20a1709c1a26bfcaa60037bbad5060105df8615757611b0318f21",
+    "test/scope_test_ffi.erl": "bf90d04e97c90dfa4198617094d8998e571079af1722ce8f69641a35185a243d"
+  },
+  "receipt_sha256": "516d9a3e6587271226968eb2fbf7deaf5f3a89d925813e0a1a8ebeff77e219f8"
+}

@@ -34,15 +34,13 @@ pub fn main() {
     Ok(Nil)
   }
 
-  // Step 1: Attach a typed handler to the event.
   let assert Ok(attachment) =
     sinal.attach(sinal.handler([event], handler, fn(_ev, _failure) { Nil }))
 
-  // Step 2: Emit the event synchronously from the current process.
   sinal.emit(event, 42, "alice")
 
-  // Step 3: The handler ran synchronously in the emitting process with the
-  // decoded values.
+  // Synchronous delivery puts the decoded result in the mailbox before
+  // emit returns, so a zero-timeout receive must find it.
   let assert Ok(report) = process.receive(subject, 0)
   let assert True = report.selected_event_name == ["sinal", "test", "event"]
   let assert True = report.count == 42
