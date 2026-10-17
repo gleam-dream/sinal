@@ -337,7 +337,7 @@ Native telemetry leaves handler order unspecified. Catchable callback failures a
 
 Sinal dispatches within one BEAM node. Export, aggregation, durable buffering and confirmed delivery require an integration with its own capacity and shutdown policy. Native `:telemetry.persist/0` remains available through an application FFI after attaching long-lived handlers; Sinal supplies no wrapper for it.
 
-The supported target is Erlang/BEAM. CI uses Gleam 1.18.1, OTP 28 and telemetry 1.4.2. JavaScript is unsupported.
+The supported target is Erlang/BEAM. CI uses Gleam 1.19.2, OTP 29 and telemetry 1.4.2. JavaScript is unsupported.
 
 ## Development
 
