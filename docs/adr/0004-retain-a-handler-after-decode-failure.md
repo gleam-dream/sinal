@@ -1,4 +1,4 @@
-# Retain handlers after decode failure
+# Retain a handler after a decode failure
 
 <a id="adr-0004"></a>
 

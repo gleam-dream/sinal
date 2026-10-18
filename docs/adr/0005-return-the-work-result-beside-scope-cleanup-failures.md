@@ -1,4 +1,4 @@
-# Separate work results from scope cleanup
+# Return the work result beside scope cleanup failures
 
 <a id="adr-0005"></a>
 

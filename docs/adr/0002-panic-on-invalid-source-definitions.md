@@ -1,4 +1,4 @@
-# Check source definitions at construction
+# Panic on invalid source definitions and keep foreign decoding fallible
 
 <a id="adr-0002"></a>
 

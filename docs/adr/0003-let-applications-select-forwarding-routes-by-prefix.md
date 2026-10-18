@@ -1,4 +1,4 @@
-# Let applications select forwarding routes
+# Let applications select forwarding routes by event-name prefix
 
 <a id="adr-0003"></a>
 

@@ -1,4 +1,4 @@
-# Share a small correlation value
+# Share one opaque correlation value
 
 <a id="adr-0007"></a>
 

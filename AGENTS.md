@@ -1,18 +1,35 @@
 # Agent Instructions
 
-## About this repo
-
-`sinal` emits and observes typed telemetry events through native Erlang `:telemetry`.
-
-Native runtime: :telemetry (beam-telemetry/telemetry). Read the [design](docs/design/design-layer.pdf), [source](docs/design/design.typ), [coverage](docs/COVERAGE.md), [decisions](docs/adr/0001-use-the-native-telemetry-registry.md), and [testing guidance](docs/testing.md).
+`sinal` emits and observes typed telemetry through native Erlang `:telemetry`. The design layer in `docs/design/` is the source of truth for behavior; `README.md` is the consumer entry point.
 
 ## Tooling
 
-- `nix develop` (or direnv): dev shell with `gleam`, Erlang/OTP 29, `rebar3`, `lefthook`.
-- `nix fmt`: formats the whole repo via treefmt (`gleam format`, `nixfmt`, `prettier`).
-- `lefthook`: pre-commit hook formats staged files and re-stages them.
-- `nix flake check`: fails iff the tree is not formatted (plus any existing checks).
-- `gleam test`: runs the test suite.
+- `nix develop` (or direnv): dev shell with `gleam`, Erlang/OTP 29, `rebar3`, Python and `lefthook`. Run every command from the package root, or prefix it with `nix develop --command`.
+- `nix fmt`: formats the whole repo via treefmt (`gleam format`, `nixfmt`, `prettier`, Ruff for `dev/*.py`).
+- `lefthook`: the pre-commit hook formats staged files, re-stages them and runs the design gate.
+
+## Validation
+
+- `python3 dev/gate.py fast`: formatting, tooling lint, Gleam build, independent `erlc -Werror` native build, gate controls and `gleam test`.
+- `python3 dev/gate.py full`: the fast checks on a clean build plus the focused native, stress and forwarder race checks and the design gate. CI runs this profile.
+- `python3 dev/gate.py benchmark --artifacts .artifacts/benchmark`: the benchmark program with retained output and source hashes.
+- `cd examples/usage && gleam build --warnings-as-errors && gleam test` (and `gleam run`): the compiled usage examples; both gate profiles run them after the package tests.
+- `gleam build --warnings-as-errors`, `gleam test`, `nix flake check --print-build-logs` and `git diff --check`: the individual checks behind the profiles.
+- `gleam run -m focused_behavior`, `gleam run -m stress_test`, `python3 dev/check_forwarder.py` (with `--scenario startup`, `delayed_sender` or `delayed_drop`) and `python3 dev/test_gate.py`: the native checks and gate controls.
+- Design change: render and check the layer with the commands in the design gate block below, and read the rendered document, because a passing gate does not prove semantic fidelity.
+
+## Constraints
+
+- Event names, route prefixes and field keys must come from source, because each creates a permanent atom.
+- README Gleam snippets must occur verbatim in `examples/usage/src/usage/*.gleam`; `test/readme_example_test.gleam` checks them and asserts the snippet count, so change the README and the example together. Usage documentation lives in those compiled examples, not in prose guides.
+- Synchronization barriers, not sleeps, establish race ordering in tests.
+- Benchmark output is observation; no test asserts a latency threshold.
+
+## References
+
+- [docs/ORACLE.md](docs/ORACLE.md): the pinned native `telemetry` 1.4.2 reference that Sinal's native behavior is compared against, with the case mapping, deliberate differences and how to rerun it.
+- [docs/BENCHMARKS.md](docs/BENCHMARKS.md): the benchmark method, how to run it and the retained dated run; observation only, with no performance guarantee.
+- [examples/usage](examples/usage/README.md): compiled, runnable usage examples that keep the README current.
 
 <!-- agent-skills:begin -->
 <!-- framework-commit: cab7c0590036edaa66d8430cc5016399a9fd2c71 origin: git@github.com:lostbean/skills.git -->
@@ -21,10 +38,11 @@ Native runtime: :telemetry (beam-telemetry/telemetry). Read the [design](docs/de
 
 ## Agent skills
 
-**Design layer** — `docs/design/design.typ` describes the design,
-`docs/design/CONTEXT.typ` defines its vocabulary, and `docs/adr/` records
-decision rationale. The rendered document is `docs/design/design-layer.pdf`.
-`docs/COVERAGE.md` maps repository parts to their design owners.
+**Design layer** — the design document is `docs/design/design.typ` (the layer
+renders to one `docs/design/design-layer.pdf`); `docs/CONTEXT-MAP.md` indexes
+the contexts, each context's `CONTEXT.typ` defines its terms, and decisions are
+recorded in `docs/adr/`. `docs/COVERAGE.md` maps repository parts to their
+design owners.
 
 **Tracker** — GitHub issues in `gleam-dream/sinal`, accessed with
 `gh issue list --repo gleam-dream/sinal` and `gh issue view NUMBER --repo gleam-dream/sinal`.

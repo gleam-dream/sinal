@@ -1,4 +1,4 @@
-# Use the native telemetry registry
+# Dispatch through the shared native telemetry registry
 
 <a id="adr-0001"></a>
 

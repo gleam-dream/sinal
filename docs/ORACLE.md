@@ -1,4 +1,36 @@
-# Native telemetry oracle provenance
+# Native telemetry oracle
+
+Sinal wraps Erlang's `telemetry` registry with typed events, so the native library is the reference that Sinal's native boundary is compared against. This document pins that reference, states what is compared and how outcomes are classified, lists deliberate differences, and says how to run the comparison again. [BENCHMARKS.md](BENCHMARKS.md) records the matching measurements, and neither document claims more than it states.
+
+- **Design:** the [native oracle](design/verification/design.typ#native-oracle) section states the present contract, and [ADR 0009](adr/0009-verify-against-a-pinned-native-telemetry-oracle.md) records why this pin was chosen.
+- **Commands:** [AGENTS.md](../AGENTS.md) lists the gate profiles that run the comparison checks.
+
+## How outcomes are classified
+
+Each upstream case receives exactly one disposition:
+
+- **Adopted:** a Sinal check exercises the same semantic contract through typed events. The table names the check and the normalization that makes the comparison fair.
+- **Adapted:** Sinal deliberately behaves differently, and the difference is recorded with its evidence and the decision that chose it.
+- **No typed facade, excluded or adapter-specific:** the upstream capability is outside Sinal's production facade or is verified at a different boundary.
+- **Not claimed:** the behavior is not covered, and the row says what coverage would need.
+
+## How to run
+
+The comparison is a set of Sinal tests plus the upstream suite itself:
+
+```sh
+nix develop --command python3 dev/gate.py fast      # package tests that carry the mapped checks
+nix develop --command python3 dev/gate.py full      # adds focused native, stress and forwarder race checks
+cd build/upstream/telemetry && rebar3 ct            # rerun the upstream suite from a fresh checkout at the pinned revision
+```
+
+A fresh harvest of the upstream suite records its own checkout, dependencies and result. A mapping change alone is not a harvest.
+
+## Limits of the claim
+
+- The rows map semantic checks. They do not claim a literal port of every upstream assertion.
+- Only the exact pinned revision is compared. The dependency range admits later 1.x releases that this oracle does not cover.
+- Passing the mapped checks does not prove equality with raw telemetry under load, forwarder throughput, or behavior the table lists as not claimed.
 
 ## Pinned source
 
@@ -35,19 +67,19 @@
 
 ## Adaptations and exclusions
 
-| Upstream capability                                        | Disposition            | Reason and evidence                                                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Malformed application-map removal                          | Adapted                | Sinal reports `MalformedMeasurements` or `MalformedMetadata`, skips only that invocation and keeps the registration if the failure observer returns. `test/decode_failure_test.gleam` proves retention across ordinary, scoped, forwarded and span deliveries. [Decision](../../docs/adr/0004-retain-handlers-after-decode-failure.md) records the change from the earlier adapter policy. |
-| `list_handlers`, `list_for_prefix`, `list_handler_on_many` | No typed facade        | Native introspection is available to raw callers and used by tests, including label/handler inspection. A new public introspection abstraction is outside core scope.                                                                                                                                                                                                                      |
-| `old_execute`                                              | No typed facade        | Sinal supplies explicit measurement and metadata codecs rather than a legacy raw two-argument entry point.                                                                                                                                                                                                                                                                                 |
-| `logs_on_local_function`                                   | Adapter-specific check | The production callback is exported `sinal_ffi:handle/4`. `observe_uses_fresh_ids_and_an_exported_handler_test` verifies that boundary; upstream local-function warning parity is not a separate facade feature.                                                                                                                                                                           |
-| `telemetry_test_SUITE:assert_receive_event`                | Excluded               | Sinal tests use Gleam assertions and native probe helpers. Reimplementing the upstream test-helper API is outside the production facade.                                                                                                                                                                                                                                                   |
-| Full upstream matrix in both `ets` and `persisted` groups  | Not claimed            | Mapped native behavior and the explicit persistence transition are retained. Running every wrapper check under both modes needs its own executable matrix.                                                                                                                                                                                                                                 |
+| Upstream capability                                        | Disposition            | Reason and evidence                                                                                                                                                                                                                                                                                                                                                              |
+| ---------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Malformed application-map removal                          | Adapted                | Sinal reports `MalformedMeasurements` or `MalformedMetadata`, skips only that invocation and keeps the registration if the failure observer returns. `test/decode_failure_test.gleam` proves retention across ordinary, scoped, forwarded and span deliveries. [Decision](adr/0004-retain-a-handler-after-decode-failure.md) records the change from the earlier adapter policy. |
+| `list_handlers`, `list_for_prefix`, `list_handler_on_many` | No typed facade        | Native introspection is available to raw callers and used by tests, including label/handler inspection. A new public introspection abstraction is outside core scope.                                                                                                                                                                                                            |
+| `old_execute`                                              | No typed facade        | Sinal supplies explicit measurement and metadata codecs rather than a legacy raw two-argument entry point.                                                                                                                                                                                                                                                                       |
+| `logs_on_local_function`                                   | Adapter-specific check | The production callback is exported `sinal_ffi:handle/4`. `observe_uses_fresh_ids_and_an_exported_handler_test` verifies that boundary; upstream local-function warning parity is not a separate facade feature.                                                                                                                                                                 |
+| `telemetry_test_SUITE:assert_receive_event`                | Excluded               | Sinal tests use Gleam assertions and native probe helpers. Reimplementing the upstream test-helper API is outside the production facade.                                                                                                                                                                                                                                         |
+| Full upstream matrix in both `ets` and `persisted` groups  | Not claimed            | Mapped native behavior and the explicit persistence transition are retained. Running every wrapper check under both modes needs its own executable matrix.                                                                                                                                                                                                                       |
 
 ## Sinal-owned verification
 
-- [Testing guidance](../../docs/testing.md) owns the commands for package checks, synchronized forwarder races, stress and benchmarks.
+- [AGENTS.md](../AGENTS.md) lists the commands for package checks, synchronized forwarder races, stress and benchmarks, and the [verification design](design/verification/design.typ) states what each proves.
 - `test/api_control_test.gleam` checks heterogeneous plans, ordered rollback, indexed cleanup, exception reporting and integer timing admission/conversion.
 - `test/correlation_test.gleam` checks UTF-8 byte bounds, stable key derivation, random identifier shape and optional/required field interoperability.
 - `test/forwarder_test.gleam`, `test/forwarder_route_test.gleam` and `dev/check_forwarder.py` check bounded admission, process placement, per-producer order, restart isolation, coalesced drop reports and route bypass. These are Sinal guarantees, not upstream telemetry case ports.
-- README examples remain executable in `test/readme_example_test.gleam`. Current source and tests resolve superseded historical signatures; the [design layer](../../docs/design/design.typ) owns the present architecture.
+- README snippets occur verbatim in the compiled [usage examples](../examples/usage/README.md), which run in the fast gate. The [design layer](design/design.typ) owns the present architecture.
