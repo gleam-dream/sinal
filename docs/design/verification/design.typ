@@ -13,6 +13,10 @@
     #principle(title: "Evidence states its own limits")[Each check names what it proves and what it leaves open. A passing syntax gate does not prove semantic fidelity, and a passing oracle mapping does not prove every upstream case.]
   ])
 
+  #pending-ledger(
+    pending-entry(title: "Recheck carried-over verification claims against code", kind: "verify", since: "2026-10-17")[The validation profiles, the oracle case mapping with its exclusions and the benchmark method come from guides that no longer exist. Their statements about commands, case names and the retained run are not yet compared with the gate script, the oracle test cases and the recorded benchmark output.],
+  )
+
   #section(title: "Validation profiles", lead: "One gate script owns the checks that local runs and CI share.", body: [
     #points(
       [The gate script offers three profiles: `fast`, `full` and `benchmark`. `fast` checks full-tree formatting, authored tooling lint, Gleam formatting and build, independent native compilation, gate controls, the package test suite and the usage examples.],
