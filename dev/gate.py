@@ -12,6 +12,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
+EXAMPLES = ROOT / "examples/usage"
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -51,7 +52,9 @@ class Evidence:
         self.directory = directory
         self.summary = {"profile": profile, "checks": [], "result": "running"}
 
-    def run(self, name: str, command: list[str], timeout: int = 300) -> str:
+    def run(
+        self, name: str, command: list[str], timeout: int = 300, cwd: Path = ROOT
+    ) -> str:
         started = time.monotonic()
         log = self.directory / f"{name}.log"
         record = {"name": name, "command": command, "log": log.name}
@@ -61,7 +64,7 @@ class Evidence:
             with log.open("w") as stream:
                 result = subprocess.run(
                     command,
-                    cwd=ROOT,
+                    cwd=cwd,
                     stdout=stream,
                     stderr=subprocess.STDOUT,
                     timeout=timeout,
@@ -111,7 +114,18 @@ def main() -> int:
             evidence.run(
                 "nix-checks", ["nix", "flake", "check", "--print-build-logs"], 600
             )
-            evidence.run("gleam-format", ["gleam", "format", "--check", "src", "test"])
+            evidence.run(
+                "gleam-format",
+                [
+                    "gleam",
+                    "format",
+                    "--check",
+                    "src",
+                    "test",
+                    "examples/usage/src",
+                    "examples/usage/test",
+                ],
+            )
         if args.profile == "full":
             evidence.run("clean-build", ["gleam", "clean"])
         evidence.run("gleam-build", ["gleam", "build", "--warnings-as-errors"])
@@ -124,6 +138,13 @@ def main() -> int:
             evidence.run("gate-controls", ["python3", "dev/test_gate.py"])
             output = evidence.run("package-tests", ["gleam", "test"])
             evidence.summary["passed_tests"] = test_count(output)
+            evidence.run(
+                "usage-examples-build",
+                ["gleam", "build", "--warnings-as-errors"],
+                cwd=EXAMPLES,
+            )
+            examples = evidence.run("usage-examples", ["gleam", "test"], cwd=EXAMPLES)
+            evidence.summary["passed_usage_examples"] = test_count(examples)
             if args.profile == "full":
                 evidence.run(
                     "focused-native", ["gleam", "run", "-m", "focused_behavior"]
