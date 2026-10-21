@@ -4,6 +4,8 @@
 
 ## Tooling
 
+- When updating dependency pins, reconcile affected `manifest.toml` files in examples, consumers and nested packages through Gleam, then run the full repository gate; updating the root lock alone is insufficient.
+
 - `nix develop` (or direnv): dev shell with `gleam`, Erlang/OTP 29, `rebar3`, Python and `lefthook`. Run every command from the package root, or prefix it with `nix develop --command`.
 - `nix fmt`: formats the whole repo via treefmt (`gleam format`, `nixfmt`, `prettier`, Ruff for `dev/*.py`).
 - `lefthook`: the pre-commit hook formats staged files, re-stages them.
