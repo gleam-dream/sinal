@@ -5,6 +5,7 @@ import gleam/list
 import sinal
 import sinal/fields
 
+// snips-start: records-and-enums
 pub type HttpMeasurements {
   HttpMeasurements(duration_ms: Int, bytes_sent: Int)
 }
@@ -48,6 +49,8 @@ fn method_name(method: Method) -> String {
     Post -> "post"
   }
 }
+
+// snips-end: records-and-enums
 
 /// An exhaustive naming function does not prove that an enum's value list is
 /// complete, so list every constructor and round-trip each one.

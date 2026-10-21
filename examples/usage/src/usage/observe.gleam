@@ -4,6 +4,7 @@ import gleam/erlang/process
 import sinal
 import sinal/fields
 
+// snips-start: observe-request
 pub fn observe_request_example() {
   let finished =
     sinal.event(
@@ -19,6 +20,8 @@ pub fn observe_request_example() {
   sinal.emit(finished, 42, "/users")
   let assert Ok(Nil) = sinal.detach(attachment)
 }
+
+// snips-end: observe-request
 
 /// Run the example and check that the handler saw the emitted values in the
 /// emitting process.

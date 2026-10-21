@@ -7,6 +7,7 @@ import sinal
 import sinal/fields
 import sinal/forwarder
 
+// snips-start: forward-library
 pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
   let observations = forwarder.new(name)
   let assert Ok(_) =
@@ -17,6 +18,8 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
   // as the event is handed to the forwarder.
   forwarder.route(["my_library"], observations)
 }
+
+// snips-end: forward-library
 
 pub fn emit_owned(
   observations: forwarder.Forwarder,

@@ -21,7 +21,7 @@
 ## Constraints
 
 - Event names, route prefixes and field keys must come from source, because each creates a permanent atom.
-- Usage examples in `examples/usage` compile and run. Review README consistency manually.
+- Usage examples in `examples/usage` compile and run. README code excerpts are synchronized from tested sources with Snips.
 - Synchronization barriers, not sleeps, establish race ordering in tests.
 - Benchmark output is observation; no test asserts a latency threshold.
 
@@ -67,3 +67,12 @@ estimates context. Review documentation and conventions manually.
 conformance review before the layer is treated as current.
 
 <!-- agent-skills:end -->
+
+## README snippets
+
+Keep README Gleam examples in compiled example or consumer source. Use named
+`snips-start` / `snips-end` regions (or include a whole example module), and retain
+Prettier ignore ranges around generated README blocks. Format the source first,
+then run `nix run .#snips -- --commands deny README.md`. CI runs
+`nix run .#snips -- --check --commands deny README.md` using the shared pinned
+package. Snips checks synchronization; existing example tests check behavior.

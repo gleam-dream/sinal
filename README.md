@@ -17,6 +17,9 @@ Sinal requires Gleam 1.18 or newer and telemetry 1.4.2 or a later 1.x. Telemetry
 
 Import `sinal` and `sinal/fields`, then define an event, observe it, emit a value and detach the handler:
 
+<!-- prettier-ignore-start -->
+
+<!-- snips: examples/usage/src/usage/observe.gleam#observe-request -->
 ```gleam
 pub fn observe_request_example() {
   let finished =
@@ -33,7 +36,10 @@ pub fn observe_request_example() {
   sinal.emit(finished, 42, "/users")
   let assert Ok(Nil) = sinal.detach(attachment)
 }
+
 ```
+
+<!-- prettier-ignore-end -->
 
 An `Event(measurements, metadata)` binds a native event name to two field codecs. `observe` returns an `Attachment` with a fresh handler id. Reuse the event definition in producers and observers.
 
@@ -45,6 +51,9 @@ Event names and field keys become permanent atoms, so write them in source code 
 
 A record codec binds decoded fields by name with `fields.include` and builds the record with `fields.success`:
 
+<!-- prettier-ignore-start -->
+
+<!-- snips: examples/usage/src/usage/records.gleam#records-and-enums -->
 ```gleam
 pub type HttpMeasurements {
   HttpMeasurements(duration_ms: Int, bytes_sent: Int)
@@ -89,7 +98,10 @@ fn method_name(method: Method) -> String {
     Post -> "post"
   }
 }
+
 ```
+
+<!-- prettier-ignore-end -->
 
 An exhaustive naming function does not prove that an enum's value list is complete, so test every constructor with `fields.check`, `fields.encode` and `fields.decode`.
 
@@ -97,6 +109,9 @@ An exhaustive naming function does not prove that an enum's value list is comple
 
 An application can move handler execution into a supervised forwarder and route an event-name prefix to it once at startup:
 
+<!-- prettier-ignore-start -->
+
+<!-- snips: examples/usage/src/usage/forwarding.gleam#forward-library -->
 ```gleam
 pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
   let observations = forwarder.new(name)
@@ -108,7 +123,10 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
   // as the event is handed to the forwarder.
   forwarder.route(["my_library"], observations)
 }
+
 ```
+
+<!-- prettier-ignore-end -->
 
 A full or unavailable forwarder drops and counts the event and never falls back to inline execution. Forwarding is best effort and gives no delivery receipt.
 
