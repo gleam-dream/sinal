@@ -1066,6 +1066,9 @@ fn is_function(term: Dynamic) -> Bool
 @external(erlang, "scope_test_ffi", "catch_exception")
 fn catch_exception(fun: fn() -> a) -> CatchOutcome(a)
 
+@external(erlang, "scope_test_ffi", "observe_exception")
+fn observe_exception(run: fn() -> a, observer: fn(Dynamic) -> Nil) -> a
+
 @external(erlang, "scope_test_ffi", "raise_test_error")
 fn raise_test_error(reason: a) -> b
 
@@ -1196,13 +1199,19 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
     process.send(subject_err, "called_before_crash")
     Ok(Nil)
   }
+  let original = process.new_subject()
   let caught_err =
     catch_exception(fn() {
       with_handler(ev, handler_err, fn(_) { Nil }, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_error("work_failure_error")
+        observe_exception(
+          fn() { raise_test_error("work_failure_error") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_err)) |> should.be_true
   case caught_err {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("error")
@@ -1224,13 +1233,19 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
     process.send(subject_exit, "called_before_exit")
     Ok(Nil)
   }
+  let original = process.new_subject()
   let caught_exit =
     catch_exception(fn() {
       with_handler(ev, handler_exit, fn(_) { Nil }, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_exit("work_failure_exit")
+        observe_exception(
+          fn() { raise_test_exit("work_failure_exit") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_exit)) |> should.be_true
   case caught_exit {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("exit")
@@ -1252,13 +1267,20 @@ pub fn scoped_lifetime_exceptional_work_cleanup_and_reraise_test() {
     process.send(subject_throw, "called_before_throw")
     Ok(Nil)
   }
+  let original = process.new_subject()
   let caught_throw =
     catch_exception(fn() {
       with_handler(ev, handler_throw, fn(_) { Nil }, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_throw("work_failure_throw")
+        observe_exception(
+          fn() { raise_test_throw("work_failure_throw") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_throw))
+  |> should.be_true
   case caught_throw {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("throw")
@@ -1290,11 +1312,15 @@ pub fn scoped_lifetime_cleanup_error_does_not_mask_work_exception_test() {
   }
 
   // Work throws while cleanup encounters DetachReturnedError(NotAttached)
+  let original = process.new_subject()
   let caught =
     catch_exception(fn() {
       with_handler(ev, handler, on_cleanup_failure, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_throw("work_throw_with_cleanup_error")
+        observe_exception(
+          fn() { raise_test_throw("work_throw_with_cleanup_error") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
 
@@ -1302,6 +1328,8 @@ pub fn scoped_lifetime_cleanup_error_does_not_mask_work_exception_test() {
   failure
   |> should.equal(sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached))
 
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught)) |> should.be_true
   case caught {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("throw")
@@ -1333,16 +1361,22 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
   }
 
   // 1. Error class work exception with reporter panic
+  let original = process.new_subject()
   let caught_err =
     catch_exception(fn() {
       with_handler(ev, handler, on_cleanup_failure, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_error("original_work_error")
+        observe_exception(
+          fn() { raise_test_error("original_work_error") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
   let assert Ok(failure) = process.receive(cleanup_failure_subject, 100)
   failure
   |> should.equal(sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached))
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_err)) |> should.be_true
   case caught_err {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("error")
@@ -1356,16 +1390,22 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
   }
 
   // 2. Exit class work exception with reporter panic
+  let original = process.new_subject()
   let caught_exit =
     catch_exception(fn() {
       with_handler(ev, handler, on_cleanup_failure, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_exit("original_work_exit")
+        observe_exception(
+          fn() { raise_test_exit("original_work_exit") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
   let assert Ok(failure) = process.receive(cleanup_failure_subject, 100)
   failure
   |> should.equal(sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached))
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_exit)) |> should.be_true
   case caught_exit {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("exit")
@@ -1379,16 +1419,23 @@ pub fn scoped_lifetime_cleanup_reporter_failure_does_not_mask_work_exception_tes
   }
 
   // 3. Throw class work exception with reporter panic
+  let original = process.new_subject()
   let caught_throw =
     catch_exception(fn() {
       with_handler(ev, handler, on_cleanup_failure, fn() {
         sinal.emit(ev, Nil, Nil)
-        raise_test_throw("original_work_throw")
+        observe_exception(
+          fn() { raise_test_throw("original_work_throw") },
+          fn(exception) { process.send(original, exception) },
+        )
       })
     })
   let assert Ok(failure) = process.receive(cleanup_failure_subject, 100)
   failure
   |> should.equal(sinal.SubscriptionCleanupFailure(0, sinal.AlreadyDetached))
+  let assert Ok(original_exception) = process.receive(original, 100)
+  term_equals(original_exception, ffi.to_dynamic(caught_throw))
+  |> should.be_true
   case caught_throw {
     CaughtException(class, reason, stacktrace) -> {
       class |> should.equal("throw")
@@ -2452,5 +2499,10 @@ pub fn public_id_replacement_after_detach_test() {
   sinal.emit(ev, Nil, Nil)
   process.receive(subject, 100) |> should.equal(Ok("v2"))
 
-  sinal.detach(att2) |> should.equal(Ok(Nil))
+  // Attachment values retain the public ID, not a registration generation.
+  // A copied old value therefore detaches the replacement with that same ID.
+  sinal.detach(att1) |> should.equal(Ok(Nil))
+  sinal.emit(ev, Nil, Nil)
+  process.receive(subject, 50) |> should.be_error()
+  sinal.detach(att2) |> should.equal(Error(Nil))
 }

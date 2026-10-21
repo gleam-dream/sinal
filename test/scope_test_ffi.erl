@@ -2,6 +2,7 @@
 
 -export([
     catch_exception/1,
+    observe_exception/2,
     raise_test_error/1,
     raise_test_exit/1,
     raise_test_throw/1,
@@ -34,6 +35,15 @@ catch_exception(Fun) ->
     catch
         Class:Reason:Stacktrace ->
             {caught_exception, atom_to_binary(Class, utf8), Reason, Stacktrace}
+    end.
+
+%% Observe the complete original exception before the public scope cleans up.
+observe_exception(Fun, Observer) ->
+    try Fun()
+    catch
+        Class:Reason:Stacktrace ->
+            Observer({caught_exception, atom_to_binary(Class, utf8), Reason, Stacktrace}),
+            erlang:raise(Class, Reason, Stacktrace)
     end.
 
 raise_test_error(Reason) ->
