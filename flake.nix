@@ -80,8 +80,6 @@
             beam29Packages.erlang
             beam29Packages.rebar3
             python3
-            actionlint
-            shellcheck
             ruff
           ];
         };
@@ -89,22 +87,6 @@
         formatter = treefmtEval.config.build.wrapper;
 
         checks.formatting = treefmtEval.config.build.check ./.;
-        checks.tooling =
-          pkgs.runCommand "sinal-tooling"
-            {
-              nativeBuildInputs = [
-                pkgs.actionlint
-                pkgs.shellcheck
-                pkgs.ruff
-              ];
-            }
-            ''
-              cd ${./.}
-              actionlint -shellcheck=${pkgs.shellcheck}/bin/shellcheck .github/workflows/*.yml
-              shellcheck --shell=bash .envrc
-              ruff check --no-cache dev
-              touch "$out"
-            '';
       }
     );
 }

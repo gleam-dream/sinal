@@ -3,7 +3,7 @@
 Sinal keeps a small local microbenchmark program and one retained run of it. The numbers are observations from one machine and one workload. They establish no latency bound, throughput promise or capacity limit. [ORACLE.md](ORACLE.md) pins the native reference that the same workloads are compared against for behavior, and this document pins the measurements.
 
 - **Design:** the [benchmark method](design/verification/design.typ#benchmark-method) section states the rules a run must follow, and [ADR 0011](adr/0011-retain-benchmark-averages-as-frozen-provenance-tagged-runs.md) records why runs are frozen with their provenance.
-- **Commands:** [AGENTS.md](../AGENTS.md) lists the `benchmark` gate profile. A weekly workflow runs it and retains the artifacts, and its result is independent of the required CI status.
+- **Commands:** [AGENTS.md](../AGENTS.md) lists the benchmark command. A weekly workflow runs it and records command output in CI logs, and its result is independent of the required CI status.
 
 ## Scope
 
@@ -21,10 +21,9 @@ From the package root:
 
 ```sh
 nix develop --command gleam run -m benchmark
-nix develop --command python3 dev/gate.py benchmark --artifacts .artifacts/benchmark
 ```
 
-The first command prints a fresh run's runtime identity and measurements. The second also retains the raw output, source hashes and command metadata.
+The command prints a fresh run's runtime identity and measurements.
 
 ## Retained run
 

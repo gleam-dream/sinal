@@ -19,4 +19,4 @@ nix develop ../.. --command gleam run   # run every example once
 nix develop ../.. --command gleam test  # run each as a test
 ```
 
-The README snippets must occur verbatim in these modules; `test/readme_example_test.gleam` in the package root checks that. The gate profiles in [AGENTS.md](../../AGENTS.md) run the examples after the package tests.
+README consistency is reviewed manually. The gate profiles in [AGENTS.md](../../AGENTS.md) run the examples after the package tests.

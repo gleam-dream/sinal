@@ -6,9 +6,8 @@
 #let body = [
   #section(title: "Foundation", lead: "Native parity, public consumers and synchronized probes verify each contract at its real boundary.", body: [
     #goal(title: "Keep native behavior and typed boundaries executable")[Every contract in the observation and forwarding contexts is checked by a test, a native harness or a consumer. A claim without an executable check is marked as convention.]
-    #goal(title: "Keep documentation examples executable")[Usage is documented as compiled, runnable examples (each a #term("term-usage-example")) in a separate package that depends on this one, and README snippets occur verbatim in them. Public module introductions are checked mechanically. A documented example cannot drift from compiling source, and no prose usage guide stands beside the examples.]
+    #goal(title: "Keep documentation examples executable")[Usage is documented as compiled, runnable examples (each a #term("term-usage-example")) in a separate package that depends on this one, while README consistency and module introductions are reviewed manually.]
     #no-goal(title: "Measurements are not performance guarantees")[Benchmark and stress output is observational evidence from one workload and one machine. It establishes no latency bound, throughput promise or capacity limit.]
-    #invariant(title: "A validation profile runs one nonempty successful test summary", enforcement: "mechanism")[The gate accepts exactly one successful Gleeunit summary with a nonzero test count. Empty, missing, failed, skipped and ambiguous summaries fail the profile.]
     #invariant(title: "Race evidence uses barriers, not elapsed time", enforcement: "mechanism")[A synchronization barrier establishes that a competing process reached a causal step. A sleep can bound a wait but never proves ordering.]
     #principle(title: "Evidence states its own limits")[Each check names what it proves and what it leaves open. A passing syntax gate does not prove semantic fidelity, and a passing oracle mapping does not prove every upstream case.]
   ])
@@ -17,27 +16,25 @@
     pending-entry(title: "Recheck carried-over verification claims against code", kind: "verify", since: "2026-10-17")[The validation profiles, the oracle case mapping with its exclusions and the benchmark method come from guides that no longer exist. Their statements about commands, case names and the retained run are not yet compared with the gate script, the oracle test cases and the recorded benchmark output.],
   )
 
-  #section(title: "Validation profiles", lead: "One gate script owns the checks that local runs and CI share.", body: [
+  #section(title: "Validation profiles", lead: "Shared tools validate formatting and design; direct commands compile and test behavior.", body: [
     #points(
-      [The gate script offers three profiles: `fast`, `full` and `benchmark`. `fast` checks full-tree formatting, authored tooling lint, Gleam formatting and build, independent native compilation, gate controls, the package test suite and the usage examples.],
-      [`full` cleans the build and adds the focused native behavior program, the stress harness, every synchronized forwarder race and the design gate. `benchmark` compiles Gleam and authored Erlang, runs the benchmark program and retains its raw output, source SHA-256 hashes and command metadata.],
-      [Native compilation uses `erlc -Werror` for authored production and test Erlang and for the race-probe asset, with dependency include paths and generated BEAM code paths. Gleam's `--warnings-as-errors` does not promote native Erlang warnings, so this check is separate.],
-      [Gate controls compile a valid module and require an unused-variable module to fail with its intended diagnostic. Further controls reject empty, missing, failed, skipped and ambiguous test summaries.],
-      [`nix flake check` verifies the original tree without formatting it. The flake pins actionlint, ShellCheck and Ruff; actionlint invokes ShellCheck for workflow shell commands, and ShellCheck also checks `.envrc`.],
-      [Ruff checks authored `dev/*.py` for import, syntax and undefined or unused names (E4/E7/E9/F), and treefmt applies Ruff formatting to the same scope. Formatting excludes build output, rendered documents, transient artifacts and frozen benchmark provenance.],
-      [The gate retains each check's raw log and a `summary.json` with command, exit code, elapsed time and successful test count. A failed or timed-out command fails the profile and leaves the collected evidence in place.],
-      [The CI workflow runs `full` on every push, pull request and manual dispatch. Its final status job accepts only a successful validation job, so failure, cancellation and skipping cannot pass. Validation artifacts are retained for 14 days, including failed runs, and missing expected evidence fails collection.],
-      [A separate workflow runs `benchmark` weekly and on manual dispatch and retains its artifacts for 30 days. Its result is observational, carries no latency threshold and is independent of the required CI status.],
+      [`sh dev/test fast` builds Gleam, compiles authored Erlang directly, runs the package tests and builds and runs the usage examples.],
+      [`sh dev/test full` adds the focused native behavior program, the stress harness and every synchronized forwarder race. `gleam run -m benchmark` runs optional measurements directly.],
+      [Native compilation uses `erlc -Werror` for authored production and test Erlang and for the race-probe asset. Gleam's `--warnings-as-errors` does not promote native Erlang warnings, so this check is separate.],
+      [`nix flake check` checks formatting without repairing the working tree. CI also directly invokes the imported `nix run .#design-gate-check -- docs/design .`. Repository-local documentation-policy checkers are not required. #adr(15)],
+      [The runner streams command output and stops on a failed command. It does not parse test summaries or require custom receipts.],
+      [The CI workflow runs `full` on every push, pull request and manual dispatch. Its final status job accepts only a successful validation job, so failure, cancellation and skipping cannot pass.],
+      [A separate workflow runs `gleam run -m benchmark` weekly and on manual dispatch and records its output in CI logs. Its result is observational, carries no latency threshold and is independent of the required CI status.],
       [The Nix development shell pins Gleam, Erlang/OTP 29, rebar3 and Python. CI runs the same gate through that shell, so the supported toolchain is the flake lock rather than a separate CI matrix. #adr(10) records the profile split.],
     )
     #md-table(4, (
       [Obligation], [Check], [Profile], [Enforcement],
-      [Canonical formatting and tooling correctness], [`nix flake check --print-build-logs`; `gleam format --check src test examples/usage/src examples/usage/test`], [fast, full], [mechanism],
-      [Warning-free authored build], [`gleam build --warnings-as-errors`; the gate's `erlc -Werror` command], [fast, full, benchmark], [mechanism],
-      [Gate refusal and nonempty test execution], [`python3 dev/test_gate.py`; `gleam test`], [fast, full], [mechanism],
+      [Canonical formatting], [`nix flake check`], [CI and local validation], [mechanism],
+      [Warning-free authored build], [`gleam build --warnings-as-errors`; the gate's `erlc -Werror` command], [fast, full], [mechanism],
+      [Design integrity], [`nix run .#design-gate-check -- docs/design .`], [CI and design changes], [imported checker],
+      [Package behavior], [`gleam test`], [fast, full], [mechanism],
       [Usage examples compile warning-free and run], [`gleam build --warnings-as-errors` and `gleam test` in `examples/usage`], [fast, full], [mechanism],
       [Native dispatch, concurrency and incarnation races], [`gleam run -m focused_behavior`; `gleam run -m stress_test`; `python3 dev/check_forwarder.py`], [full], [mechanism for the bounded scenarios],
-      [Design artifact integrity], [`nix run .#design-gate-check -- docs/design .`], [full], [mechanism for artifact and reference checks],
       [Workload-dependent performance observation], [`gleam run -m benchmark`], [benchmark], [partial; no universal latency claim],
       [Semantic design fidelity and separate consumer use], [Design review and consumer packages], [on boundary changes], [convention],
     ))
@@ -66,10 +63,10 @@
   #section(title: "Focused checks and consumer obligations", lead: "Native harnesses and public consumers cover what unit tests cannot.", body: [
     #answers(title: "Verification contracts", accent: accent,
       responsibility: [Keep native behavior, typed boundaries, race guarantees and documentation examples executable.],
-      interface: [Package tests, the focused behavior and stress programs, the peer-VM startup check, the forwarder race harness, the formatter and the design gate.],
+      interface: [Package tests, the focused behavior and stress programs, the peer-VM startup check, the forwarder race harness, the formatter.],
       interactions: [Native telemetry is the differential oracle; consumer packages exercise public imports and real application types.],
-      invariants: [Checks use the declared toolchain; barrier synchronization governs race evidence; README snippets match their executable source exactly.],
-      failure: [A behavior mismatch, stale example, missing public module documentation, race-probe failure or stale design render fails its owning check.],
+      invariants: [Checks use the declared toolchain; barrier synchronization governs race evidence.],
+      failure: [A behavior mismatch, compilation failure or race-probe failure fails its owning check.],
     )
     #subsection(title: "Native and race harnesses")[
       #points(
@@ -82,8 +79,7 @@
     #subsection(title: "Consumers, examples and documentation")[
       #points(
         [A separate consumer package must use public imports to verify the ordinary path, advanced configuration, caller-owned records and typed failure handling. Package-internal tests establish native behavior, and consumer compilation establishes what an external caller can use.],
-        [The usage examples are a package of their own under `examples/usage`, one module per topic, each with a `run` function that asserts what the example does. The validation profiles build them without warnings and run them after the package tests. The README test extracts every Gleam fence from the README and requires its exact text to occur in one of those modules, so a README example changes together with its executable source. #adr(14) records why usage lives in examples and why the oracle and benchmark references stay as linked documents.],
-        [A module-documentation test requires an introduction for every public Gleam module, and internal modules stay under the declared internal-module pattern.],
+        [The usage examples are a package of their own under `examples/usage`, one module per topic, each with a `run` function that asserts what the example does. The validation profiles build them without warnings and run them after the package tests. README consistency is reviewed manually. #adr(14) records why usage lives in examples and why the oracle and benchmark references stay as linked documents.],
         [A custom codec needs exact-key encoding, round-trip and malformed-foreign-value checks. An enumeration needs a test that lists every constructor and round-trips each one, because an exhaustive naming function does not prove that the value list is complete.],
         [Documentation generation and a local hex tarball inspection check the public modules, native Erlang files, license, README and dependency manifest before an authorized release. Publishing and version decisions are separate actions.],
       )

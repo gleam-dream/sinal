@@ -19,8 +19,8 @@ Each upstream case receives exactly one disposition:
 The comparison is a set of Sinal tests plus the upstream suite itself:
 
 ```sh
-nix develop --command python3 dev/gate.py fast      # package tests that carry the mapped checks
-nix develop --command python3 dev/gate.py full      # adds focused native, stress and forwarder race checks
+nix develop --command sh dev/test fast      # package tests that carry the mapped checks
+nix develop --command sh dev/test full      # adds focused native, stress and forwarder race checks
 cd build/upstream/telemetry && rebar3 ct            # rerun the upstream suite from a fresh checkout at the pinned revision
 ```
 
@@ -82,4 +82,4 @@ A fresh harvest of the upstream suite records its own checkout, dependencies and
 - `test/api_control_test.gleam` checks heterogeneous plans, ordered rollback, indexed cleanup, exception reporting and integer timing admission/conversion.
 - `test/correlation_test.gleam` checks UTF-8 byte bounds, stable key derivation, random identifier shape and optional/required field interoperability.
 - `test/forwarder_test.gleam`, `test/forwarder_route_test.gleam` and `dev/check_forwarder.py` check bounded admission, process placement, per-producer order, restart isolation, coalesced drop reports and route bypass. These are Sinal guarantees, not upstream telemetry case ports.
-- README snippets occur verbatim in the compiled [usage examples](../examples/usage/README.md), which run in the fast gate. The [design layer](design/design.typ) owns the present architecture.
+- README snippets relate to the compiled [usage examples](../examples/usage/README.md), which run in the fast gate. The [design layer](design/design.typ) owns the present architecture.

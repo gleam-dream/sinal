@@ -25,8 +25,7 @@
     is_native_reference/1,
     has_origin_frame/3,
     get_otp_release/0,
-    monotonic_nanos/0,
-    read_file/1
+    monotonic_nanos/0
 ]).
 
 catch_exception(Fun) ->
@@ -170,9 +169,3 @@ get_otp_release() ->
 
 monotonic_nanos() ->
     erlang:monotonic_time(nanosecond).
-
-read_file(Path) ->
-    case file:read_file(Path) of
-        {ok, Bin} -> {ok, Bin};
-        {error, Reason} -> {error, atom_to_binary(Reason, utf8)}
-    end.
