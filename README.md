@@ -1,21 +1,36 @@
-# sinal
+# Sinal
 
-Sinal emits and observes typed telemetry events on Erlang/BEAM. Measurements and metadata stay as Gleam values; Erlang and Elixir handlers receive ordinary `:telemetry` names and maps.
+Sinal gives Gleam applications typed events and observers on Erlang/BEAM. Measurements and metadata remain Gleam values in application code and become ordinary names and maps for native Erlang and Elixir `:telemetry` handlers.
 
-## Install
-
-Sinal is unreleased. In a consumer beside this checkout, add a local dependency:
+Sinal is unreleased; install it from Git:
 
 ```toml
 [dependencies]
-sinal = { path = "../sinal" }
+sinal = { git = "https://github.com/gleam-dream/sinal.git", ref = "main" }
 ```
 
-Sinal requires Gleam 1.18 or newer and telemetry 1.4.2 or a later 1.x. Telemetry is a dependency, and `attach`, `observe` and `with_subscriptions` start its OTP application when needed. The supported target is Erlang/BEAM.
+Sinal requires Gleam 1.18 or newer and `telemetry` 1.4.2 through the 1.x series. It supports the Erlang target. Resolve dependencies and commit the generated `manifest.toml` to lock the selected Git revision.
 
-## Observe an event
+## When to use it
 
-Import `sinal` and `sinal/fields`, then define an event, observe it, emit a value and detach the handler:
+Use Sinal when application or library code should report typed facts through BEAM's shared telemetry registry. It fits service instrumentation, typed observers for metrics or logging adapters, spans around local work, and correlation values carried between application layers. If callbacks would slow producers, an application can route selected events through a supervised forwarder.
+
+Sinal does not provide an exporter, metric aggregation, durable delivery, remote trace propagation, or business workflow and authorization control. Applications and adapters own those responsibilities.
+
+## Capabilities
+
+- Define events with typed measurements and metadata.
+- Encode and decode primitive, custom, optional, enum, and record fields.
+- Attach typed observers or fallible handlers to one or more events, with labels and stable handler IDs.
+- Scope a group of subscriptions around work and inspect cleanup failures.
+- Instrument work with native start, stop, and exception span events.
+- Carry bounded correlation values in optional or required metadata fields.
+- Route event-name prefixes to an optional supervised, bounded forwarder.
+
+## Define, observe, and emit
+
+Import `sinal` and `sinal/fields`, then define an event once and share it
+between producers and observers:
 
 <!-- prettier-ignore-start -->
 
@@ -41,73 +56,26 @@ pub fn observe_request_example() {
 
 <!-- prettier-ignore-end -->
 
-An `Event(measurements, metadata)` binds a native event name to two field codecs. `observe` returns an `Attachment` with a fresh handler id. Reuse the event definition in producers and observers.
+`Event(measurements, metadata)` pairs the native event name with two `Fields` codecs. Record codecs use named field bindings and explicit getters. See the [record and enum example](examples/usage/src/usage/records.gleam) for the compiled round-trip check.
 
-Without a matching route, handlers run in the emitting process before `emit` returns. Native telemetry removes a handler whose callback raises and emits `[telemetry, handler, failure]`; a malformed native map skips one invocation and keeps the handler.
+## How dispatch works
 
-Event names and field keys become permanent atoms, so write them in source code and never build them from input. Each segment matches `[a-z][a-z0-9_]{0,62}`, and an invalid definition panics at construction.
+The event definition and codecs allocate no process. Sinal encodes values as native maps, then native telemetry selects and invokes the registered handlers. Unrouted callbacks run inline; prefix routing hands an occurrence to the chosen forwarder before the forwarder invokes handlers.
 
-## Records and enums
-
-A record codec binds decoded fields by name with `fields.include` and builds the record with `fields.success`:
-
-<!-- prettier-ignore-start -->
-
-<!-- snips: examples/usage/src/usage/records.gleam#records-and-enums -->
-```gleam
-pub type HttpMeasurements {
-  HttpMeasurements(duration_ms: Int, bytes_sent: Int)
-}
-
-pub type Method {
-  Get
-  Post
-}
-
-pub type HttpMetadata {
-  HttpMetadata(method: Method, route: String, status: Int)
-}
-
-pub fn http_request_event() -> sinal.Event(HttpMeasurements, HttpMetadata) {
-  let measurements = {
-    use duration_ms <- fields.include(fields.int("duration_ms"), get: fn(m) {
-      m.duration_ms
-    })
-    use bytes_sent <- fields.include(fields.int("bytes_sent"), get: fn(m) {
-      m.bytes_sent
-    })
-    fields.success(HttpMeasurements(duration_ms:, bytes_sent:))
-  }
-
-  let metadata = {
-    use method <- fields.include(
-      fields.enum("method", [Get, Post], method_name),
-      get: fn(m) { m.method },
-    )
-    use route <- fields.include(fields.string("route"), get: fn(m) { m.route })
-    use status <- fields.include(fields.int("status"), get: fn(m) { m.status })
-    fields.success(HttpMetadata(method:, route:, status:))
-  }
-
-  sinal.event(["http", "server", "request"], measurements, metadata)
-}
-
-fn method_name(method: Method) -> String {
-  case method {
-    Get -> "get"
-    Post -> "post"
-  }
-}
-
+```mermaid
+flowchart LR
+    P[Producer] --> E{emit}
+    E -->|unrouted| N1[Native :telemetry]
+    N1 --> H1[Typed handler<br/>producer process]
+    E -->|routed prefix| F[Supervised bounded forwarder]
+    F --> N2[Native :telemetry]
+    N2 --> H2[Typed handler<br/>forwarder process]
 ```
 
-<!-- prettier-ignore-end -->
-
-An exhaustive naming function does not prove that an enum's value list is complete, so test every constructor with `fields.check`, `fields.encode` and `fields.decode`.
-
-## Forwarding
-
-An application can move handler execution into a supervised forwarder and route an event-name prefix to it once at startup:
+Applications supervise and configure forwarders at startup. This excerpt from the
+[forwarding example](examples/usage/src/usage/forwarding.gleam) uses
+`gleam/erlang/process`, `gleam/otp/static_supervisor`, and `sinal/forwarder` to route
+a library's event prefix:
 
 <!-- prettier-ignore-start -->
 
@@ -128,10 +96,13 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 
 <!-- prettier-ignore-end -->
 
-A full or unavailable forwarder drops and counts the event and never falls back to inline execution. Forwarding is best effort and gives no delivery receipt.
+## Operational limits
 
-## More
+- Event-name segments, field keys, and route prefixes become permanent BEAM atoms. Keep them in source code; never build them from request or user input.
+- Without a route, observers run synchronously in the emitting process and can delay it. A malformed native map skips one callback and reports a typed failure; a fallible handler that returns an error is removed by native telemetry.
+- Forwarding is best effort. Its default capacity is 1,024 events, queued plus executing. A full or unavailable forwarder drops and counts an event; it does not retry, fall back to inline execution, or provide a delivery receipt. Pending events can be lost at shutdown.
+- Forwarded handlers run in the forwarder process, without the producer's process-local context. Native spans stay in one process and ignore routes.
 
-The snippets above come from [compiled, runnable examples](examples/usage/README.md) that also cover fallible handlers with stable ids, subscription scopes, spans, correlation values and a package-owned forwarder; the fast gate runs them, so they match the library. The public modules document the full API: [events and subscriptions](src/sinal.gleam), [fields](src/sinal/fields.gleam), [correlation](src/sinal/correlation.gleam), [spans](src/sinal/span.gleam) and [forwarding](src/sinal/forwarder.gleam).
+## Examples and reference
 
-The [design](docs/design/design.typ), its [context map](docs/CONTEXT-MAP.md), [coverage](docs/COVERAGE.md) and [decisions](docs/adr/0001-dispatch-through-the-shared-native-telemetry-registry.md) describe the maintained contracts and their rationale. The [native telemetry oracle](docs/ORACLE.md) pins the reference that behavior is compared against, and the [benchmarks](docs/BENCHMARKS.md) record local measurements. Commands for development and validation are in [AGENTS.md](AGENTS.md).
+The [compiled usage examples](examples/usage/README.md) cover handlers, scopes, spans, correlation, and forwarding. See the API docs for [events and subscriptions](src/sinal.gleam), [field codecs](src/sinal/fields.gleam), [correlation](src/sinal/correlation.gleam), [spans](src/sinal/span.gleam), and [forwarding](src/sinal/forwarder.gleam). The [design](docs/design/design-layer.pdf) documents ownership and contracts; [benchmark notes](docs/BENCHMARKS.md) record a dated local run and its limits.
