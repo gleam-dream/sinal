@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+profile=${1:-fast}
+case "$profile" in fast|full) ;; *) echo 'Usage: sh dev/test fast|full' >&2; exit 2;; esac
+gleam build --warnings-as-errors
+mkdir -p build/native
+cp dev/restart_probe_ffi.erl.txt build/native/restart_probe_ffi.erl
+ERL_LIBS="$PWD/build/dev/erlang" erlc -Werror -o build/native src/*.erl test/*.erl build/native/restart_probe_ffi.erl
+gleam test
+(cd examples/usage && gleam build --warnings-as-errors && gleam test)
+if [ "$profile" = full ]; then
+  gleam run -m focused_behavior
+  gleam run -m stress_test
+  python3 dev/check_forwarder.py
+fi

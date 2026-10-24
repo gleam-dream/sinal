@@ -1,0 +1,10 @@
+-module(restart_probe_ffi).
+-export([set_drop_gate/1, before_drop/0, set_start_gate/1, set_send_gate/1, before_start/0, before_send/0, message_queue_len/1]).
+set_start_gate(F) -> persistent_term:put(restart_probe_start, F), nil.
+set_send_gate(F) -> persistent_term:put(restart_probe_send, F), nil.
+before_start() -> (persistent_term:get(restart_probe_start, fun() -> nil end))().
+before_send() -> (persistent_term:get(restart_probe_send, fun() -> nil end))().
+message_queue_len(Pid) -> {message_queue_len, Len} = process_info(Pid, message_queue_len), Len.
+
+set_drop_gate(F) -> persistent_term:put(restart_probe_drop, F), nil.
+before_drop() -> (persistent_term:get(restart_probe_drop, fun() -> nil end))().

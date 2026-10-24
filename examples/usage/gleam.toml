@@ -1,0 +1,14 @@
+name = "sinal_usage"
+version = "0.0.0"
+target = "erlang"
+gleam = ">= 1.18.0"
+description = "Compiled, runnable usage examples for sinal."
+
+[dependencies]
+sinal = { path = "../.." }
+gleam_stdlib = ">= 0.70.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+gleam_otp = ">= 1.0.0 and < 2.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
