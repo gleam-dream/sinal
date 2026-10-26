@@ -2,14 +2,13 @@
 
 Sinal gives Gleam applications typed events and observers on Erlang/BEAM. Measurements and metadata remain Gleam values in application code and become ordinary names and maps for native Erlang and Elixir `:telemetry` handlers.
 
-Sinal is unreleased; install it from Git:
+Install Sinal from Hex:
 
-```toml
-[dependencies]
-sinal = { git = "https://github.com/gleam-dream/sinal.git", ref = "main" }
+```sh
+gleam add sinal
 ```
 
-Sinal requires Gleam 1.18 or newer and `telemetry` 1.4.2 through the 1.x series. It supports the Erlang target. Resolve dependencies and commit the generated `manifest.toml` to lock the selected Git revision.
+Sinal requires Gleam 1.18 or newer and `telemetry` 1.4.2 through the 1.x series. It supports the Erlang target. Commit `gleam.toml` and `manifest.toml` to retain the resolved versions.
 
 ## When to use it
 
