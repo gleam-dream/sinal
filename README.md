@@ -1,5 +1,9 @@
 # Sinal
 
+[![CI](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml)
+[![sinal on Hex](https://img.shields.io/hexpm/v/sinal?label=Hex%3A%20sinal)](https://hex.pm/packages/sinal)
+[![Gleam](https://img.shields.io/badge/Gleam-FFAFF3?logo=gleam&logoColor=000000)](https://gleam.run/)
+
 Sinal gives Gleam applications typed events and observers on Erlang/BEAM. Measurements and metadata remain Gleam values in application code and become ordinary names and maps for native Erlang and Elixir `:telemetry` handlers.
 
 Install Sinal from Hex:

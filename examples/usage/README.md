@@ -1,5 +1,9 @@
 # Sinal usage examples
 
+[![CI](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml)
+[![sinal on Hex](https://img.shields.io/hexpm/v/sinal?label=Hex%3A%20sinal)](https://hex.pm/packages/sinal)
+[![Gleam](https://img.shields.io/badge/Gleam-FFAFF3?logo=gleam&logoColor=000000)](https://gleam.run/)
+
 Compiled and run examples of the public API. Each module under `src/usage/` shows one topic and has a `run` function that checks what the example does, so a change to the library that breaks an example fails the gate.
 
 | Module                        | Shows                                                                       |
