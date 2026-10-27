@@ -16,7 +16,7 @@ Sinal requires Gleam 1.18 or newer and `telemetry` 1.4.2 through the 1.x series.
 
 ## When to use it
 
-Use Sinal when application or library code should report typed facts through BEAM's shared telemetry registry. It fits service instrumentation, typed observers for metrics or logging adapters, spans around local work, and correlation values carried between application layers. If callbacks would slow producers, an application can route selected events through a supervised forwarder.
+Use Sinal to report typed facts through BEAM's shared telemetry registry: service instrumentation, typed observers for metrics or logging adapters, spans around local work, and correlation values between application layers. Applications can route selected events through a supervised forwarder when callbacks would slow producers.
 
 Sinal does not provide an exporter, metric aggregation, durable delivery, remote trace propagation, or business workflow and authorization control. Applications and adapters own those responsibilities.
 
