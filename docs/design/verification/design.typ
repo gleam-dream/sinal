@@ -23,7 +23,7 @@
       [Native compilation uses `erlc -Werror` for authored production and test Erlang and for the race-probe asset. Gleam's `--warnings-as-errors` does not promote native Erlang warnings, so this check is separate.],
       [`nix flake check` checks formatting without repairing the working tree. CI also directly invokes the imported `nix run .#design-gate-check -- docs/design .`. Shared pinned Snips synchronizes README excerpts from compiled and tested usage examples. Bespoke README equality and repository-local documentation-policy checkers remain removed. #adr(15)],
       [The runner streams command output and stops on a failed command. It does not parse test summaries or require custom receipts.],
-      [The CI workflow runs `full` on every push, pull request and manual dispatch. Its final status job accepts only a successful validation job, so failure, cancellation and skipping cannot pass.],
+      [The CI workflow runs `full` on pushes to `main`, pull requests and manual dispatch. Its final status job accepts only a successful validation job, so failure, cancellation and skipping cannot pass.],
       [A separate workflow runs `gleam run -m benchmark` weekly and on manual dispatch and records its output in CI logs. Its result is observational, carries no latency threshold and is independent of the required CI status.],
       [The Nix development shell pins Gleam, Erlang/OTP 29, rebar3 and Python. CI runs the same gate through that shell, so the supported toolchain is the flake lock rather than a separate CI matrix. #adr(10) records the profile split.],
     )
