@@ -371,8 +371,13 @@ reviews:
       enabled: true
     ruff:
       enabled: true
-    # The repository runs no JavaScript, Markdown, YAML or prose linter; their
-    # findings would be preferences without a written rule (policy, Silence).
+    # Ruff is the repository's Python linter (ruff.toml). It runs no other
+    # Python, JavaScript, Markdown, YAML or prose linter; their findings would
+    # be preferences without a written rule (policy, Silence).
+    pylint:
+      enabled: false
+    flake8:
+      enabled: false
     biome:
       enabled: false
     eslint:
