@@ -138,9 +138,11 @@ reviews:
           that makes callers repeat an event name or its codecs at each use, a
           setter per field where a record update works, and two public paths
           for one common task.
-        - Flag configuration validated after a resource is allocated, such as
-          forwarder capacity checked after the process starts, and a builder
-          or extension protocol with no distinct use case.
+        - Flag configuration validated after a resource is allocated, and a
+          builder or extension protocol with no distinct use case. The
+          forwarder's capacity check in its supervised initializer, before
+          the target is published, is the path the forwarding design
+          specifies; do not flag it.
         - Flag a dynamic dispatcher over heterogeneous parameters where typed
           operations can be bound.
         - Flag a deliberate crash on a failure the caller could act on; return
@@ -317,25 +319,32 @@ reviews:
           loosens a test, a native oracle case, a race scenario of
           dev/check_forwarder.py or a step of dev/test or CI (including
           removing a step from the `full` profile, dropping the usage
-          examples, or adding `continue-on-error`), and the pull request
-          description does not name the behavior that no longer exists or the
-          stronger check that replaces it. Pass otherwise.
+          examples, or setting `continue-on-error` to true or an
+          expression), and the pull request description does not name the
+          behavior that no longer exists or the stronger check that replaces
+          it. Pass otherwise.
       - name: Behavior change carries its design
         mode: warning
         instructions: |
           Source: policy, design. Warn if the diff changes public behavior or
-          an invariant in src/ with no change under docs/design or docs/adr,
-          and the pull request description does not say the change restores
-          designed behavior or preserves behavior. Pass for tests, tooling and
-          documentation-only changes.
+          an invariant in src/ and does not change the design unit that owns
+          the changed part. docs/COVERAGE.md names each part's design
+          destination; an edit to another unit or to an unrelated ADR does
+          not count. Pass when the diff restores or preserves the behavior
+          the owning unit already states and the pull request description
+          says so. Pass for tests, tooling and documentation-only changes.
       - name: Breaking change is declared
         mode: warning
         instructions: |
           Source: policy, gleam-lib. Warn if the diff removes or changes an
-          exported function, type, constructor, field or module path in a
-          module outside `sinal/internal`, and the pull request description
-          does not call the change breaking and give its migration. Pass
-          otherwise.
+          exported function, type, constructor, field, constant (such as
+          `sinal/forwarder.default_capacity`) or module path in a module
+          outside `sinal/internal`, or changes what a caller of a public
+          module observes (a result, an error, an ordering, an effect or a
+          default) in whichever module the change is made, and the pull
+          request description does not call the change breaking and give its
+          migration. Pass for an implementation change no caller can observe,
+          and for a fix that restores behavior the design already states.
       - name: Problem-first description
         mode: warning
         instructions: |
