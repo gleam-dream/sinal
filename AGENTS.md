@@ -27,6 +27,13 @@
 - Synchronization barriers, not sleeps, establish race ordering in tests.
 - Benchmark output is observation; no test asserts a latency threshold.
 
+## Releasing
+
+- `scripts/release <version>` opens the version-bump pull request from a clean, current `main`. It never tags and never publishes.
+- After the merge, tag the merge commit `v<version>` and push the tag. The `Release` workflow uploads the package to Hex, where it stays staged.
+- A release becomes public only when a Hex maintainer approves it on hex.pm with a second factor. An agent stops after pushing the tag and reports that the release waits for approval.
+- Push a release tag only on an explicit request that names the version. The steps and the way to undo a release are in the [shared workflow's README](https://github.com/gleam-dream/.github#publishing-a-package-to-hex).
+
 ## References
 
 - [docs/ORACLE.md](docs/ORACLE.md): the pinned native `telemetry` 1.4.2 reference that Sinal's native behavior is compared against, with the case mapping, deliberate differences and how to rerun it.
