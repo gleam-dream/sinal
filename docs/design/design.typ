@@ -64,6 +64,7 @@
         [subscription/plan], [Bind typed callbacks and validate selected names], [Retain closures only; no installed registry state.],
         [attach], [Select native identity; ensure the sinal and telemetry applications; call the janitor], [The janitor mutates the registry and monitors the calling process as owner; the owner's exit detaches. A failed reply can leave uncertain mutation.],
         [emit], [Check enums, encode both native maps, select route], [Inline native dispatch or one admission/send attempt; no delivery receipt.],
+        [collector.supervised], [Validate capacity; create the bounded store], [Attach each source not already attached; entries are written later by handlers.],
         [with_subscriptions], [Acquire complete known plan], [Work runs, then cleanup; separate work and cleanup outcomes.],
         [span.run], [Encode start metadata], [Start, work, completion encoding, terminal observation and return/re-raise in one process.],
         [forwarder.new/supervised], [Obtain stable name counters; validate startup settings], [Publish incarnation target only after initialization; handlers execute later.],
@@ -108,7 +109,7 @@
       #points(
         [Erlang/BEAM is the supported target; JavaScript is unsupported (#adr(12)) because the boundary uses native telemetry, maps, references, OTP processes, ETS, atomics and persistent_term. The package requires Gleam 1.18 or newer and supports telemetry 1.4.2 through later 1.x releases under the declared dependency range.],
         [Handler registry and routes belong to one node. Atom definitions and name-wide diagnostic counters can remain for its lifetime; attachment closure retention lasts until native removal, while queued event terms remain until dispatch or process death.],
-        [No event payload size, native-map size, route-count, handler-count, capture-size or collector-history limit is enforced. Only correlation bytes, definition spelling and forwarder occurrence count have the explicit bounds described here.],
+        [No event payload size, native-map size, route-count, handler-count or capture-size limit is enforced, and an application's own collector has no history limit unless it uses the bounded collector. Only correlation bytes, definition spelling and forwarder occurrence count have the explicit bounds described here.],
         [Security depends on source-trusted atom definitions and safe caller metadata. Native failure configuration exposes closures, and arbitrary exception terms can contain application details; exporters must select and redact safe fields under their own contract.],
         [Native telemetry's handler-table persistence is an in-memory runtime optimization rather than storage durability. There is no persistence adapter, transaction log or node-restart recovery layer to model; #adr(13) leaves export and persistence to integrations.],
       )

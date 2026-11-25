@@ -14,6 +14,7 @@ Compiled, runnable public API examples. Each module under `src/usage/` covers on
 | `usage/scopes.gleam`          | Subscriptions that exist only while work runs                               |
 | `usage/spans.gleam`           | A native span around a unit of work                                         |
 | `usage/forwarding.gleam`      | Prefix routing to a supervised forwarder and a package-owned forwarder      |
+| `usage/collecting.gleam`      | A bounded collector of recent entries and an all-or-nothing handler group   |
 | `usage/correlation_ids.gleam` | Optional and required correlation values                                    |
 
 Run from this directory:
