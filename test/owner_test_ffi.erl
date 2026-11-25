@@ -12,7 +12,10 @@
     attach_native/3,
     forward/4,
     native_attached/1,
-    detach_native/1
+    detach_native/1,
+    suspend/1,
+    await_attach_received/2,
+    resume/1
 ]).
 
 %% The pid of sinal's janitor, registered under the name `sinal_janitor`.
@@ -92,3 +95,29 @@ native_attached(Id) ->
 detach_native(Id) ->
     _ = telemetry:detach(Id),
     nil.
+
+%% Suspends Pid, an OTP process: it handles no message until `resume`.
+suspend(Pid) ->
+    ok = sys:suspend(Pid),
+    nil.
+
+resume(Pid) ->
+    ok = sys:resume(Pid),
+    nil.
+
+%% Blocks until Pid, traced by the caller, has received an attach request
+%% for Owner (sent to the janitor's name, so tagged with it), then stops
+%% tracing it. Trace messages of earlier requests are skipped.
+await_attach_received(Pid, Owner) ->
+    Result =
+        receive
+            {trace, Pid, 'receive', {sinal_janitor, {attach, Owner, _, _, _}}} -> {ok, nil}
+        after 5000 ->
+            {error, nil}
+        end,
+    try erlang:trace(Pid, false, ['receive']) of
+        _ -> ok
+    catch
+        error:badarg -> ok
+    end,
+    Result.

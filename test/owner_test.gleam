@@ -3,6 +3,7 @@
 
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Pid}
+import gleam/string
 import gleeunit/should
 import sinal
 import sinal/fields
@@ -38,6 +39,23 @@ fn native_attached(id: String) -> Bool
 
 @external(erlang, "owner_test_ffi", "detach_native")
 fn detach_native(id: String) -> Nil
+
+@external(erlang, "owner_test_ffi", "suspend")
+fn suspend(pid: Pid) -> Nil
+
+@external(erlang, "owner_test_ffi", "await_attach_received")
+fn await_attach_received(pid: Pid, owner: Pid) -> Result(Nil, Nil)
+
+@external(erlang, "owner_test_ffi", "resume")
+fn resume(pid: Pid) -> Nil
+
+type Captured(a) {
+  Returned(a)
+  Raised(Dynamic)
+}
+
+@external(erlang, "sinal_janitor_ffi", "capture")
+fn capture(work: fn() -> a) -> Captured(a)
 
 @external(erlang, "erlang", "binary_to_atom")
 fn atom(name: String) -> Dynamic
@@ -301,4 +319,73 @@ pub fn an_exited_owner_leaves_a_native_handler_that_reused_its_id_alone_test() {
 
   native_attached(id) |> should.be_true
   detach_native(id)
+}
+
+// A janitor that answers late must not turn an attach into a failure that
+// the janitor later undoes by installing the handler anyway: the scope
+// waits for the answer, so its outcome and the handler table agree.
+pub fn a_scope_waits_for_a_slow_janitor_and_leaves_no_handler_test() {
+  let event =
+    sinal.event(["owner_test", "slow_janitor"], fields.int("n"), fields.empty())
+  let seen = process.new_subject()
+  let first =
+    counting(event, seen) |> sinal.with_id("owner_test_slow_janitor_first")
+  let second =
+    counting(event, seen) |> sinal.with_id("owner_test_slow_janitor_second")
+  let assert Ok(janitor) = janitor()
+  suspend(janitor)
+  let reported = process.new_subject()
+  let scope =
+    process.spawn_unlinked(fn() {
+      let outcome =
+        capture(fn() {
+          sinal.with_subscriptions(sinal.subscriptions([first, second]), fn() {
+            Nil
+          })
+        })
+      process.send(reported, outcome)
+      process.sleep_forever()
+    })
+  // Longer than any fixed wait for the janitor's answer.
+  process.sleep(5500)
+  resume(janitor)
+  let assert Ok(outcome) = process.receive(reported, 5000)
+  sync(janitor)
+
+  case outcome {
+    Returned(Ok(_)) -> Nil
+    _ -> panic as "the scope did not complete"
+  }
+  native_attached("owner_test_slow_janitor_first") |> should.be_false
+  native_attached("owner_test_slow_janitor_second") |> should.be_false
+  process.kill(scope)
+}
+
+// The janitor exits while an attach waits for it: the attach fails and
+// leaves no handler.
+pub fn an_attach_fails_without_a_handler_when_the_janitor_exits_test() {
+  let event =
+    sinal.event(["owner_test", "lost_janitor"], fields.int("n"), fields.empty())
+  let seen = process.new_subject()
+  let subscription =
+    counting(event, seen) |> sinal.with_id("owner_test_lost_janitor")
+  let assert Ok(old_janitor) = janitor()
+  trace_receives(old_janitor)
+  suspend(old_janitor)
+  let reported = process.new_subject()
+  let attacher =
+    process.spawn_unlinked(fn() {
+      process.send(reported, capture(fn() { sinal.attach(subscription) }))
+      process.sleep_forever()
+    })
+  let assert Ok(Nil) = await_attach_received(old_janitor, attacher)
+  kill_and_await(old_janitor)
+  let assert Ok(outcome) = process.receive(reported, 5000)
+
+  case outcome {
+    Raised(_) -> Nil
+    Returned(r) -> panic as { "the attach did not fail: " <> string.inspect(r) }
+  }
+  native_attached("owner_test_lost_janitor") |> should.be_false
+  process.kill(attacher)
 }

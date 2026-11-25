@@ -1,6 +1,6 @@
 -module(sinal_janitor_ffi).
 
--export([capture/1, reraise/1, name/0, owned_handlers/0, detach_held/2, await_restart/0]).
+-export([capture/1, reraise/1, name/0, send/2, owned_handlers/0, holder/1, detach_held/2, await_restart/0]).
 
 %% Runs Work and returns its value, or the class, reason and stacktrace of
 %% the error, exit or throw it raised.
@@ -37,28 +37,43 @@ owned_handlers() ->
             ])
     end.
 
+%% The owner named in the native config of sinal handler Id, if one is
+%% attached under Id.
+holder(Id) ->
+    Handle = fun sinal_ffi:handle/4,
+    Handlers =
+        case whereis(telemetry_handler_table) of
+            undefined -> [];
+            _ -> telemetry:list_handlers([])
+        end,
+    case
+        [
+            Owner
+         || #{id := HandlerId, function := Function, config := {sinal_owner, Owner, _}}
+                <- Handlers,
+            HandlerId =:= Id,
+            Function =:= Handle
+        ]
+    of
+        [Owner | _] -> {ok, Owner};
+        [] -> {error, nil}
+    end.
+
 %% Detaches handler Id only when it is a sinal handler that Owner holds.
 %% Telemetry removes a failing handler without telling the janitor, and
 %% another caller may then attach under the same id; telemetry detaches
 %% by id alone, so the native config is checked first.
 detach_held(Id, Owner) ->
-    Handle = fun sinal_ffi:handle/4,
-    Held = lists:any(
-        fun
-            (#{id := HandlerId, function := Function, config := {sinal_owner, HandlerOwner, _}}) ->
-                HandlerId =:= Id andalso Function =:= Handle andalso HandlerOwner =:= Owner;
-            (_) ->
-                false
-        end,
-        case whereis(telemetry_handler_table) of
-            undefined -> [];
-            _ -> telemetry:list_handlers([])
-        end
-    ),
-    case Held of
-        true -> sinal_ffi:telemetry_detach(Id);
-        false -> {error, nil}
+    case holder(Id) of
+        {ok, Owner} -> sinal_ffi:telemetry_detach(Id);
+        _ -> {error, nil}
     end.
+
+%% Sends Message to janitor process Pid as a message to its name, so the
+%% request reaches that incarnation and no later one.
+send(Pid, Message) ->
+    Pid ! {name(), Message},
+    nil.
 
 %% Called while the janitor is not registered. Starts the sinal application
 %% when it is not running (which starts the janitor), then makes one call to

@@ -364,8 +364,10 @@ pub fn with_label(subscription: Subscription, label: String) -> Subscription {
 /// to the new owner.
 ///
 /// Attaching is a call to the janitor, which starts the `sinal` and
-/// `telemetry` applications when they are not running. It panics when the
-/// janitor does not answer within five seconds.
+/// `telemetry` applications when they are not running. It waits for the
+/// janitor's answer with no deadline, so an attach that returns or panics
+/// has settled: no handler is installed later for it. It panics, leaving no
+/// handler, when the janitor exits before answering.
 pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
   let Subscription(id:, label:, install:) = subscription
   let raw_id = case id, label {

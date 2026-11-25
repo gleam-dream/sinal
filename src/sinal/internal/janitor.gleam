@@ -70,6 +70,12 @@ fn name() -> process.Name(Message)
 @external(erlang, "sinal_janitor_ffi", "owned_handlers")
 fn owned_handlers() -> List(#(Pid, Dynamic))
 
+@external(erlang, "sinal_janitor_ffi", "send")
+fn send(janitor: Pid, message: Message) -> Nil
+
+@external(erlang, "sinal_janitor_ffi", "holder")
+fn holder(id: Dynamic) -> Result(Pid, Nil)
+
 /// Detaches handler `id` only when its native config names `owner`.
 @external(erlang, "sinal_janitor_ffi", "detach_held")
 fn detach_held(id: Dynamic, owner: Pid) -> Result(Nil, Nil)
@@ -77,7 +83,8 @@ fn detach_held(id: Dynamic, owner: Pid) -> Result(Nil, Nil)
 @external(erlang, "sinal_janitor_ffi", "await_restart")
 fn await_restart() -> Nil
 
-const call_timeout = 5000
+/// How long the janitor may take to start.
+const init_timeout = 5000
 
 /// How many times a registration waits for a janitor that is being
 /// restarted before it gives up.
@@ -89,7 +96,7 @@ pub fn supervised() -> supervision.ChildSpecification(Nil) {
 }
 
 fn start() -> Result(actor.Started(Nil), actor.StartError) {
-  actor.new_with_initialiser(call_timeout, fn(subject) {
+  actor.new_with_initialiser(init_timeout, fn(subject) {
     // The actor registers its name before this runs. A registration made
     // from now on either reaches this incarnation as a message, or was
     // installed earlier and is in the table read here.
@@ -229,32 +236,54 @@ fn drop(state: State, id: Dynamic) -> State {
 /// `release` came first. `install` returns `Error(Nil)` when the id is
 /// taken; an exception it raises is re-raised here.
 ///
+/// Waits for the janitor's answer with no deadline: a request the janitor
+/// can still apply never outlives the caller's decision, so a failed attach
+/// leaves no handler. The janitor is a local supervised process, so either
+/// its answer comes or it exits. When it exits first, a handler it installed
+/// for this request is detached and the attach panics.
+///
 /// Starts sinal's application when it is not running. Panics when the
-/// janitor does not answer within five seconds, or does not come back
-/// after a restart.
+/// janitor does not come back after a restart.
 pub fn attach(
   owner owner: Pid,
   id id: Dynamic,
   install install: fn() -> Result(Nil, Nil),
 ) -> Result(Nil, Nil) {
-  await_running(restart_attempts)
-  let installation =
-    process.call(process.named_subject(name()), call_timeout, Attach(
-      owner,
-      id,
-      install,
-      _,
-    ))
-  case installation {
-    Installed -> Ok(Nil)
-    Refused -> Error(Nil)
-    InstallRaised(exception) -> reraise(exception)
+  let janitor = await_running(restart_attempts)
+  let held_before = holder(id) == Ok(owner)
+  let reply = process.new_subject()
+  let monitor = process.monitor(janitor)
+  send(janitor, Attach(owner:, id:, install:, reply:))
+  let answer =
+    process.new_selector()
+    |> process.select_map(reply, Ok)
+    |> process.select_specific_monitor(monitor, fn(_) { Error(Nil) })
+    |> process.selector_receive_forever
+  case answer {
+    Ok(installation) -> {
+      process.demonitor_process(monitor)
+      case installation {
+        Installed -> Ok(Nil)
+        Refused -> Error(Nil)
+        InstallRaised(exception) -> reraise(exception)
+      }
+    }
+    Error(Nil) -> {
+      case held_before {
+        True -> Nil
+        False -> {
+          let _ = detach_held(id, owner)
+          Nil
+        }
+      }
+      panic as "sinal: the janitor exited before answering an attach"
+    }
   }
 }
 
-fn await_running(attempts: Int) -> Nil {
+fn await_running(attempts: Int) -> Pid {
   case process.named(name()) {
-    Ok(_) -> Nil
+    Ok(janitor) -> janitor
     Error(Nil) if attempts > 0 -> {
       await_restart()
       await_running(attempts - 1)
