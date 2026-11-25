@@ -3,6 +3,7 @@ import usage/correlation_ids
 import usage/forwarding
 import usage/handlers
 import usage/observe
+import usage/owned
 import usage/records
 import usage/scopes
 import usage/spans
@@ -13,6 +14,10 @@ pub fn main() -> Nil {
 
 pub fn observe_test() {
   observe.run()
+}
+
+pub fn owned_test() {
+  owned.run()
 }
 
 pub fn records_test() {
