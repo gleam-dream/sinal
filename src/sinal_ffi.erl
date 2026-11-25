@@ -22,7 +22,8 @@
     is_decoding/0,
     decoding/1,
     log_warning/1,
-    count_diagnostic/2
+    count_diagnostic/2,
+    diagnostics/0
 ]).
 
 identity(X) ->
@@ -214,3 +215,15 @@ count_diagnostic(Kind, Name) ->
                 Existing
         end,
     atomics:add_get(Counter, 1, 1).
+
+%% Every diagnostic counter with its current total, sorted by event name and
+%% then kind. Reading scans the node's persistent terms; it is meant for an
+%% occasional poll, not a hot path.
+diagnostics() ->
+    [
+        {Kind, Name, Total}
+     || {Name, Kind, Total} <- lists:sort([
+            {Name, Kind, atomics:get(Counter, 1)}
+         || {{sinal_diagnostic, Kind, Name}, Counter} <- persistent_term:get()
+        ])
+    ].

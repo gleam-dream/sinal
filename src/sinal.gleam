@@ -35,7 +35,7 @@
 //// still stop the executing process. A native map that does not decode
 //// skips that one invocation: the handler's failure
 //// observer receives the typed `HandlerFailure` (`observe` reports it as
-//// a coalesced diagnostic: one warning, then `diagnostic_event`), and
+//// a diagnostic: one warning, then a count in `diagnostics`), and
 //// the handler stays attached when failure reporting returns normally.
 //// A handler that returns an error or crashes
 //// is removed, and telemetry emits its standard
@@ -174,19 +174,14 @@ pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
   emit.dispatch(event.name, raw_measurements, raw_metadata)
 }
 
-/// The `[sinal, diagnostic, occurred]` event that reports sinal's own
-/// diagnostics: an emitted value missing from its `fields.enum` list, and
-/// an `observe` or `subscription` invocation skipped because a native map
-/// did not decode. It is emitted in the process that hit the condition,
-/// when the count for that condition and event name reaches 1, 2, 4 and
-/// each later power of two; `sinal/diagnostic` states the schedule and its
-/// limits. It is synchronous and never routed.
-pub fn diagnostic_event() -> Event(diagnostic.Count, diagnostic.Report) {
-  event(
-    diagnostic.event_name,
-    diagnostic.count_fields(),
-    diagnostic.report_fields(),
-  )
+/// Every diagnostic condition that occurred on this node, with its exact
+/// total: an emitted value missing from its `fields.enum` list, and an
+/// `observe` or `subscription` invocation skipped because a native map did
+/// not decode. Each condition logs one warning the first time it occurs for
+/// an event name; this function reads the counts of every later one.
+/// Reading does not reset them. `sinal/diagnostic` states the limits.
+pub fn diagnostics() -> List(diagnostic.Diagnostic) {
+  diagnostic.all()
 }
 
 /// A registered handler, bound to the process that attached it. Keep it to
@@ -231,8 +226,8 @@ pub opaque type Subscription {
 /// The handler belongs to the calling process, as `attach` describes. It
 /// runs in the emitting process (or the forwarder's, for a routed event). A
 /// native map that does not decode skips that one invocation and reports a
-/// `SkippedInvocation` diagnostic (one warning for the event name, then
-/// `diagnostic_event`); the handler stays attached. A handler
+/// `SkippedInvocation` diagnostic (one warning for the event name, then a
+/// count in `diagnostics`); the handler stays attached. A handler
 /// crash removes it and emits telemetry's `[telemetry, handler, failure]`
 /// event.
 pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
@@ -270,8 +265,8 @@ fn install_fresh(subscription: Subscription, caller: String) -> Attachment {
 /// Describes an infallible handler of one event. When a native map does
 /// not decode, the handler skips that one invocation, stays attached, and
 /// reports a `SkippedInvocation` diagnostic that names the event and the
-/// `HandlerFailure`: a warning the first time for that event name, and
-/// `diagnostic_event` on the coalesced schedule of `sinal/diagnostic`.
+/// `HandlerFailure`: a warning the first time for that event name, and a
+/// count of every occurrence that `diagnostics` reads.
 pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
   handler(
     [event],

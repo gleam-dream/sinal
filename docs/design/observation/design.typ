@@ -186,7 +186,7 @@
         #when[the caller emits that value]
         #then[the encoded name remains available to native observers]
         #then[the first such occurrence for the event name logs an incompatibility warning naming the event and field]
-        #then[every occurrence is counted and reported by the diagnostic event on its coalesced schedule]
+        #then[every occurrence is counted, and `diagnostics` reads the exact total]
         #then[a typed observer reports malformed input and remains installed if its failure observer returns normally]
       ]
       #points(
@@ -198,7 +198,7 @@
   #section(title: "Native dispatch and registration", lead: "The native registry selects callbacks; Sinal selects and decodes their typed definition.", body: [
     #answers(title: "Native dispatch contracts", accent: accent,
       responsibility: [Translate typed values to native maps and bind selected definitions to installed callbacks.],
-      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach`, `diagnostic_event` and failure descriptions.],
+      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach`, `diagnostics` and failure descriptions.],
       interactions: [The native telemetry registry runs exported sinal_ffi:handle/4 with `{sinal_owner, Owner, Callback}` as configuration; the janitor installs every registration. Routes optionally change the dispatch process.],
       invariants: [Selected event names are distinct inside one handler; one native identifier names one registration at a time; measurement decoding precedes metadata decoding and handler invocation.],
       failure: [Malformed input skips one invocation; returned handler error or callback exception removes the whole registration; native call failures can raise beyond AttachError.],
@@ -241,15 +241,16 @@
     #subsection(title: "Coalesced diagnostics")[
       #points(
         [Sinal reports two conditions of its own without failing the emitter: an emitted value absent from its enum list, and an ordinary subscription's invocation skipped by a decode failure. Either can repeat on every occurrence of an event, so a report per occurrence would make the producer's cost depend on the logger and let whoever triggers the condition choose the log volume.],
-        [Each condition is counted per event name for the life of the node. The first occurrence logs one warning. The diagnostic event `[sinal, diagnostic, occurred]` is emitted when the count reaches each power of two, with the occurrences since the previous report and the total; occurrences after the last power of two stay counted until the next report.],
-        [The report runs synchronously in the process that met the condition and is never routed, so a forwarder cannot drop or reorder it. A `handler`'s own failure observer is unchanged: the caller owns that policy.],
+        [Each condition is counted per event name for the life of the node. The first occurrence logs one warning in the process that met the condition; every later occurrence only increments the counter and builds no message.],
+        [`diagnostics` reads every counter on demand and returns each condition with its exact total. Reading does not reset a counter, so any reporter can poll it and derive a rate from two readings; Sinal runs no timer and pushes no report. #adr(19) records why counts are pulled rather than emitted.],
+        [A `handler`'s own failure observer is unchanged: the caller owns that policy.],
         [Counters live in node-wide storage keyed by condition and event name. Both come from source, so the key set is bounded.],
       )
       #behavior(title: "A repeated diagnostic logs once and is counted", area: "Native dispatch and registration", level: "boundary")[
         #given[a diagnostic condition already occurred for an event name]
         #when[the condition occurs again for that name]
         #then[no further warning is logged]
-        #then[the occurrence is counted and the diagnostic event carries the count when the total reaches a power of two]
+        #then[the occurrence is counted, and `diagnostics` reports the exact total whenever it is read]
       ]
     ]
     #subsection(title: "Decode failure, handler error and callback exception")[
