@@ -86,6 +86,7 @@ pub fn handler_reports_decode_failures_and_stays_attached_test() {
           atom.create("failure"),
         ],
       ],
+      process.self(),
       fn(_, _, _) { process.send(native_failures, Nil) },
     )
   let assert Ok(attachment) =

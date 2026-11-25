@@ -47,11 +47,29 @@
 //// for several same-shaped events with a fallible handler and a typed
 //// failure observer, `with_label` to name the handler in
 //// `:telemetry.list_handlers`, and `with_id` for a stable native handler
-//// id. `attach` installs one for the long term; `with_subscriptions`
-//// installs a group for the duration of one function call. Sinal gives
+//// id. `attach` installs one for the lifetime of the calling process;
+//// `with_subscriptions` installs a group for the duration of one function
+//// call. Sinal gives
 //// every handler a fresh id unless `with_id` names one, so duplicate-id
 //// refusal requires `with_id`. Native startup or registry failures can still
 //// raise. `observe_labelled` is `observe` with a label.
+////
+//// ## Ownership
+////
+//// Every handler belongs to the process that attached it, its owner. When
+//// the owner exits, for any reason, the handler is detached: a normal
+//// return, a crash, a supervisor shutdown, an exit signal from a linked
+//// process, or a `kill`. Sinal's OTP application runs a janitor process
+//// that installs each handler, monitors its owner, and detaches the
+//// owner's handlers when the owner's `DOWN` arrives. A handler that must
+//// live as long as the application is attached from a long-lived process,
+//// such as a supervised actor that attaches it while it starts. A handler
+//// another library attached with native `:telemetry.attach` has no sinal
+//// owner and is left alone.
+////
+//// Removal follows the owner's exit without being synchronous with it: an
+//// emitter can still reach the handler in between, and a callback already
+//// running in another process finishes.
 ////
 //// ## Names are atoms
 ////
@@ -61,16 +79,18 @@
 //// empty `with_id` or a repeated event in `handler` is a definition bug:
 //// the constructor panics with a message naming it.
 ////
-//// ## The telemetry application
+//// ## The applications
 ////
 //// Native `:telemetry` keeps handlers in a process of the `telemetry` OTP
-//// application. `attach`, `observe` and `with_subscriptions` start that
-//// application when it is not running, so a script or a release that
-//// does not list it still delivers. Without it, `emit` reaches no handler
-//// and `detach` returns `Error(Nil)`, because nothing can be attached.
+//// application, and the janitor runs in the `sinal` application. `attach`,
+//// `observe` and `with_subscriptions` start both when they are not
+//// running, so a script or a release that does not list them still
+//// delivers. Without `telemetry`, `emit` reaches no handler and `detach`
+//// returns `Error(Nil)`, because nothing can be attached.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
+import gleam/erlang/process.{type Pid}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -78,6 +98,7 @@ import gleam/string
 import sinal/fields.{type FieldError, type Fields}
 import sinal/internal/emit
 import sinal/internal/ffi
+import sinal/internal/janitor
 import sinal/internal/name as grammar
 import sinal/internal/route
 
@@ -156,9 +177,10 @@ pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
   }
 }
 
-/// A registered handler. Keep it to `detach` the handler.
+/// A registered handler, bound to the process that attached it. Keep it to
+/// `detach` the handler before that process exits.
 pub opaque type Attachment {
-  Attachment(id: Dynamic)
+  Attachment(id: Dynamic, owner: Pid)
 }
 
 /// Why `attach` refused a subscription. The union is closed.
@@ -189,13 +211,13 @@ pub opaque type Subscription {
   Subscription(
     id: Option(String),
     label: Option(String),
-    install: fn(Dynamic) -> Result(Nil, Nil),
+    install: fn(Dynamic, Pid) -> Result(Nil, Nil),
   )
 }
 
 /// Attaches an infallible handler to one event and returns its attachment.
-/// The handler runs in the emitting process (or the forwarder's, for a
-/// routed event). A native map that does not decode skips that one
+/// The handler belongs to the calling process, as `attach` describes. It
+/// runs in the emitting process (or the forwarder's, for a routed event). A native map that does not decode skips that one
 /// invocation and logs a warning; the handler stays attached. A handler
 /// crash removes it and emits telemetry's `[telemetry, handler, failure]`
 /// event.
@@ -286,8 +308,8 @@ pub fn handler(
   let callback = fn(name, raw_measurements, raw_metadata) {
     dispatch(name, raw_measurements, raw_metadata, events, run, on_failure)
   }
-  Subscription(id: None, label: None, install: fn(id) {
-    ffi.telemetry_attach_many(id, names, callback)
+  Subscription(id: None, label: None, install: fn(id, owner) {
+    ffi.telemetry_attach_many(id, names, owner, callback)
   })
 }
 
@@ -316,8 +338,19 @@ pub fn with_label(subscription: Subscription, label: String) -> Subscription {
   Subscription(..subscription, label: Some(label))
 }
 
-/// Installs a subscription until `detach`. Starts the `telemetry`
-/// application when it is not running.
+/// Installs a subscription until `detach`, or until the calling process
+/// exits, whichever comes first. The calling process is the handler's
+/// owner: sinal's janitor detaches the handler when the owner exits for
+/// any reason, including an exit signal the owner could not catch.
+///
+/// `with_id` ids are refused with `AlreadyExists` while another live
+/// owner holds them. An id still held by an owner that has exited, as when
+/// a supervisor restarts a process that attaches under a stable id, passes
+/// to the new owner.
+///
+/// Attaching is a call to the janitor, which starts the `sinal` and
+/// `telemetry` applications when they are not running. It panics when the
+/// janitor does not answer within five seconds.
 pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
   let Subscription(id:, label:, install:) = subscription
   let raw_id = case id, label {
@@ -325,17 +358,24 @@ pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
     None, Some(label) -> ffi.labelled_handler_id(label)
     None, None -> ffi.unique_handler_id()
   }
-  case install(raw_id), id {
-    Ok(Nil), _ -> Ok(Attachment(raw_id))
+  let owner = process.self()
+  case
+    janitor.attach(owner:, id: raw_id, install: fn() { install(raw_id, owner) }),
+    id
+  {
+    Ok(Nil), _ -> Ok(Attachment(raw_id, owner))
     Error(Nil), Some(id) -> Error(AlreadyExists(id))
     Error(Nil), None -> panic as "sinal.attach: a fresh handler id was taken"
   }
 }
 
-/// Removes a handler. Returns `Error(Nil)` when it was not attached: it was
-/// detached before, or telemetry removed it after it failed.
+/// Removes a handler. Any process can detach it, not only its owner.
+/// Returns `Error(Nil)` when it was not attached: it was detached before,
+/// telemetry removed it after it failed, or its owner exited.
 pub fn detach(attachment: Attachment) -> Result(Nil, Nil) {
-  ffi.telemetry_detach(attachment.id)
+  let detached = ffi.telemetry_detach(attachment.id)
+  janitor.release(owner: attachment.owner, id: attachment.id)
+  detached
 }
 
 /// A group of subscriptions for `with_subscriptions`.
@@ -398,7 +438,11 @@ pub fn with_exception_cleanup_reporter(
 ///   with its class, reason and stacktrace.
 /// - Attaching is not atomic: a concurrent emitter can see a partial set.
 ///   Detaching does not wait for a handler already running in another
-///   process. A killed process skips cleanup.
+///   process.
+/// - The handlers belong to the calling process, as `attach` describes.
+///   When an exit signal terminates it before the scope's own cleanup runs
+///   (a linked process exiting, a supervisor shutdown, a `kill`), the
+///   janitor detaches them.
 pub fn with_subscriptions(
   plan: SubscriptionPlan,
   work: fn() -> a,

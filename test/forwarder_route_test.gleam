@@ -327,6 +327,7 @@ pub fn raising_handler_behind_a_route_never_reaches_the_emitter_test() {
           atom.create("failure"),
         ],
       ],
+      process.self(),
       fn(_, _, _) { process.send(failures, Nil) },
     )
 

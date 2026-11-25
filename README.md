@@ -26,6 +26,7 @@ Sinal does not provide an exporter, metric aggregation, durable delivery, remote
 - Encode and decode primitive, custom, optional, enum, and record fields.
 - Attach typed observers or fallible handlers to one or more events, with labels and stable handler IDs.
 - Scope a group of subscriptions around work and inspect cleanup failures.
+- Bind every handler to the process that attaches it: when that process exits, for any reason, Sinal detaches the handler.
 - Instrument work with native start, stop, and exception span events.
 - Carry bounded correlation values in optional or required metadata fields.
 - Route event-name prefixes to an optional supervised, bounded forwarder.
@@ -60,6 +61,43 @@ pub fn observe_request_example() {
 <!-- prettier-ignore-end -->
 
 `Event(measurements, metadata)` pairs the native event name with two `Fields` codecs. Record codecs use named field bindings and explicit getters. See the [record and enum example](examples/usage/src/usage/records.gleam) for the compiled round-trip check.
+
+## Handler ownership
+
+A handler belongs to the process that attaches it. When that process exits, for any reason, Sinal's own OTP application detaches the handler, so a crashed or killed process leaves nothing behind. Attach a handler that must live as long as the application from a long-lived supervised process, for example while an actor starts:
+
+<!-- prettier-ignore-start -->
+
+<!-- snips: examples/usage/src/usage/owned.gleam#owned-handler -->
+```gleam
+pub fn start_request_counter(
+  finished: sinal.Event(Int, String),
+) -> Result(actor.Started(process.Subject(Message)), actor.StartError) {
+  actor.new_with_initialiser(1000, fn(subject) {
+    // The actor's process owns the handler.
+    let _attachment =
+      sinal.observe(finished, fn(_duration_ms, _route) {
+        process.send(subject, Seen)
+      })
+    actor.initialised(0)
+    |> actor.returning(subject)
+    |> Ok
+  })
+  |> actor.on_message(fn(count, message) {
+    case message {
+      Seen -> actor.continue(count + 1)
+      Count(reply) -> {
+        process.send(reply, count)
+        actor.continue(count)
+      }
+    }
+  })
+  |> actor.start
+}
+
+```
+
+<!-- prettier-ignore-end -->
 
 ## How dispatch works
 
@@ -103,6 +141,7 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 
 - Event-name segments, field keys, and route prefixes become permanent BEAM atoms. Keep them in source code; never build them from request or user input.
 - Without a route, observers run synchronously in the emitting process and can delay it. A malformed native map skips one callback and reports a typed failure; a fallible handler that returns an error is removed by native telemetry.
+- A handler belongs to the process that attaches it. Sinal's own OTP application runs a janitor that detaches a process's handlers when the process exits, so attach long-lived handlers from a long-lived supervised process, never from a process that returns once setup is done. Removal follows the exit without being synchronous with it.
 - Forwarding is best effort. Its default capacity is 1,024 events, queued plus executing. A full or unavailable forwarder drops and counts an event; it does not retry, fall back to inline execution, or provide a delivery receipt. Pending events can be lost at shutdown.
 - Forwarded handlers run in the forwarder process, without the producer's process-local context. Native spans stay in one process and ignore routes.
 
