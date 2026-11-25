@@ -1,5 +1,6 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
+import gleam/erlang/process.{type Pid}
 
 @external(erlang, "sinal_ffi", "identity")
 pub fn to_dynamic(value: a) -> Dynamic
@@ -36,12 +37,15 @@ pub fn is_map(term: Dynamic) -> Bool
 pub fn is_missing_marker(term: Dynamic) -> Bool
 
 /// Attaches `callback` under `handler_id` through `fun sinal_ffi:handle/4`,
-/// starting the `telemetry` application first when it is not running.
-/// Returns `Error(Nil)` when the id is already attached.
+/// with `{sinal_owner, owner, callback}` as its native config, starting the
+/// `telemetry` application first when it is not running. Returns
+/// `Error(Nil)` when the id is already attached. Only the janitor installs
+/// handlers this way; it binds them to `owner`.
 @external(erlang, "sinal_ffi", "telemetry_attach_many")
 pub fn telemetry_attach_many(
   handler_id: Dynamic,
   event_names: List(List(Atom)),
+  owner: Pid,
   callback: fn(List(Atom), Dynamic, Dynamic) -> Nil,
 ) -> Result(Nil, Nil)
 

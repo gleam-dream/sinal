@@ -1,98 +1,108 @@
+//// Every registration is bound to the process that made it: when that
+//// process exits, for any reason, sinal's janitor detaches its handlers.
+
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Pid}
-import gleam/otp/static_supervisor as supervisor
-import gleam/string
 import gleeunit/should
 import sinal
 import sinal/fields
-import sinal/janitor.{type Janitor}
 
-@external(erlang, "janitor_test_ffi", "trace_receives")
+type Supervisor
+
+@external(erlang, "owner_test_ffi", "janitor")
+fn janitor() -> Result(Pid, Nil)
+
+@external(erlang, "owner_test_ffi", "trace_receives")
 fn trace_receives(pid: Pid) -> Nil
 
-@external(erlang, "janitor_test_ffi", "await_down_received")
+@external(erlang, "owner_test_ffi", "await_down_received")
 fn await_down_received(pid: Pid, owner: Pid) -> Result(Nil, Nil)
 
-@external(erlang, "scope_test_ffi", "panic_message")
-fn panic_message(work: fn() -> a) -> Result(String, Nil)
+@external(erlang, "owner_test_ffi", "sync")
+fn sync(pid: Pid) -> Nil
 
-/// Starts a supervised janitor and traces what its process receives, so
-/// `settle` can wait for an owner's `DOWN` to reach it.
-fn started(label: String) -> #(Janitor, process.Name(janitor.Message)) {
-  let name = process.new_name(label)
-  let cleaner = janitor.new(name)
-  let assert Ok(_) =
-    supervisor.new(supervisor.OneForOne)
-    |> supervisor.add(janitor.supervised(cleaner))
-    |> supervisor.start
-  let assert Ok(pid) = process.named(name)
+@external(erlang, "owner_test_ffi", "suspend_supervisor")
+fn suspend_supervisor() -> Supervisor
+
+@external(erlang, "owner_test_ffi", "resume_supervisor")
+fn resume_supervisor(supervisor: Supervisor) -> Nil
+
+@external(erlang, "owner_test_ffi", "kill_and_await")
+fn kill_and_await(pid: Pid) -> Nil
+
+@external(erlang, "owner_test_ffi", "attach_native")
+fn attach_native(id: String, event: List(Dynamic), target: Pid) -> Nil
+
+@external(erlang, "owner_test_ffi", "native_attached")
+fn native_attached(id: String) -> Bool
+
+@external(erlang, "owner_test_ffi", "detach_native")
+fn detach_native(id: String) -> Nil
+
+@external(erlang, "erlang", "binary_to_atom")
+fn atom(name: String) -> Dynamic
+
+/// Starts tracing what the janitor receives, so that `settle` can wait for
+/// an owner's `DOWN` to reach it. Call it before the owner can exit.
+fn watch_janitor() -> Pid {
+  let assert Ok(pid) = janitor()
   trace_receives(pid)
-  #(cleaner, name)
+  pid
 }
 
-/// Returns once the janitor has handled the exit of `owner`: first the
-/// janitor receives the owner's `DOWN`, then it answers a call that queued
-/// behind it.
-fn settle(cleaner: Janitor, name: process.Name(janitor.Message), owner: Pid) {
-  let assert Ok(pid) = process.named(name)
-  let assert Ok(Nil) = await_down_received(pid, owner)
-  call_through(cleaner)
+/// Returns once the janitor has handled the exit of `owner`: the janitor
+/// has received the owner's `DOWN`, then answered a call queued behind it.
+fn settle(janitor: Pid, owner: Pid) -> Nil {
+  let assert Ok(Nil) = await_down_received(janitor, owner)
+  sync(janitor)
 }
 
-/// Returns once the janitor has handled every message that reached it
-/// before this call, including a release this process sent.
-fn call_through(cleaner: Janitor) -> Nil {
-  let probe =
-    sinal.event(["owner_test", "probe"], fields.empty(), fields.empty())
-  let assert Ok(attachment) =
-    sinal.attach_owned(
-      sinal.subscription(probe, fn(_, _) { Nil }),
-      cleaner,
-      owner: process.self(),
-    )
-  let assert Ok(Nil) = sinal.detach(attachment)
-  Nil
+/// Spawns a process that attaches `subscription`, reports ready and waits.
+fn owner_of(subscription: sinal.Subscription) -> Pid {
+  let ready = process.new_subject()
+  let owner =
+    process.spawn_unlinked(fn() {
+      let assert Ok(_) = sinal.attach(subscription)
+      process.send(ready, Nil)
+      process.sleep_forever()
+    })
+  let assert Ok(Nil) = process.receive(ready, 1000)
+  owner
 }
 
-fn await_exit(pid: Pid) -> Nil {
-  let monitor = process.monitor(pid)
-  let assert Ok(_) =
-    process.new_selector()
-    |> process.select_specific_monitor(monitor, fn(down) { down })
-    |> process.selector_receive(1000)
-  Nil
+fn counting(event: sinal.Event(Int, Nil), seen: process.Subject(Int)) {
+  sinal.subscription(event, fn(n, _) { process.send(seen, n) })
 }
 
 pub fn a_killed_scope_owner_leaves_no_handler_test() {
-  let #(cleaner, name) = started("janitor-killed-scope")
+  let janitor = watch_janitor()
   let event =
     sinal.event(["owner_test", "killed"], fields.int("n"), fields.empty())
   let seen = process.new_subject()
   let ready = process.new_subject()
   let owner =
     process.spawn_unlinked(fn() {
-      let plan =
-        sinal.subscriptions([
-          sinal.subscription(event, fn(n, _) { process.send(seen, n) }),
-        ])
-        |> sinal.with_janitor(cleaner)
-      sinal.with_subscriptions(plan, fn() {
-        process.send(ready, Nil)
-        process.sleep_forever()
-      })
+      sinal.with_subscriptions(
+        sinal.subscriptions([counting(event, seen)]),
+        fn() {
+          process.send(ready, Nil)
+          process.sleep_forever()
+        },
+      )
     })
   let assert Ok(Nil) = process.receive(ready, 1000)
   sinal.emit(event, 1, Nil)
   process.receive(seen, 0) |> should.equal(Ok(1))
 
   process.kill(owner)
-  settle(cleaner, name, owner)
+  settle(janitor, owner)
 
   sinal.emit(event, 2, Nil)
   process.receive(seen, 0) |> should.equal(Error(Nil))
 }
 
 pub fn an_owner_stopped_by_a_linked_exit_leaves_no_handler_test() {
-  let #(cleaner, name) = started("janitor-linked-exit")
+  let janitor = watch_janitor()
   let event =
     sinal.event(["owner_test", "linked"], fields.int("n"), fields.empty())
   let seen = process.new_subject()
@@ -103,105 +113,166 @@ pub fn an_owner_stopped_by_a_linked_exit_leaves_no_handler_test() {
       // The owner does not trap exits, so the abnormal exit of the process
       // it links to terminates it without running any more of its code.
       process.link(peer)
-      let assert Ok(_) =
-        sinal.attach_owned(
-          sinal.subscription(event, fn(n, _) { process.send(seen, n) }),
-          cleaner,
-          owner: process.self(),
-        )
+      let assert Ok(_) = sinal.attach(counting(event, seen))
       process.send(ready, Nil)
       process.sleep_forever()
     })
   let assert Ok(Nil) = process.receive(ready, 1000)
   process.send_abnormal_exit(peer, "the linked process fails")
-  settle(cleaner, name, owner)
+  settle(janitor, owner)
 
   sinal.emit(event, 1, Nil)
   process.receive(seen, 0) |> should.equal(Error(Nil))
 }
 
-pub fn an_attachment_for_an_owner_that_already_exited_is_removed_test() {
-  let #(cleaner, name) = started("janitor-dead-owner")
+pub fn an_owner_that_returns_normally_leaves_no_handler_test() {
+  let janitor = watch_janitor()
   let event =
-    sinal.event(["owner_test", "dead"], fields.int("n"), fields.empty())
+    sinal.event(["owner_test", "returned"], fields.int("n"), fields.empty())
   let seen = process.new_subject()
-  let owner = process.spawn_unlinked(fn() { Nil })
-  await_exit(owner)
-
-  let assert Ok(attachment) =
-    sinal.attach_owned(
-      sinal.subscription(event, fn(n, _) { process.send(seen, n) }),
-      cleaner,
-      owner:,
-    )
-  settle(cleaner, name, owner)
+  let ready = process.new_subject()
+  let owner =
+    process.spawn_unlinked(fn() {
+      let _ = sinal.observe(event, fn(n, _) { process.send(seen, n) })
+      process.send(ready, Nil)
+    })
+  let assert Ok(Nil) = process.receive(ready, 1000)
+  settle(janitor, owner)
 
   sinal.emit(event, 1, Nil)
   process.receive(seen, 0) |> should.equal(Error(Nil))
-  sinal.detach(attachment) |> should.equal(Error(Nil))
+}
+
+// The janitor keeps no record of its own: a restarted janitor reads the
+// owners back from the native handler table, detaches the handlers of an
+// owner that exited while no janitor ran, and monitors the owners still
+// alive.
+pub fn a_restarted_janitor_detaches_handlers_of_owners_that_exited_meanwhile_test() {
+  let event =
+    sinal.event(["owner_test", "restart"], fields.int("n"), fields.empty())
+  let seen_by_dead = process.new_subject()
+  let seen_by_live = process.new_subject()
+  let dies_meanwhile = owner_of(counting(event, seen_by_dead))
+  let survives = owner_of(counting(event, seen_by_live))
+  let assert Ok(old_janitor) = janitor()
+
+  let supervisor = suspend_supervisor()
+  kill_and_await(old_janitor)
+  kill_and_await(dies_meanwhile)
+  resume_supervisor(supervisor)
+  let assert Ok(new_janitor) = janitor()
+  { new_janitor != old_janitor } |> should.be_true
+  sync(new_janitor)
+
+  sinal.emit(event, 1, Nil)
+  process.receive(seen_by_dead, 0) |> should.equal(Error(Nil))
+  process.receive(seen_by_live, 0) |> should.equal(Ok(1))
+
+  trace_receives(new_janitor)
+  process.kill(survives)
+  settle(new_janitor, survives)
+  sinal.emit(event, 2, Nil)
+  process.receive(seen_by_live, 0) |> should.equal(Error(Nil))
 }
 
 pub fn detach_releases_the_owner_binding_test() {
-  let #(cleaner, _) = started("janitor-release")
+  let janitor = watch_janitor()
   let event =
     sinal.event(["owner_test", "released"], fields.int("n"), fields.empty())
   let seen = process.new_subject()
   let subscription =
-    sinal.subscription(event, fn(n, _) { process.send(seen, n) })
-    |> sinal.with_id("owner_test_released")
-  let owner = process.spawn_unlinked(process.sleep_forever)
+    counting(event, seen) |> sinal.with_id("owner_test_released")
+  let ready = process.new_subject()
+  let other =
+    sinal.event(
+      ["owner_test", "released_other"],
+      fields.empty(),
+      fields.empty(),
+    )
+  let first_owner =
+    process.spawn_unlinked(fn() {
+      let assert Ok(attachment) = sinal.attach(subscription)
+      let assert Ok(Nil) = sinal.detach(attachment)
+      // A second handler keeps the janitor monitoring this owner, so its
+      // exit reaches the janitor.
+      let _ = sinal.observe(other, fn(_, _) { Nil })
+      process.send(ready, Nil)
+      process.sleep_forever()
+    })
+  let assert Ok(Nil) = process.receive(ready, 1000)
 
-  let assert Ok(owned) = sinal.attach_owned(subscription, cleaner, owner:)
-  sinal.attach_owned(subscription, cleaner, owner:)
+  // This process reuses the id. The exit of the first owner must not
+  // remove it.
+  let assert Ok(reused) = sinal.attach(subscription)
+  sinal.attach(subscription)
   |> should.equal(Error(sinal.AlreadyExists("owner_test_released")))
-  let assert Ok(Nil) = sinal.detach(owned)
-
-  // A later registration reuses the id without an owner. The exit of the
-  // first registration's owner must not remove it.
-  let assert Ok(unowned) = sinal.attach(subscription)
-  process.kill(owner)
-  await_exit(owner)
-  call_through(cleaner)
+  process.kill(first_owner)
+  settle(janitor, first_owner)
 
   sinal.emit(event, 1, Nil)
   process.receive(seen, 0) |> should.equal(Ok(1))
-  let assert Ok(Nil) = sinal.detach(unowned)
+  let assert Ok(Nil) = sinal.detach(reused)
 }
 
-pub fn a_scope_bound_to_a_janitor_completes_and_detaches_test() {
-  let #(cleaner, _) = started("janitor-scope")
+pub fn another_process_can_detach_an_attachment_test() {
   let event =
-    sinal.event(["owner_test", "scope"], fields.int("n"), fields.empty())
+    sinal.event(["owner_test", "handed_over"], fields.int("n"), fields.empty())
   let seen = process.new_subject()
-  let plan =
-    sinal.subscriptions([
-      sinal.subscription(event, fn(n, _) { process.send(seen, n) }),
-    ])
-    |> sinal.with_janitor(cleaner)
-  let assert Ok(completion) =
-    sinal.with_subscriptions(plan, fn() {
-      sinal.emit(event, 1, Nil)
-      "done"
+  let handed = process.new_subject()
+  let _owner =
+    process.spawn_unlinked(fn() {
+      let assert Ok(attachment) = sinal.attach(counting(event, seen))
+      process.send(handed, attachment)
+      process.sleep_forever()
     })
-  completion.work_result |> should.equal("done")
-  completion.cleanup_failures |> should.equal([])
-  process.receive(seen, 0) |> should.equal(Ok(1))
-  sinal.emit(event, 2, Nil)
+  let assert Ok(attachment) = process.receive(handed, 1000)
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  sinal.emit(event, 1, Nil)
   process.receive(seen, 0) |> should.equal(Error(Nil))
 }
 
-pub fn registering_through_a_janitor_that_is_not_running_panics_test() {
-  let cleaner = janitor.new(process.new_name("janitor-absent"))
+// A handler another library attached with plain `telemetry:attach/4` has
+// no sinal owner: the janitor leaves it alone across its own restart, and
+// it still receives what sinal emits.
+pub fn native_handlers_of_other_libraries_are_left_alone_test() {
   let event =
-    sinal.event(["owner_test", "absent"], fields.empty(), fields.empty())
-  let assert Ok(message) =
-    panic_message(fn() {
-      sinal.attach_owned(
-        sinal.subscription(event, fn(_, _) { Nil }),
-        cleaner,
-        owner: process.self(),
-      )
+    sinal.event(["owner_test", "native"], fields.int("n"), fields.empty())
+  let id = "owner_test_native"
+  let attacher =
+    process.spawn_unlinked(fn() {
+      attach_native(id, [atom("owner_test"), atom("native")], process.self())
+      process.sleep_forever()
     })
-  string.contains(message, "is not running") |> should.be_true
-  string.contains(message, "sinal.attach_owned") |> should.be_true
+  let assert Ok(old_janitor) = janitor()
+  let supervisor = suspend_supervisor()
+  kill_and_await(old_janitor)
+  kill_and_await(attacher)
+  resume_supervisor(supervisor)
+  let assert Ok(new_janitor) = janitor()
+  sync(new_janitor)
+
+  native_attached(id) |> should.be_true
+  detach_native(id)
+  let _ = event
+}
+
+// A supervisor restarts a process that attaches under a stable id. The
+// replacement attaches before or after the janitor handles the old
+// process's exit; either way it gets the id and keeps it.
+pub fn a_stable_id_passes_to_the_next_owner_after_its_owner_exits_test() {
+  let janitor = watch_janitor()
+  let event =
+    sinal.event(["owner_test", "restarted"], fields.int("n"), fields.empty())
+  let seen = process.new_subject()
+  let subscription =
+    counting(event, seen) |> sinal.with_id("owner_test_restarted")
+  let old_owner = owner_of(subscription)
+
+  kill_and_await(old_owner)
+  let assert Ok(attachment) = sinal.attach(subscription)
+  settle(janitor, old_owner)
+
+  sinal.emit(event, 1, Nil)
+  process.receive(seen, 0) |> should.equal(Ok(1))
+  let assert Ok(Nil) = sinal.detach(attachment)
 }

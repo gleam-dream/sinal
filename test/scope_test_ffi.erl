@@ -1,6 +1,7 @@
 -module(scope_test_ffi).
 
 -export([
+    is_owned_config/1,
     catch_exception/1,
     observe_exception/2,
     raise_test_error/1,
@@ -179,3 +180,8 @@ get_otp_release() ->
 
 monotonic_nanos() ->
     erlang:monotonic_time(nanosecond).
+
+is_owned_config({sinal_owner, Owner, Callback}) ->
+    is_pid(Owner) andalso is_function(Callback, 3);
+is_owned_config(_) ->
+    false.
