@@ -333,6 +333,7 @@ pub fn a_scope_waits_for_a_slow_janitor_and_leaves_no_handler_test() {
   let second =
     counting(event, seen) |> sinal.with_id("owner_test_slow_janitor_second")
   let assert Ok(janitor) = janitor()
+  trace_receives(janitor)
   suspend(janitor)
   let reported = process.new_subject()
   let scope =
@@ -346,7 +347,8 @@ pub fn a_scope_waits_for_a_slow_janitor_and_leaves_no_handler_test() {
       process.send(reported, outcome)
       process.sleep_forever()
     })
-  // Longer than any fixed wait for the janitor's answer.
+  let assert Ok(Nil) = await_attach_received(janitor, scope)
+  // Longer than the five seconds an attach used to wait for the answer.
   process.sleep(5500)
   resume(janitor)
   let assert Ok(outcome) = process.receive(reported, 5000)
