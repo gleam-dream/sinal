@@ -132,7 +132,7 @@
         [Route writers serialize through a node-local lock and publish one sorted route-list value. Readers perform one persistent_term lookup and scan longest-first without acquiring that lock; route count and scan length are unbounded.],
         [Unroute removes exactly one prefix. Later events select a shorter matching route or execute inline, while events already handed to the old forwarder may finish after those later inline events.],
         [Persistent-term replacement or removal can impose node-wide runtime cost. Route changes belong to application startup/shutdown or rare explicit reconfiguration rather than each request.],
-        [`sinal.emit` returns Nil and discards a selected forwarder's typed refusal after recording it. `forwarder.emit` ignores routes and returns Refusal directly; spans and drop reports always remain native inline operations.],
+        [`sinal.emit` returns Nil and discards a selected forwarder's typed refusal after recording it. `forwarder.emit` ignores routes and returns Refusal directly; drop reports always remain native inline operations, while span occurrences follow routes like ordinary emission.],
         [No default forwarder application starts itself. An application supervises its chosen process before routing, then removes its route as part of shutdown; a route to an unavailable process keeps dropping rather than silently changing execution placement.],
       )
       #behavior(title: "Longest-prefix routing selects one destination", area: "Bounded forwarding and routing", level: "boundary")[

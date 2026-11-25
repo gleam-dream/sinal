@@ -60,11 +60,15 @@ pub fn telemetry_execute(
 @external(erlang, "sinal_ffi", "raise_callback_failure")
 pub fn raise_callback_failure(reason: String) -> a
 
-@external(erlang, "sinal_ffi", "telemetry_span")
-pub fn telemetry_span(
+/// Runs `span_fun` as native `telemetry:span/3` does, with the same
+/// clocks, context and re-raise, but hands each of the start, stop and
+/// exception occurrences to `dispatch` instead of executing it in place.
+@external(erlang, "sinal_ffi", "span")
+pub fn span(
   event_prefix: List(Atom),
   start_metadata: Dynamic,
   span_fun: fn() -> #(a, Dynamic, Dynamic),
+  dispatch: fn(List(Atom), Dynamic, Dynamic) -> Nil,
 ) -> a
 
 /// A handler id no other sinal registration uses: `{sinal_handler, N}`.

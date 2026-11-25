@@ -1,7 +1,24 @@
 import gleam/dynamic.{type Dynamic}
+import gleam/erlang/atom.{type Atom}
 import gleam/string
 import sinal/fields.{type Fields}
 import sinal/internal/ffi
+import sinal/internal/route
+
+/// Dispatches one encoded occurrence: to the forwarder of the longest
+/// routed prefix of `name`, or to native telemetry in the calling process
+/// when no route matches. Every sinal emit path, spans included, goes
+/// through here.
+pub fn dispatch(
+  name: List(Atom),
+  measurements: Dynamic,
+  metadata: Dynamic,
+) -> Nil {
+  case route.find(name) {
+    Ok(send) -> send(name, measurements, metadata)
+    Error(Nil) -> ffi.telemetry_execute(name, measurements, metadata)
+  }
+}
 
 /// Encodes `value` for an emit path. When an `enum` value is missing from
 /// its list, it logs a warning that names `caller` and the event (`event`

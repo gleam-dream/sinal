@@ -16,6 +16,9 @@ import sinal/forwarder
 import sinal/internal/ffi
 import sinal/span
 
+@external(erlang, "forwarder_test_ffi", "catch_raise")
+fn ffi_catch(work: fn() -> a) -> Result(a, Nil)
+
 fn start(name: String, capacity: Int) -> #(forwarder.Forwarder, process.Pid) {
   let fwd =
     forwarder.new(process.new_name(name)) |> forwarder.with_capacity(capacity)
@@ -236,10 +239,11 @@ pub fn drop_report_is_never_routed_even_by_the_empty_prefix_test() {
   forwarder.unroute([])
 }
 
-// A span runs in one process: its start and stop events ignore routes, even
-// the empty prefix.
-pub fn spans_ignore_routes_test() {
-  let #(fwd, _pid) = start("route-span", 8)
+// A span's events follow routes like every other event: the producer
+// measures the span, and the forwarder runs the handlers of its start,
+// stop and exception events.
+pub fn span_events_follow_routes_test() {
+  let #(fwd, fwd_pid) = start("route-span", 8)
   forwarder.route(["route_test_span"], fwd)
   let definition =
     span.define(
@@ -251,20 +255,40 @@ pub fn spans_ignore_routes_test() {
   let events = span.events(definition)
   let seen = process.new_subject()
   let start =
-    sinal.observe(events.start, fn(_, _) {
-      process.send(seen, #("start", process.self()))
+    sinal.observe(events.start, fn(_, metadata) {
+      process.send(seen, #("start", process.self(), metadata.context))
     })
   let stop =
-    sinal.observe(events.stop, fn(_, _) {
-      process.send(seen, #("stop", process.self()))
+    sinal.observe(events.stop, fn(measurements, metadata) {
+      let assert True =
+        span.duration_in(measurements.duration, span.Native) >= 0
+      process.send(seen, #("stop", process.self(), metadata.context))
+    })
+  let exception =
+    sinal.observe(events.exception, fn(_, metadata) {
+      process.send(seen, #("exception", process.self(), metadata.context))
     })
 
   span.run(definition, Nil, fn() { span.Completion(Nil, Nil, Nil) })
-  process.receive(seen, 0) |> should.equal(Ok(#("start", process.self())))
-  process.receive(seen, 0) |> should.equal(Ok(#("stop", process.self())))
+  let assert Ok(#("start", start_pid, context)) = process.receive(seen, 1000)
+  let assert Ok(#("stop", stop_pid, stop_context)) = process.receive(seen, 1000)
+  start_pid |> should.equal(fwd_pid)
+  stop_pid |> should.equal(fwd_pid)
+  stop_context |> should.equal(context)
+
+  // The work's exception is re-raised in the producer; the exception event
+  // is handled in the forwarder.
+  ffi_catch(fn() {
+    span.run(definition, Nil, fn() { panic as "span work failed" })
+  })
+  |> should.be_error
+  let assert Ok(#("start", _, _)) = process.receive(seen, 1000)
+  let assert Ok(#("exception", exception_pid, _)) = process.receive(seen, 1000)
+  exception_pid |> should.equal(fwd_pid)
 
   let assert Ok(Nil) = sinal.detach(start)
   let assert Ok(Nil) = sinal.detach(stop)
+  let assert Ok(Nil) = sinal.detach(exception)
   forwarder.unroute(["route_test_span"])
 }
 

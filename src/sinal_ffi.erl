@@ -11,7 +11,7 @@
     telemetry_execute/3,
     handle/4,
     raise_callback_failure/1,
-    telemetry_span/3,
+    span/4,
     convert_native_time/2,
     unique_handler_id/0,
     labelled_handler_id/1,
@@ -112,8 +112,46 @@ telemetry_execute(EventName, Measurements, Metadata) ->
 raise_callback_failure(Reason) ->
     erlang:error({sinal_callback_failure, Reason}).
 
-telemetry_span(EventPrefix, StartMetadata, SpanFun) ->
-    telemetry:span(EventPrefix, StartMetadata, SpanFun).
+%% The span protocol of telemetry:span/3 in the pinned telemetry 1.4.2,
+%% with Dispatch in place of telemetry:execute/3, so that each occurrence
+%% follows the routes `sinal.emit` follows. The clocks are read and the
+%% exception is caught and re-raised here, in the producer. SpanFun returns
+%% `{Result, ExtraMeasurements, StopMetadata}`.
+span(EventPrefix, StartMetadata, SpanFun, Dispatch) ->
+    StartTime = erlang:monotonic_time(),
+    Context = erlang:make_ref(),
+    Dispatch(
+        EventPrefix ++ [start],
+        #{monotonic_time => StartTime, system_time => erlang:system_time()},
+        merge_context(StartMetadata, Context)
+    ),
+    try SpanFun() of
+        {Result, ExtraMeasurements, StopMetadata} ->
+            StopTime = erlang:monotonic_time(),
+            Dispatch(
+                EventPrefix ++ [stop],
+                maps:merge(ExtraMeasurements, #{
+                    duration => StopTime - StartTime, monotonic_time => StopTime
+                }),
+                merge_context(StopMetadata, Context)
+            ),
+            Result
+    catch
+        Class:Reason:Stacktrace ->
+            StopTime = erlang:monotonic_time(),
+            Dispatch(
+                EventPrefix ++ [exception],
+                #{duration => StopTime - StartTime, monotonic_time => StopTime},
+                merge_context(
+                    StartMetadata#{kind => Class, reason => Reason, stacktrace => Stacktrace},
+                    Context
+                )
+            ),
+            erlang:raise(Class, Reason, Stacktrace)
+    end.
+
+merge_context(#{telemetry_span_context := _} = Metadata, _Context) -> Metadata;
+merge_context(Metadata, Context) -> Metadata#{telemetry_span_context => Context}.
 
 convert_native_time(Value, Unit) -> erlang:convert_time_unit(Value, native, Unit).
 

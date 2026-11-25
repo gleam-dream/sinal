@@ -374,11 +374,11 @@
     ]
     #notes(title: "Implementation and public consumer evidence")[#lnk("../../../src/sinal/correlation.gleam")[Correlation] and #lnk("../../../test/correlation_test.gleam")[byte bounds and field interoperability] define the package boundary. The support_desk consumer carries a required ticket correlation across Fabric, Saga, HTTP Gun and LLM Wire; SSO Portal uses optional package values and labelled handlers rather than inferring identity from execution processes.]
   ])
-  #section(title: "Native spans", lead: "Native telemetry owns timing while caller values keep separate event roles.", body: [
+  #section(title: "Native spans", lead: "The producer owns timing; routes own where the span's handlers run.", body: [
     #answers(title: "Span contracts", accent: accent,
       responsibility: [Define and run typed start, stop and exception observations around one synchronous work call.],
       interface: [`define`, `events`, `run`, Completion, role records, explicit time-unit readers and exception-term accessors.],
-      interactions: [Native telemetry span/3 supplies clocks, context, terminal choice and exception re-raise; the same Fields codecs describe caller data.],
+      interactions: [Sinal reproduces the span protocol of native telemetry span/3 (clocks, context, terminal choice and exception re-raise) in the producer and dispatches each occurrence as `sinal.emit` does; the same Fields codecs describe caller data.],
       invariants: [Protocol-owned keys cannot be overwritten; start and terminal share a context; ordinary work values produce stop rather than exception.],
       failure: [Reserved-key definitions panic; malformed foreign timing fails decoding; catchable work/encoding exception emits exception and re-raises, while uncatchable termination can omit a terminal.],
     )
@@ -401,10 +401,10 @@
     #subsection(title: "Execution, terminal selection and failure timing")[
       #points(
         [`run` encodes start metadata before entering native span execution. A custom encoder exception at that point prevents start and work execution.],
-        [Native execution records the initial monotonic value, emits start inline, invokes work and uses its Completion result to encode extra stop measurements and stop metadata. Timing measures the native span interval and can include inline instrumentation delay; it is not promised to measure only the body.],
+        [Span execution records the initial monotonic value, dispatches start, invokes work and uses its Completion result to encode extra stop measurements and stop metadata. Timing measures the native span interval and can include inline instrumentation delay; it is not promised to measure only the body.],
         [A normally returned Completion emits stop and returns its result unchanged. That result may itself be Result.Error, which is a business value rather than a raised exception.],
         [A catchable work exception, or a catchable exception while encoding its completion, follows native exception emission using start metadata, then re-raises its original triple. Completion encoders are caller code; the total encoder signature does not make them non-raising.],
-        [Spans bypass every route and have no deadline or cancellation setting. A slow start/stop/exception handler can delay span execution even when other occurrences are routed, and an untrappable termination can prevent terminal delivery.],
+        [Each span occurrence follows routes exactly as `sinal.emit` does: under a route its handlers run in the forwarder, and a full or unavailable forwarder drops it as any routed occurrence, so a handler can see start without stop. The clocks, the work and the re-raise stay in the producer. #adr(18) records the ruling. Spans have no deadline or cancellation setting; unrouted span handlers run inline and can delay span execution, and an untrappable termination can prevent terminal delivery.],
       )
       #behavior(title: "Normal business errors end a span with stop", area: "Native spans", level: "boundary")[
         #given[work returns a completion whose business result is an error value]
