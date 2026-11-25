@@ -150,8 +150,10 @@ pub fn bool(key: String) -> Fields(Bool) {
 /// The compiler checks that `name` covers every constructor, but it cannot
 /// check `values`: a constructor missing from the list compiles. Encoding
 /// still writes its name, and every emit path (`sinal.emit`,
-/// `forwarder.emit`, `span.run`) logs a warning in the emitting process
-/// that names the event and the value. A handler using this enum
+/// `forwarder.emit`, `span.run`) reports an `UnlistedValue` diagnostic
+/// from the emitting process that names the event and the value: one
+/// warning for the event name, then a count that `sinal.diagnostics`
+/// reads (see `sinal/diagnostic`). A handler using this enum
 /// fails to decode it, reports `MalformedMetadata` (or
 /// `MalformedMeasurements`) to its failure observer, skips that one
 /// invocation and stays attached when failure reporting returns normally.
@@ -430,8 +432,8 @@ pub fn encode(fields: Fields(a), value: a) -> Dynamic {
 /// Reports an `enum` value missing from its declared list anywhere in
 /// `fields`. It encodes, but a handler using these fields cannot decode it.
 /// It returns the `InvalidField` error the handler would report, and
-/// `Ok(Nil)` for any other value. The emit paths log a warning for the
-/// same values; `check` only returns the error, so a test can assert it.
+/// `Ok(Nil)` for any other value. The emit paths report a diagnostic for
+/// the same values; `check` only returns the error, so a test can assert it.
 ///
 /// ```gleam
 /// fields.check(method_field(), Delete)

@@ -35,12 +35,12 @@
         (from: "span", to: "native", relation: "call", label: "start and terminal"),
         (from: "forwarder", to: "native", relation: "call", label: "dispatch"),
         (from: "native", to: "handler", relation: "call", label: "decode then invoke"),
-      ), caption: [The boundaries mark each context's responsibility rather than a process. Unrouted callbacks share the producer process; forwarded callbacks share the forwarder process. Native spans and drop reports bypass routes.],
+      ), caption: [The boundaries mark each context's responsibility rather than a process. Unrouted callbacks share the producer process; forwarded callbacks share the forwarder process. Span occurrences follow routes like every other occurrence; drop reports bypass routes.],
     )
     #points(
       [#ctx("observation") owns #term("term-event"), #term("term-fields") and #term("term-correlation"). Its definitions allocate no event process and install no registration.],
       [Registration binds caller callbacks into #term("term-subscription") values and returns #term("term-attachment") handles. Scope orchestration owns ordered acquisition and reverse cleanup.],
-      [Spans delegate timing and exception observation to native telemetry. #ctx("forwarding") owns optional process separation and admission through the #term("term-forwarder"), while the #term("term-route") table remains node-wide application configuration.],
+      [Spans measure timing and catch exceptions in the producer and dispatch their occurrences as ordinary emission does. #ctx("forwarding") owns optional process separation and admission through the #term("term-forwarder"), while the #term("term-route") table remains node-wide application configuration.],
       [#ctx("verification") owns the #term("term-native-oracle"), the #term("term-validation-profile") and the executable evidence for the other two contexts.],
       [All runtime work occurs on one BEAM node. There is no network transport, persistent event journal or cross-node registration; multiple nodes install independent handlers and routes.],
     )
@@ -62,10 +62,11 @@
         [Operation], [Before authoritative effect], [Effect and result boundary],
         [event/fields/span definition], [Validate source names, keys and role collisions; run pure placeholder plan], [Allocate native atoms and immutable codec closures; no registration or event process.],
         [subscription/plan], [Bind typed callbacks and validate selected names], [Retain closures only; no installed registry state.],
-        [attach], [Select native identity; ensure telemetry application], [Registry mutation; successful reply returns its handle. A failed reply can leave uncertain mutation.],
+        [attach], [Select native identity; ensure the sinal and telemetry applications; call the janitor], [The janitor mutates the registry and monitors the calling process as owner; the owner's exit detaches. A failed reply can leave uncertain mutation.],
         [emit], [Check enums, encode both native maps, select route], [Inline native dispatch or one admission/send attempt; no delivery receipt.],
+        [collector.supervised], [Validate capacity; create the bounded store], [Attach each source not already attached; entries are written later by handlers.],
         [with_subscriptions], [Acquire complete known plan], [Work runs, then cleanup; separate work and cleanup outcomes.],
-        [span.run], [Encode start metadata], [Start, work, completion encoding, terminal observation and return/re-raise in one process.],
+        [span.run], [Encode start metadata], [Clocks, work, completion encoding and return/re-raise in the producer; each observation dispatched as emit dispatches it.],
         [forwarder.new/supervised], [Obtain stable name counters; validate startup settings], [Publish incarnation target only after initialization; handlers execute later.],
         [route/unroute], [Validate trusted prefix], [Serialize node-wide binding update; in-flight old delivery persists.],
       ))
@@ -108,7 +109,7 @@
       #points(
         [Erlang/BEAM is the supported target; JavaScript is unsupported (#adr(12)) because the boundary uses native telemetry, maps, references, OTP processes, ETS, atomics and persistent_term. The package requires Gleam 1.18 or newer and supports telemetry 1.4.2 through later 1.x releases under the declared dependency range.],
         [Handler registry and routes belong to one node. Atom definitions and name-wide diagnostic counters can remain for its lifetime; attachment closure retention lasts until native removal, while queued event terms remain until dispatch or process death.],
-        [No event payload size, native-map size, route-count, handler-count, capture-size or collector-history limit is enforced. Only correlation bytes, definition spelling and forwarder occurrence count have the explicit bounds described here.],
+        [No event payload size, native-map size, route-count, handler-count or capture-size limit is enforced, and an application's own collector has no history limit unless it uses the bounded collector. Only correlation bytes, definition spelling and forwarder occurrence count have the explicit bounds described here.],
         [Security depends on source-trusted atom definitions and safe caller metadata. Native failure configuration exposes closures, and arbitrary exception terms can contain application details; exporters must select and redact safe fields under their own contract.],
         [Native telemetry's handler-table persistence is an in-memory runtime optimization rather than storage durability. There is no persistence adapter, transaction log or node-restart recovery layer to model; #adr(13) leaves export and persistence to integrations.],
       )
@@ -142,7 +143,7 @@
     ]
     #subsection(title: "A scoped diagnostic and a native span")[
       #points(
-        [A test or explicit diagnostic call creates an ordered plan for the span's typed start and stop observers. Scope acquisition completes before work starts, and those native span observations remain inline even while the shop prefix is routed.],
+        [A test or explicit diagnostic call creates an ordered plan for the span's typed start and stop observers. Scope acquisition completes before work starts, and those span observations follow the shop prefix's route like every other occurrence #adr(18).],
         [A returned business Error produces stop and remains the work result. A catchable throw produces exception with the start context and re-raises its original evidence; scope cleanup then attempts every known registration and reports indexed failures without replacing that outcome.],
         [These examples compose observation ownership rather than creating a shared runtime. The source package still chooses when its business state changed, the application still chooses retention/export and Sinal still provides only typed native observation plus explicitly selected bounded forwarding.],
       )

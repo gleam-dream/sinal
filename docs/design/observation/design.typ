@@ -15,7 +15,7 @@
   ])
 
   #pending-ledger(
-    pending-entry(title: "Recover an attachment after an uncertain native call", kind: "ruling", since: "2026-10-06")[Native registry calls can raise or time out after their result becomes uncertain. A scope can clean up only registrations whose acquisition returned a handle, and automatic identifiers stay hidden from the caller when acquisition raises. No generation token, cancellation protocol or uncertain-acquisition recovery contract is specified.],
+    pending-entry(title: "Recover an attachment after an uncertain native call", kind: "ruling", since: "2026-10-06")[Native registry calls can raise or time out after their result becomes uncertain. A scope can clean up only registrations whose acquisition returned a handle, and automatic identifiers stay hidden from the caller when acquisition raises. Each registration carries a token that its attachment names, so detach never removes another registration; no cancellation protocol or recovery contract for an uncertain native registry call is specified.],
     pending-entry(title: "Trace parentage and propagation requirements", kind: "ruling", since: "2026-10-06", adr: [#adr(7)])[A correlation can carry a trace identifier, but neither it nor a native span context carries parent-child semantics. Causation fields and OpenTelemetry propagation remain requirements to settle when a tracing adapter is designed.],
   )
 
@@ -77,7 +77,7 @@
         #attribute(id: "status", name: "Status", type: "Registration status", provenance: "observed", state-type: "attachment-status", state-machine: "attachment-lifecycle")[The current registry relationship; it is not cached authority inside the handle.]
         #relates(cardinality: "n : 1")[Installs one subscription description.]
       ]
-      #state-machine(id: "attachment-lifecycle", subject: "attachment", state-field: "status", state-type: "attachment-status", title: "Native registration transitions", accent: accent, states: ("vacant", "attached", "detached", "failed"), initial: "vacant", accepting: ("detached", "failed"), transitions: (("vacant", "attached", "successful attach"), ("attached", "attached", "malformed occurrence skipped"), ("attached", "detached", "detach or registry shutdown"), ("attached", "failed", "handler failure removes registration")), caption: [A duplicate stable identifier refuses a new acquisition and leaves the existing registration unchanged. Reusing an identifier creates a new registration; a stale handle can detach that replacement.])
+      #state-machine(id: "attachment-lifecycle", subject: "attachment", state-field: "status", state-type: "attachment-status", title: "Native registration transitions", accent: accent, states: ("vacant", "attached", "detached", "failed"), initial: "vacant", accepting: ("detached", "failed"), transitions: (("vacant", "attached", "successful attach"), ("attached", "attached", "malformed occurrence skipped"), ("attached", "detached", "detach, owner exit or registry shutdown"), ("attached", "failed", "handler failure removes registration")), caption: [A duplicate stable identifier refuses a new acquisition and leaves the existing registration unchanged. Reusing an identifier creates a new registration with a new token; a stale handle cannot detach that replacement.])
     ]
     #subsection(title: "Scope lifetime")[A scope owns only attachments whose acquisitions completed successfully. A typed refusal skips work; a catchable exception leaves through cleanup and re-raise.
       #state-type(id: "scope-status", title: "Scope status", variants: ("acquiring", "working", "cleaning", "completed", "refused", "raised"))
@@ -87,7 +87,7 @@
         #attribute(id: "status", name: "Status", type: "Scope status", provenance: "derived", state-type: "scope-status", state-machine: "scope-lifecycle")[Derived from the current acquisition, work or cleanup step.]
         #relates(cardinality: "1 : 0..n")[Owns acquired attachments until cleanup is attempted.]
       ]
-      #state-machine(id: "scope-lifecycle", subject: "scope", state-field: "status", state-type: "scope-status", title: "Scoped acquisition and cleanup", accent: accent, flow: "top-to-bottom", states: ("acquiring", "working", "cleaning", "completed", "refused", "raised"), initial: "acquiring", accepting: ("completed", "refused", "raised"), transitions: (("acquiring", "acquiring", "one registration succeeds"), ("acquiring", "working", "all acquired"), ("acquiring", "cleaning", "refusal or acquisition exception"), ("working", "cleaning", "return or catchable exception"), ("cleaning", "completed", "return retained with cleanup failures"), ("cleaning", "refused", "typed acquisition refusal"), ("cleaning", "raised", "original exception re-raised")), caption: [Cleanup outcome does not replace the work outcome. An untrappable kill, node loss or VM loss can interrupt any nonterminal state without following a cleanup transition.])
+      #state-machine(id: "scope-lifecycle", subject: "scope", state-field: "status", state-type: "scope-status", title: "Scoped acquisition and cleanup", accent: accent, flow: "top-to-bottom", states: ("acquiring", "working", "cleaning", "completed", "refused", "raised"), initial: "acquiring", accepting: ("completed", "refused", "raised"), transitions: (("acquiring", "acquiring", "one registration succeeds"), ("acquiring", "working", "all acquired"), ("acquiring", "cleaning", "refusal or acquisition exception"), ("working", "cleaning", "return or catchable exception"), ("cleaning", "completed", "return retained with cleanup failures"), ("cleaning", "refused", "typed acquisition refusal"), ("cleaning", "raised", "original exception re-raised")), caption: [Cleanup outcome does not replace the work outcome. An exit signal that terminates the scope's process, node loss or VM loss can interrupt any nonterminal state without following a cleanup transition. The #term("term-janitor") then removes the acquired registrations.])
     ]
     #subsection(title: "Span invocation lifetime")[One native context identifies each invocation. The terminal choice is the work's normal return or catchable exception, independent of observation callback success.
       #state-type(id: "span-status", title: "Span invocation status", variants: ("not-started", "running", "stopped", "exception"))
@@ -178,14 +178,15 @@
     #subsection(title: "Enum completeness and non-silent incompatibility")[
       #points(
         [`enum` requires a nonempty value list with unique encoded names. An exhaustive naming function does not prove that the list includes every constructor of the caller's type.],
-        [Encoding an unlisted value still writes its name for native observers. `fields.check` returns InvalidField for that value, while the public emit paths log the same incompatibility in the producer process and still emit the occurrence.],
+        [Encoding an unlisted value still writes its name for native observers. `fields.check` returns InvalidField for that value, while the public emit paths report the same incompatibility as a coalesced diagnostic in the producer process and still emit the occurrence.],
         [A typed observer's enum decoder rejects the unlisted name and skips that invocation. This is a definition-completeness risk rather than a delivery receipt or a handler-returned application error.],
       )
       #behavior(title: "An unlisted enum value remains diagnosable", area: "Definitions and codecs", level: "boundary")[
         #given[a caller value is absent from its enum's declared value list]
         #when[the caller emits that value]
         #then[the encoded name remains available to native observers]
-        #then[the producer receives an incompatibility warning naming the event and field]
+        #then[the first such occurrence for the event name logs an incompatibility warning naming the event and field]
+        #then[every occurrence is counted, and `diagnostics` reads the exact total]
         #then[a typed observer reports malformed input and remains installed if its failure observer returns normally]
       ]
       #points(
@@ -197,8 +198,8 @@
   #section(title: "Native dispatch and registration", lead: "The native registry selects callbacks; Sinal selects and decodes their typed definition.", body: [
     #answers(title: "Native dispatch contracts", accent: accent,
       responsibility: [Translate typed values to native maps and bind selected definitions to installed callbacks.],
-      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach` and failure descriptions.],
-      interactions: [The native telemetry registry runs exported sinal_ffi:handle/4 with the typed closure as configuration. Routes optionally change the dispatch process.],
+      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach`, `diagnostics` and failure descriptions.],
+      interactions: [The native telemetry registry runs exported sinal_ffi:handle/4 with `{sinal_owner, Owner, Token, Callback}` as configuration; the janitor installs and detaches every registration. Routes optionally change the dispatch process.],
       invariants: [Selected event names are distinct inside one handler; one native identifier names one registration at a time; measurement decoding precedes metadata decoding and handler invocation.],
       failure: [Malformed input skips one invocation; returned handler error or callback exception removes the whole registration; native call failures can raise beyond AttachError.],
     )
@@ -221,7 +222,7 @@
     ]
     #subsection(title: "Pure subscriptions and installed identity")[
       #points(
-        [`observe` is the common infallible one-event path with a fresh identifier and warning logger for decode failures. `observe_labelled` adds a readable label without requiring label uniqueness or a typed attach result.],
+        [`observe` is the common infallible one-event path with a fresh identifier and coalesced diagnostic reporting for decode failures. `observe_labelled` adds a readable label without requiring label uniqueness or a typed attach result.],
         [`subscription` describes the same infallible callback without installing it. `handler` describes one fallible callback and failure observer for a nonempty list of same-shaped events; it returns the selected descriptor to both callbacks and refuses repeated names as definition bugs.],
         [Different measurement or metadata shapes belong in separate subscriptions. Their callbacks remain typed before the opaque Subscription values are grouped into a heterogeneous plan.],
         [Fresh native identity is `{sinal_handler, N}` or `{sinal_handler, Label, N}`, where N comes from a node-local positive unique integer. Labels accept arbitrary strings, create no atoms, and are diagnostic names rather than collision keys.],
@@ -237,6 +238,21 @@
         [Subscription construction installs nothing, but opaque closures may retain caller resources. Applications bound the count and lifetime of subscriptions and captured values; no library subscription-count or capture-size limit exists.],
       )
     ]
+    #subsection(title: "Coalesced diagnostics")[
+      #points(
+        [Sinal reports two conditions of its own without failing the emitter: an emitted value absent from its enum list, and an ordinary subscription's invocation skipped by a decode failure. Either can repeat on every occurrence of an event, so a report per occurrence would make the producer's cost depend on the logger and let whoever triggers the condition choose the log volume.],
+        [Each condition is counted per event name for the life of the node. The first occurrence logs one warning in the process that met the condition; every later occurrence only increments the counter and builds no message.],
+        [`diagnostics` reads every counter on demand and returns each condition with its exact total. Reading does not reset a counter, so any reporter can poll it and derive a rate from two readings; Sinal runs no timer and pushes no report. #adr(19) records why counts are pulled rather than emitted.],
+        [A `handler`'s own failure observer is unchanged: the caller owns that policy.],
+        [Counters live in node-wide storage keyed by condition and event name. Both come from source, so the key set is bounded.],
+      )
+      #behavior(title: "A repeated diagnostic logs once and is counted", area: "Native dispatch and registration", level: "boundary")[
+        #given[a diagnostic condition already occurred for an event name]
+        #when[the condition occurs again for that name]
+        #then[no further warning is logged]
+        #then[the occurrence is counted, and `diagnostics` reports the exact total whenever it is read]
+      ]
+    ]
     #subsection(title: "Decode failure, handler error and callback exception")[
       #md-table(3, (
         [Outcome], [Typed observer], [Native consequence],
@@ -247,9 +263,9 @@
         [Run or failure observer raises], [Unexpected exception does not enter the caller's e], [Entire registration removed; native failure occurrence emitted.],
       ))
       #points(
-        [The ordinary subscription logs a decode warning and retains the registration. A custom failure observer that raises converts even a malformed-data path into native callback failure; #adr(4) records the retained-handler rule.],
+        [The ordinary subscription reports a decode failure as a coalesced diagnostic and retains the registration. A custom failure observer that raises converts even a malformed-data path into native callback failure; #adr(4) records the retained-handler rule.],
         [A multi-event registration fails as one identity. Failure during one selected event removes it from every selected event, while an unrelated registration continues to receive occurrences.],
-        [Native `[telemetry, handler, failure]` metadata includes the triggering name, native handler identifier, callback configuration, exception class, reason and stacktrace. The configuration is the actual typed callback closure; captured application values are visible to native failure observers and handler-table introspection.],
+        [Native `[telemetry, handler, failure]` metadata includes the triggering name, native handler identifier, callback configuration, exception class, reason and stacktrace. The configuration is `{sinal_owner, Owner, Token, Callback}`, whose callback is the typed closure, so captured application values are visible to native failure observers and handler-table introspection.],
         [Opaque Subscription and Attachment types do not make captured data secret from native code. Applications must avoid capturing credentials or other sensitive data they cannot expose to installed native observers; Sinal does not redact that native configuration.],
       )
       #behavior(title: "Malformed data skips one callback invocation", area: "Native dispatch and registration", level: "boundary")[
@@ -273,7 +289,7 @@
         [Emit does not start telemetry. With no running native registry it reaches no handler; detach returns Error(Nil) when the registry or identifier is absent.],
         [Native attach and detach use the registry's ordinary synchronous call timeout, documented as 5,000 ms for the oracle. Registry death or a call timeout can raise, and a call whose reply is not received may have an uncertain mutation outcome.],
         [Detach removes future selection by identifier but does not wait for an already selected callback. A second detach reports absence rather than idempotent success.],
-        [Handles are copyable and native removal has no compare-and-delete generation token. If a stable identity or deliberately inspected fresh identity is reused after removal, a stale handle can detach its replacement.],
+        [Handles are copyable. Native removal has no compare-and-delete, so detach runs in the janitor and removes an identifier only while its native configuration carries the handle's token: a stale handle returns Error(Nil) and leaves a registration that reuses its identifier attached.],
         [Native `telemetry.persist/0` is available to Erlang/Elixir or a caller FFI and preserves registrations across its storage migration. Sinal intentionally exposes no additional persist wrapper or private introspection registry.],
       )
       #behavior(title: "Detach leaves selected callbacks able to finish", area: "Native dispatch and registration", level: "boundary")[
@@ -291,7 +307,7 @@
       interface: [`subscriptions`, `with_exception_cleanup_reporter`, `with_subscriptions`, indexed failure records and completion/error descriptions.],
       interactions: [Native attach/detach supply effects; the Erlang scope shim captures all catchable exception classes and preserves re-raise evidence.],
       invariants: [Every known successful acquisition receives a cleanup attempt on ordinary or catchable exit; cleanup never replaces the normal work value or original exception.],
-      failure: [Typed acquisition refusal returns an indexed error plus rollback failures; acquisition/work exception re-raises after cleaning known registrations; untrappable termination can skip cleanup.],
+      failure: [Typed acquisition refusal returns an indexed error plus rollback failures; acquisition/work exception re-raises after cleaning known registrations; an exit signal that terminates the scope's process skips the scope's cleanup, and the janitor removes the registrations instead.],
     )
     #subsection(title: "Acquisition, rollback and completion")[
       #points(
@@ -322,7 +338,7 @@
         [A work or acquisition exception's cleanup failures reach the configured reporter because there is no completion result to return. A reporter exception is caught and discarded before re-raising the original work exception; #adr(5) records this outcome separation.],
         [Installation and removal are sequential rather than atomic. Concurrent emitters can see a partial registration set, and callbacks selected in another process can finish after scope exit.],
         [Captured resources must outlive independently executing callbacks, or applications must exclude concurrent emission during the scope. Scoped registration is suitable for explicit diagnostic/test lifetimes; it does not imply safe dynamic per-request subscriptions over a node-global event name.],
-        [There is no work deadline, cleanup deadline or cancellation token in the scope API. A killed process or VM loss bypasses cleanup; normal native-call limits and user callback behavior still determine blocking.],
+        [There is no work deadline, cleanup deadline or cancellation token in the scope API. The scope's own cleanup runs in the calling process, so any exit signal that terminates that process (a linked process exiting, a supervisor shutdown, a kill) bypasses it, and the janitor detaches the registrations after the exit; normal native-call limits and user callback behavior still determine blocking.],
       )
       #behavior(title: "Cleanup reporting cannot replace a work exception", area: "Subscription scopes", level: "boundary")[
         #given[scoped work raises a catchable exception]
@@ -332,7 +348,78 @@
         #then[the original exception class, reason and stacktrace are re-raised even if the reporter raises]
       ]
     ]
-    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal.gleam")[Subscription acquisition], #lnk("../../../src/sinal_scope_ffi.erl")[exception and cleanup shim], #lnk("../../../test/api_control_test.gleam")[heterogeneous scope tests] and #lnk("../../../test/sinal_test.gleam")[scope and in-flight detach tests] own the observable cases.]
+    #subsection(title: "Registration ownership")[
+      #points(
+        [Cleanup that runs in the registering process cannot outlive that process. Every registration therefore has an #term("term-owner"), the process that attached it, and a #term("term-janitor") in Sinal's own OTP application installs the handler, monitors the owner and detaches the owner's handlers when the owner exits, whatever the exit reason. #adr(16) records the choice.],
+        [The janitor performs installation, detach and owner cleanup in one process, so an owner's exit is always handled after the installations it made and a detach never interleaves with a takeover. `attach` returns the same AlreadyExists refusal as before, and an installation exception is re-raised in the caller.],
+        [The native configuration of each handler names its owner and a token for its registration, so the native handler table is the one record of ownership; the janitor keeps only one monitor per owner. On an owner's exit it reads the table and detaches every handler whose configuration names that owner. A restarted janitor reads the owners back and monitors them again, so the owners that exited while no janitor ran are handled at once. Handlers attached by other libraries through native telemetry carry no Sinal owner and are left alone.],
+        [Before each read the janitor makes one synchronous call to the native handler table's server, so inserts queued before the read, such as one from a janitor that exited while waiting for it, are applied first.],
+        [An attachment names its registration by token. Detach removes the identifier only while that token is in its native configuration, so a stale handle cannot detach a registration that reuses the identifier, and an owner's exit removes only the registrations that name it. A stable identifier still held by an owner that has exited passes to the next owner that attaches it.],
+        [A registration starts the `sinal` application when it is not running. Registration waits for the janitor's answer with no deadline, monitoring the janitor, so a request the janitor can still apply never outlives the caller's outcome and `with_subscriptions` rollback removes every registration it acquired. When the janitor exits before answering, registration detaches the registration its token names, if the janitor installed it, and panics. A detach whose janitor exits is repeated with the successor; the token makes it safe to repeat.],
+        [Removal follows the owner's exit without being synchronous with it: an emitter can select the handler in between, and a selected callback finishes.],
+      )
+      #behavior(title: "An owner's exit removes its registrations", area: "Subscription scopes", level: "boundary")[
+        #given[a process attached a registration]
+        #when[the process exits for any reason, including an exit signal it could not catch]
+        #then[the janitor detaches the registration]
+        #then[later occurrences do not reach its handler]
+      ]
+      #behavior(title: "A janitor restart loses no owner", area: "Subscription scopes", level: "boundary")[
+        #given[the janitor exits while owners hold registrations]
+        #when[an owner exits before the janitor is restarted]
+        #then[the restarted janitor detaches that owner's registrations]
+        #then[it still detaches the registrations of the other owners when they exit]
+      ]
+      #behavior(title: "Detach ends the owner binding", area: "Subscription scopes", level: "boundary")[
+        #given[a registration was detached by its attachment]
+        #when[its owner exits later]
+        #then[a registration that reuses the identifier stays attached]
+      ]
+    ]
+    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal/internal/janitor.gleam")[Janitor process], #lnk("../../../test/owner_test.gleam")[owner exit tests], #lnk("../../../src/sinal.gleam")[Subscription acquisition], #lnk("../../../src/sinal_scope_ffi.erl")[exception and cleanup shim], #lnk("../../../test/api_control_test.gleam")[heterogeneous scope tests] and #lnk("../../../test/sinal_test.gleam")[scope and in-flight detach tests] own the observable cases.]
+  ])
+  #section(title: "Bounded collection", lead: "A collector retains the newest entries and nothing else.", body: [
+    #answers(title: "Collection contracts", accent: accent,
+      responsibility: [Attach a fixed list of sources and retain the newest application-typed entries for an in-process reader.],
+      interface: [`attach_all`; `collector.new`, `with_capacity`, `source`, `source_with`, `supervised`, `record`, `entries` and `recorded`.],
+      interactions: [Sources are ordinary subscriptions under stable identifiers. Their handlers write to storage owned by the collector's supervised process, from the process that runs the handler.],
+      invariants: [The store never holds more entries than its capacity; a writer never waits for the collector's process or for a reader.],
+      failure: [Without a running collector an entry is discarded; a restart starts empty; an invalid capacity or an occupied storage name fails the start.],
+    )
+    #subsection(title: "Why the package holds a collector")[
+      #points(
+        [Applications that follow work across packages each wrote the same module: one handler per package event, an entry type, and a process that keeps every entry in a list. That list grows for the life of the process. The #term("term-collector") gives those applications and their tests one bounded store; #adr(17) records why it belongs here although export and aggregation do not.],
+        [The collector retains #term("term-collector-entry") values for a reader in the same node. It serializes nothing, aggregates nothing, retries nothing and keeps nothing across a restart, so the export no-goal in the root foundation is unchanged.],
+      )
+    ]
+    #subsection(title: "Bounds, placement and lifetime")[
+      #points(
+        [Capacity counts entries, 1,024 by default. A new entry overwrites the oldest; the count of entries handed to the running incarnation stays readable, so a reader can tell how many were overwritten. Entry size is the application's choice and is not bounded.],
+        [A source's handler builds the entry and writes it in the process that runs the handler: the producer, or the forwarder for a routed occurrence. There is no mailbox between handler and store, so nothing queues and an unrouted occurrence is readable as soon as its emit returns.],
+        [Entries are ordered by one shared sequence. Writers separated by a full capacity of entries can leave an older entry in a newer one's place, so ordering is best effort under concurrency and capacity should far exceed the number of concurrent producers.],
+        [The store belongs to one incarnation of the collector's process and disappears with it. The process attaches its sources with `attach_all` while it starts, so it is their #term("term-owner") and its exit detaches them. Each source is attached under an identifier derived from the collector's name and the source's position, so a replacement takes the identifiers over from the incarnation it replaces and one occurrence is never recorded by two incarnations. An identifier held by another live process fails the start and leaves no source attached.],
+        [A source function that raises is a failed handler: native telemetry removes it, and the next restart attaches it again. A malformed occurrence is skipped as for any ordinary subscription.],
+        [`attach_all` installs a group of subscriptions in order, owned by the calling process, and returns their attachments. A refusal or an exception detaches the subscriptions already installed and reports as a scope acquisition does, so a group is never left partly attached by a typed refusal.],
+      )
+      #behavior(title: "A full collector overwrites its oldest entry", area: "Bounded collection", level: "boundary")[
+        #given[a running collector already holds its capacity of entries]
+        #when[a source records another entry]
+        #then[the oldest entry is no longer retained]
+        #then[the retained entries, oldest first, end with the new entry]
+      ]
+      #behavior(title: "A restarted collector starts empty with one handler per source", area: "Bounded collection", level: "boundary")[
+        #given[the collector's process was restarted by its supervisor]
+        #when[a source's event occurs once]
+        #then[exactly one entry is retained]
+      ]
+      #behavior(title: "A refused group attach leaves no member attached", area: "Bounded collection", level: "boundary")[
+        #given[one subscription of a group names an identifier already in use]
+        #when[the caller attaches the group]
+        #then[the result names the refused index]
+        #then[the group's earlier subscriptions are detached and later ones are not attempted]
+      ]
+    ]
+    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal/collector.gleam")[Collector], #lnk("../../../src/sinal_collector_ffi.erl")[bounded store], #lnk("../../../test/collector_test.gleam")[collector tests] and #lnk("../../../test/api_control_test.gleam")[group attach tests] own the observable cases.]
   ])
   #section(title: "Correlation", lead: "A small shared value joins package-owned observations without owning their lifecycle.", body: [
     #answers(title: "Correlation contracts", accent: accent,
@@ -374,11 +461,11 @@
     ]
     #notes(title: "Implementation and public consumer evidence")[#lnk("../../../src/sinal/correlation.gleam")[Correlation] and #lnk("../../../test/correlation_test.gleam")[byte bounds and field interoperability] define the package boundary. The support_desk consumer carries a required ticket correlation across Fabric, Saga, HTTP Gun and LLM Wire; SSO Portal uses optional package values and labelled handlers rather than inferring identity from execution processes.]
   ])
-  #section(title: "Native spans", lead: "Native telemetry owns timing while caller values keep separate event roles.", body: [
+  #section(title: "Native spans", lead: "The producer owns timing; routes own where the span's handlers run.", body: [
     #answers(title: "Span contracts", accent: accent,
       responsibility: [Define and run typed start, stop and exception observations around one synchronous work call.],
       interface: [`define`, `events`, `run`, Completion, role records, explicit time-unit readers and exception-term accessors.],
-      interactions: [Native telemetry span/3 supplies clocks, context, terminal choice and exception re-raise; the same Fields codecs describe caller data.],
+      interactions: [Sinal reproduces the span protocol of native telemetry span/3 (clocks, context, terminal choice and exception re-raise) in the producer and dispatches each occurrence as `sinal.emit` does; the same Fields codecs describe caller data.],
       invariants: [Protocol-owned keys cannot be overwritten; start and terminal share a context; ordinary work values produce stop rather than exception.],
       failure: [Reserved-key definitions panic; malformed foreign timing fails decoding; catchable work/encoding exception emits exception and re-raises, while uncatchable termination can omit a terminal.],
     )
@@ -401,10 +488,10 @@
     #subsection(title: "Execution, terminal selection and failure timing")[
       #points(
         [`run` encodes start metadata before entering native span execution. A custom encoder exception at that point prevents start and work execution.],
-        [Native execution records the initial monotonic value, emits start inline, invokes work and uses its Completion result to encode extra stop measurements and stop metadata. Timing measures the native span interval and can include inline instrumentation delay; it is not promised to measure only the body.],
+        [Span execution records the initial monotonic value, dispatches start, invokes work and uses its Completion result to encode extra stop measurements and stop metadata. Timing measures the native span interval and can include inline instrumentation delay; it is not promised to measure only the body.],
         [A normally returned Completion emits stop and returns its result unchanged. That result may itself be Result.Error, which is a business value rather than a raised exception.],
         [A catchable work exception, or a catchable exception while encoding its completion, follows native exception emission using start metadata, then re-raises its original triple. Completion encoders are caller code; the total encoder signature does not make them non-raising.],
-        [Spans bypass every route and have no deadline or cancellation setting. A slow start/stop/exception handler can delay span execution even when other occurrences are routed, and an untrappable termination can prevent terminal delivery.],
+        [Each span occurrence follows routes exactly as `sinal.emit` does: under a route its handlers run in the forwarder, and a full or unavailable forwarder drops it as any routed occurrence, so a handler can see start without stop. The clocks, the work and the re-raise stay in the producer. #adr(18) records the ruling. Spans have no deadline or cancellation setting; unrouted span handlers run inline and can delay span execution, and an untrappable termination can prevent terminal delivery.],
       )
       #behavior(title: "Normal business errors end a span with stop", area: "Native spans", level: "boundary")[
         #given[work returns a completion whose business result is an error value]

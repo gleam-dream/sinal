@@ -6,12 +6,13 @@
     map_lookup/2,
     is_native_map/1,
     is_missing_marker/1,
-    telemetry_attach_many/3,
+    telemetry_attach_many/5,
+    new_token/0,
     telemetry_detach/1,
     telemetry_execute/3,
     handle/4,
     raise_callback_failure/1,
-    telemetry_span/3,
+    span/4,
     convert_native_time/2,
     unique_handler_id/0,
     labelled_handler_id/1,
@@ -21,7 +22,9 @@
     identity/1,
     is_decoding/0,
     decoding/1,
-    log_warning/1
+    log_warning/1,
+    count_diagnostic/2,
+    diagnostics/0
 ]).
 
 identity(X) ->
@@ -66,16 +69,23 @@ is_missing_marker(nil) -> true;
 is_missing_marker(undefined) -> true;
 is_missing_marker(_) -> false.
 
-%% Every handler is attached as this exported function, with the typed
-%% Gleam callback as its config. An exported capture keeps telemetry on its
-%% fast path and stops it from logging a "local function" warning for each
-%% attachment.
-handle(EventName, Measurements, Metadata, Callback) ->
+%% Every handler is attached as this exported function, with its owner,
+%% the token of its registration and the typed Gleam callback as its
+%% config. An exported capture keeps telemetry on its fast path and stops
+%% it from logging a "local function" warning for each attachment. The
+%% native handler table is the record of every registration: the janitor
+%% reads owners and tokens back from it (sinal_janitor_ffi).
+handle(EventName, Measurements, Metadata, {sinal_owner, _Owner, _Token, Callback}) ->
     Callback(EventName, Measurements, Metadata).
 
-telemetry_attach_many(HandlerId, EventNames, Callback) ->
+%% A token that names one registration: no other attach gets the same one.
+new_token() ->
+    make_ref().
+
+telemetry_attach_many(HandlerId, EventNames, Owner, Token, Callback) ->
     ensure_telemetry_started(),
-    case telemetry:attach_many(HandlerId, EventNames, fun ?MODULE:handle/4, Callback) of
+    Config = {sinal_owner, Owner, Token, Callback},
+    case telemetry:attach_many(HandlerId, EventNames, fun ?MODULE:handle/4, Config) of
         ok -> {ok, nil};
         {error, already_exists} -> {error, nil}
     end.
@@ -112,8 +122,46 @@ telemetry_execute(EventName, Measurements, Metadata) ->
 raise_callback_failure(Reason) ->
     erlang:error({sinal_callback_failure, Reason}).
 
-telemetry_span(EventPrefix, StartMetadata, SpanFun) ->
-    telemetry:span(EventPrefix, StartMetadata, SpanFun).
+%% The span protocol of telemetry:span/3 in the pinned telemetry 1.4.2,
+%% with Dispatch in place of telemetry:execute/3, so that each occurrence
+%% follows the routes `sinal.emit` follows. The clocks are read and the
+%% exception is caught and re-raised here, in the producer. SpanFun returns
+%% `{Result, ExtraMeasurements, StopMetadata}`.
+span(EventPrefix, StartMetadata, SpanFun, Dispatch) ->
+    StartTime = erlang:monotonic_time(),
+    Context = erlang:make_ref(),
+    Dispatch(
+        EventPrefix ++ [start],
+        #{monotonic_time => StartTime, system_time => erlang:system_time()},
+        merge_context(StartMetadata, Context)
+    ),
+    try SpanFun() of
+        {Result, ExtraMeasurements, StopMetadata} ->
+            StopTime = erlang:monotonic_time(),
+            Dispatch(
+                EventPrefix ++ [stop],
+                maps:merge(ExtraMeasurements, #{
+                    duration => StopTime - StartTime, monotonic_time => StopTime
+                }),
+                merge_context(StopMetadata, Context)
+            ),
+            Result
+    catch
+        Class:Reason:Stacktrace ->
+            StopTime = erlang:monotonic_time(),
+            Dispatch(
+                EventPrefix ++ [exception],
+                #{duration => StopTime - StartTime, monotonic_time => StopTime},
+                merge_context(
+                    StartMetadata#{kind => Class, reason => Reason, stacktrace => Stacktrace},
+                    Context
+                )
+            ),
+            erlang:raise(Class, Reason, Stacktrace)
+    end.
+
+merge_context(#{telemetry_span_context := _} = Metadata, _Context) -> Metadata;
+merge_context(Metadata, Context) -> Metadata#{telemetry_span_context => Context}.
 
 convert_native_time(Value, Unit) -> erlang:convert_time_unit(Value, native, Unit).
 
@@ -143,3 +191,45 @@ event_parts({event, Name, Measurements, Metadata}) ->
 log_warning(Message) ->
     logger:warning("~ts", [Message], #{domain => [sinal]}),
     nil.
+
+%% Counts one occurrence of a diagnostic condition for an event name and
+%% returns the new total. The counter is created on first use and kept in
+%% `persistent_term` for the life of the node. Kinds are a closed set and
+%% names come from source, so the keys are bounded. Storing a new key does
+%% not trigger the global scan that replacing one does; the node-local lock
+%% stops two first occurrences from replacing each other's counter.
+count_diagnostic(Kind, Name) ->
+    Key = {sinal_diagnostic, Kind, Name},
+    Counter =
+        case persistent_term:get(Key, undefined) of
+            undefined ->
+                global:trans(
+                    {Key, self()},
+                    fun() ->
+                        case persistent_term:get(Key, undefined) of
+                            undefined ->
+                                New = atomics:new(1, [{signed, false}]),
+                                persistent_term:put(Key, New),
+                                New;
+                            Existing ->
+                                Existing
+                        end
+                    end,
+                    [node()]
+                );
+            Existing ->
+                Existing
+        end,
+    atomics:add_get(Counter, 1, 1).
+
+%% Every diagnostic counter with its current total, sorted by event name and
+%% then kind. Reading scans the node's persistent terms; it is meant for an
+%% occasional poll, not a hot path.
+diagnostics() ->
+    [
+        {Kind, Name, Total}
+     || {Name, Kind, Total} <- lists:sort([
+            {Name, Kind, atomics:get(Counter, 1)}
+         || {{sinal_diagnostic, Kind, Name}, Counter} <- persistent_term:get()
+        ])
+    ].

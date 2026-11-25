@@ -10,6 +10,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 import sinal
+import sinal/diagnostic
 import sinal/fields
 import sinal/internal/ffi
 import sinal/span
@@ -86,6 +87,8 @@ pub fn handler_reports_decode_failures_and_stays_attached_test() {
           atom.create("failure"),
         ],
       ],
+      process.self(),
+      ffi.new_token(),
       fn(_, _, _) { process.send(native_failures, Nil) },
     )
   let assert Ok(attachment) =
@@ -171,7 +174,7 @@ pub fn emit_reports_an_unlisted_enum_value_at_the_emit_site_test() {
     capture_warnings(fn() { sinal.emit(ev, Nil, #(Delivered, Some(Retried))) })
   logs
   |> should.equal([
-    "sinal.emit: event [\"decode_failure\", \"emit_site\"] carries a value that its fields.enum list does not name (invalid value at key previous: expected one of delivered, found \"retried\"); every sinal handler of the event will skip it as malformed",
+    "sinal.emit: event [\"decode_failure\", \"emit_site\"] carries a value that its fields.enum list does not name (invalid value at key previous: expected one of delivered, found \"retried\"); every sinal handler of the event will skip it as malformed. Later occurrences are counted; sinal.diagnostics() reads the total",
   ])
   // The native map still carries the name, for Erlang and Elixir handlers.
   fields.encode(incomplete_outcome(), Retried)
@@ -259,4 +262,81 @@ pub fn the_documented_round_trip_pattern_catches_an_incomplete_list_test() {
     outcome_name,
   ))
   |> should.equal(Ok(Nil))
+}
+
+fn repeat(times: Int, work: fn() -> Nil) -> Nil {
+  case times <= 0 {
+    True -> Nil
+    False -> {
+      work()
+      repeat(times - 1, work)
+    }
+  }
+}
+
+/// The diagnostics `sinal.diagnostics` reports for `event`.
+fn diagnostics_of(event: List(String)) -> List(diagnostic.Diagnostic) {
+  sinal.diagnostics()
+  |> list.filter(fn(entry) { entry.event == event })
+}
+
+pub fn a_burst_of_unlisted_values_logs_once_and_counts_exactly_test() {
+  let name = ["decode_failure", "coalesced_emit"]
+  let ev = sinal.event(name, fields.empty(), incomplete_outcome())
+  let #(Nil, logs) =
+    capture_warnings(fn() { repeat(100, fn() { sinal.emit(ev, Nil, Retried) }) })
+  list.length(logs) |> should.equal(1)
+  diagnostics_of(name)
+  |> should.equal([
+    diagnostic.Diagnostic(
+      kind: diagnostic.UnlistedValue,
+      event: name,
+      total: 100,
+    ),
+  ])
+  // Reading does not reset: a later occurrence adds to the same total.
+  sinal.emit(ev, Nil, Retried)
+  diagnostics_of(name)
+  |> should.equal([
+    diagnostic.Diagnostic(
+      kind: diagnostic.UnlistedValue,
+      event: name,
+      total: 101,
+    ),
+  ])
+}
+
+pub fn a_burst_of_decode_failures_logs_once_and_counts_exactly_test() {
+  let name = ["decode_failure", "coalesced_observe"]
+  let ev = sinal.event(name, fields.int("count"), fields.empty())
+  let attachment = sinal.observe(ev, fn(_, _) { Nil })
+  let #(Nil, logs) =
+    capture_warnings(fn() {
+      repeat(100, fn() {
+        native_emit(
+          name,
+          native_map([#("count", dynamic.string("x"))]),
+          native_map([]),
+        )
+      })
+    })
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  list.length(logs) |> should.equal(1)
+  let assert [log] = logs
+  string.contains(log, "malformed measurements") |> should.equal(True)
+  diagnostics_of(name)
+  |> should.equal([
+    diagnostic.Diagnostic(
+      kind: diagnostic.SkippedInvocation,
+      event: name,
+      total: 100,
+    ),
+  ])
+}
+
+pub fn an_event_without_diagnostics_has_no_entry_test() {
+  let name = ["decode_failure", "clean"]
+  let ev = sinal.event(name, fields.empty(), incomplete_outcome())
+  sinal.emit(ev, Nil, Delivered)
+  diagnostics_of(name) |> should.equal([])
 }

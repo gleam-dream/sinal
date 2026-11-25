@@ -1,5 +1,6 @@
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
+import gleam/erlang/process.{type Pid}
 
 @external(erlang, "sinal_ffi", "identity")
 pub fn to_dynamic(value: a) -> Dynamic
@@ -35,13 +36,24 @@ pub fn is_map(term: Dynamic) -> Bool
 @external(erlang, "sinal_ffi", "is_missing_marker")
 pub fn is_missing_marker(term: Dynamic) -> Bool
 
+/// Names one registration: every attach gets a fresh token, so a handle
+/// to an earlier registration under the same id does not match a later one.
+pub type Token
+
+@external(erlang, "sinal_ffi", "new_token")
+pub fn new_token() -> Token
+
 /// Attaches `callback` under `handler_id` through `fun sinal_ffi:handle/4`,
+/// with `{sinal_owner, owner, token, callback}` as its native config,
 /// starting the `telemetry` application first when it is not running.
-/// Returns `Error(Nil)` when the id is already attached.
+/// Returns `Error(Nil)` when the id is already attached. Only the janitor
+/// installs handlers this way; it binds them to `owner`.
 @external(erlang, "sinal_ffi", "telemetry_attach_many")
 pub fn telemetry_attach_many(
   handler_id: Dynamic,
   event_names: List(List(Atom)),
+  owner: Pid,
+  token: Token,
   callback: fn(List(Atom), Dynamic, Dynamic) -> Nil,
 ) -> Result(Nil, Nil)
 
@@ -60,11 +72,15 @@ pub fn telemetry_execute(
 @external(erlang, "sinal_ffi", "raise_callback_failure")
 pub fn raise_callback_failure(reason: String) -> a
 
-@external(erlang, "sinal_ffi", "telemetry_span")
-pub fn telemetry_span(
+/// Runs `span_fun` as native `telemetry:span/3` does, with the same
+/// clocks, context and re-raise, but hands each of the start, stop and
+/// exception occurrences to `dispatch` instead of executing it in place.
+@external(erlang, "sinal_ffi", "span")
+pub fn span(
   event_prefix: List(Atom),
   start_metadata: Dynamic,
   span_fun: fn() -> #(a, Dynamic, Dynamic),
+  dispatch: fn(List(Atom), Dynamic, Dynamic) -> Nil,
 ) -> a
 
 /// A handler id no other sinal registration uses: `{sinal_handler, N}`.

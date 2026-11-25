@@ -1,6 +1,6 @@
 -module(forwarder_test_ffi).
 
--export([message_queue_len/1, identity/1, forwarder_counters/1]).
+-export([message_queue_len/1, identity/1, forwarder_counters/1, catch_raise/1]).
 
 %% Reads a process's current mailbox length. Test-only introspection: used to
 %% observe how many messages a guard actually queued, rather than only the
@@ -18,3 +18,11 @@ identity(X) -> X.
 %% record tuple `{forwarder, Name, Capacity, Counters}`. Test-only: it lets a
 %% test place a drop in a race window no public call can reach on demand.
 forwarder_counters({forwarder, _Name, _Capacity, Counters}) -> Counters.
+
+%% Runs Work and returns {ok, Value}, or {error, nil} when it raised.
+catch_raise(Work) ->
+    try Work() of
+        Value -> {ok, Value}
+    catch
+        _:_ -> {error, nil}
+    end.

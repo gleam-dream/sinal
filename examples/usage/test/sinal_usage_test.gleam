@@ -1,8 +1,10 @@
 import gleeunit
+import usage/collecting
 import usage/correlation_ids
 import usage/forwarding
 import usage/handlers
 import usage/observe
+import usage/owned
 import usage/records
 import usage/scopes
 import usage/spans
@@ -13,6 +15,10 @@ pub fn main() -> Nil {
 
 pub fn observe_test() {
   observe.run()
+}
+
+pub fn owned_test() {
+  owned.run()
 }
 
 pub fn records_test() {
@@ -33,6 +39,10 @@ pub fn spans_test() {
 
 pub fn forwarding_test() {
   forwarding.run()
+}
+
+pub fn collecting_test() {
+  collecting.run()
 }
 
 pub fn correlation_ids_test() {

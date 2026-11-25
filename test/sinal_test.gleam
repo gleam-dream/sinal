@@ -82,7 +82,13 @@ pub fn observe_malformed_native_map_skips_one_invocation_test() {
     process.send(failure_subject, decode_failure_event(measurements, metadata))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener,
+    )
 
   native_emit(
     ev_name,
@@ -111,7 +117,13 @@ pub fn observe_callback_panic_keeps_native_failure_isolation_test() {
     process.send(failure_subject, decode_failure_event(measurements, metadata))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener,
+    )
 
   sinal.emit(ev, Nil, Nil)
   let assert Ok(failure) = process.receive(failure_subject, 100)
@@ -782,6 +794,8 @@ pub fn emitted_maps_carry_exactly_the_encoded_keys_test() {
     ffi.telemetry_attach_many(
       listener_id,
       [[atom.create("test"), atom.create("encoded_keys")]],
+      process.self(),
+      ffi.new_token(),
       fn(_, measurements, metadata) {
         process.send(raw, #(measurements, metadata))
       },
@@ -822,7 +836,13 @@ pub fn malformed_measurements_invokes_failure_observer_and_keeps_handler_test() 
     process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener_cb)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener_cb,
+    )
 
   // Emit raw foreign event with bad measurement (string instead of int)
   let bad_measurements = native_map([#(key, dynamic.string("not_an_int"))])
@@ -874,7 +894,13 @@ pub fn malformed_metadata_invokes_failure_observer_and_keeps_handler_test() {
     process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener_cb)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener_cb,
+    )
 
   // Emit raw foreign event with bad metadata (int instead of string)
   let bad_metadata = native_map([#(key, dynamic.int(999))])
@@ -923,7 +949,13 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
     process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener_cb)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener_cb,
+    )
 
   sinal.emit(ev, Nil, Nil)
 
@@ -942,7 +974,7 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
   |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
-  is_function(rec.handler_config) |> should.equal(True)
+  is_owned_config(rec.handler_config) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   sinal.detach(att) |> should.equal(Error(Nil))
@@ -971,7 +1003,13 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
     process.send(telemetry_failure_subject, #(ev_name, rec))
   }
   let assert Ok(Nil) =
-    ffi.telemetry_attach_many(listener_id, [failure_event], listener_cb)
+    ffi.telemetry_attach_many(
+      listener_id,
+      [failure_event],
+      process.self(),
+      ffi.new_token(),
+      listener_cb,
+    )
 
   // Emitter receives Ok(Nil) — subscriber crash is isolated
   sinal.emit(ev, Nil, Nil)
@@ -990,7 +1028,7 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
   is_panic_reason(rec.reason, "unexpected crash") |> should.equal(True)
   rec.has_stacktrace |> should.equal(True)
   term_equals(rec.handler_id, ffi.to_dynamic(hid)) |> should.equal(True)
-  is_function(rec.handler_config) |> should.equal(True)
+  is_owned_config(rec.handler_config) |> should.equal(True)
   let _ = ffi.telemetry_detach(listener_id)
 
   // Handler was removed
@@ -1060,8 +1098,10 @@ fn panic_message(work: fn() -> a) -> Result(String, Nil)
 @external(erlang, "scope_test_ffi", "span_context_term")
 fn span_context_term(context: span.SpanContext) -> Dynamic
 
-@external(erlang, "erlang", "is_function")
-fn is_function(term: Dynamic) -> Bool
+/// True for `{sinal_owner, Owner, Token, Callback}`: the native config of every
+/// sinal handler, which names the process that owns it.
+@external(erlang, "scope_test_ffi", "is_owned_config")
+fn is_owned_config(term: Dynamic) -> Bool
 
 @external(erlang, "scope_test_ffi", "catch_exception")
 fn catch_exception(fun: fn() -> a) -> CatchOutcome(a)
@@ -2211,6 +2251,8 @@ pub fn raw_telemetry_handler_observes_sinal_emission_test() {
     ffi.telemetry_attach_many(
       listener_id,
       [list.map(ev_name, atom.create)],
+      process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -2499,10 +2541,10 @@ pub fn public_id_replacement_after_detach_test() {
   sinal.emit(ev, Nil, Nil)
   process.receive(subject, 100) |> should.equal(Ok("v2"))
 
-  // Attachment values retain the public ID, not a registration generation.
-  // A copied old value therefore detaches the replacement with that same ID.
-  sinal.detach(att1) |> should.equal(Ok(Nil))
+  // An attachment names one registration, not only its public ID. A copied
+  // old value does not detach the replacement that reuses the ID.
+  sinal.detach(att1) |> should.equal(Error(Nil))
   sinal.emit(ev, Nil, Nil)
-  process.receive(subject, 50) |> should.be_error()
-  sinal.detach(att2) |> should.equal(Error(Nil))
+  process.receive(subject, 100) |> should.equal(Ok("v2"))
+  sinal.detach(att2) |> should.equal(Ok(Nil))
 }

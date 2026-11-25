@@ -7,7 +7,7 @@ Sinal keeps a small local microbenchmark program and one retained run of it. The
 
 ## Scope
 
-The program [test/benchmark.gleam](../test/benchmark.gleam) times emission with no handlers, typed synchronous handling, codec work, native spans and route lookup. It measures no forwarding queue and no other harness.
+The program [test/benchmark.gleam](../test/benchmark.gleam) times emission with no handlers, typed synchronous handling, codec work, native spans, route lookup and the diagnostic path of an enum value missing from its list (added after the retained run, so that run has no row for it). It measures no forwarding queue and no other harness.
 
 ## Method
 
