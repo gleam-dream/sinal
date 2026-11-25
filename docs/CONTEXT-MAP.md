@@ -2,7 +2,7 @@
 
 ## Contexts
 
-- [Observation](design/observation/CONTEXT.typ) owns typed event definitions, field codecs, registration, subscription scopes, bounded collection, correlation and native spans.
+- [Observation](design/observation/CONTEXT.typ) owns typed event definitions, field codecs, registration, subscription scopes, handler ownership through the janitor, bounded collection, correlation and native spans.
 - [Forwarding](design/forwarding/CONTEXT.typ) owns the supervised forwarder, per-incarnation admission, drop reports and node-wide prefix routes.
 - [Verification](design/verification/CONTEXT.typ) owns the native oracle, validation profiles, race probes and benchmark method that produce evidence for the other two contexts.
 

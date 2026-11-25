@@ -62,7 +62,7 @@
         [Operation], [Before authoritative effect], [Effect and result boundary],
         [event/fields/span definition], [Validate source names, keys and role collisions; run pure placeholder plan], [Allocate native atoms and immutable codec closures; no registration or event process.],
         [subscription/plan], [Bind typed callbacks and validate selected names], [Retain closures only; no installed registry state.],
-        [attach], [Select native identity; ensure telemetry application], [Registry mutation; successful reply returns its handle. A failed reply can leave uncertain mutation.],
+        [attach], [Select native identity; ensure the sinal and telemetry applications; call the janitor], [The janitor mutates the registry and monitors the calling process as owner; the owner's exit detaches. A failed reply can leave uncertain mutation.],
         [emit], [Check enums, encode both native maps, select route], [Inline native dispatch or one admission/send attempt; no delivery receipt.],
         [collector.supervised], [Validate capacity; create the bounded store], [Attach each source not already attached; entries are written later by handlers.],
         [with_subscriptions], [Acquire complete known plan], [Work runs, then cleanup; separate work and cleanup outcomes.],

@@ -13,6 +13,8 @@
   (slug: "term-handler-failure", title: [Handler failure], body: [A malformed measurement, malformed metadata, or caller-defined error returned by a typed handler. Unexpected exceptions are outside this sum.]),
   (slug: "term-subscription-plan", title: [Subscription plan], body: [An ordered group of subscriptions with a reporter for cleanup failures that accompany a catchable exception.]),
   (slug: "term-subscription-scope", title: [Subscription scope], body: [One acquisition, work, and cleanup lifetime for a subscription plan. It owns the registrations it successfully acquired.]),
+  (slug: "term-owner", title: [Owner], body: [The process that attached a registration; its exit ends the registration. Every registration has one.]),
+  (slug: "term-janitor", title: [Janitor], body: [A process of Sinal's own OTP application that installs every registration, monitors each owner and detaches the owner's registrations when the owner exits.]),
   (slug: "term-cleanup-failure", title: [Cleanup failure], body: [A failed detach attempt during scope cleanup, retained with its zero-based plan index. It never replaces the work value or the work exception.]),
   (slug: "term-collector", title: [Collector], body: [An application-supervised process that attaches a fixed list of sources and owns a bounded in-memory store of the most recent entries built from their occurrences. It is a diagnostic reader's aid, distinct from an exporter.]),
   (slug: "term-collector-entry", title: [Collector entry], body: [One application-typed value that a source builds from one occurrence and the collector retains until newer entries overwrite it.]),

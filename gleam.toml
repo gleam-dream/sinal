@@ -9,6 +9,7 @@ repository = { type = "github", user = "gleam-dream", repo = "sinal" }
 
 [erlang]
 extra_applications = ["crypto"]
+application_start_module = "sinal/internal/application"
 
 [dependencies]
 gleam_stdlib = ">= 0.70.0 and < 2.0.0"
