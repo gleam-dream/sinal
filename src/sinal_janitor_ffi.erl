@@ -1,6 +1,16 @@
 -module(sinal_janitor_ffi).
 
--export([capture/1, reraise/1, name/0, send/2, owned_handlers/0, holder/1, detach_held/2, await_restart/0]).
+-export([
+    capture/1,
+    reraise/1,
+    name/0,
+    send/2,
+    owners/0,
+    handlers_of/1,
+    holder/1,
+    detach_registration/2,
+    await_restart/0
+]).
 
 %% Runs Work and returns its value, or the class, reason and stacktrace of
 %% the error, exit or throw it raised.
@@ -18,62 +28,64 @@ reraise({Class, Reason, Stacktrace}) ->
 name() ->
     sinal_janitor.
 
-%% Every sinal handler in the native handler table, as `{Owner, Id}`. The
-%% owner is read from the handler's config, which sinal_ffi:handle/4
-%% receives as `{sinal_owner, Owner, Callback}`. Handlers attached by other
-%% libraries have another function or config and are left out. A handler
-%% attached to several events is listed once.
-owned_handlers() ->
-    case whereis(telemetry_handler_table) of
-        undefined ->
-            [];
-        _ ->
-            Handle = fun sinal_ffi:handle/4,
-            lists:usort([
-                {Owner, Id}
-             || #{id := Id, function := Function, config := {sinal_owner, Owner, _}}
-                    <- telemetry:list_handlers([]),
-                Function =:= Handle
-            ])
-    end.
-
-%% The owner named in the native config of sinal handler Id, if one is
-%% attached under Id.
-holder(Id) ->
-    Handle = fun sinal_ffi:handle/4,
-    Handlers =
-        case whereis(telemetry_handler_table) of
-            undefined -> [];
-            _ -> telemetry:list_handlers([])
-        end,
-    case
-        [
-            Owner
-         || #{id := HandlerId, function := Function, config := {sinal_owner, Owner, _}}
-                <- Handlers,
-            HandlerId =:= Id,
-            Function =:= Handle
-        ]
-    of
-        [Owner | _] -> {ok, Owner};
-        [] -> {error, nil}
-    end.
-
-%% Detaches handler Id only when it is a sinal handler that Owner holds.
-%% Telemetry removes a failing handler without telling the janitor, and
-%% another caller may then attach under the same id; telemetry detaches
-%% by id alone, so the native config is checked first.
-detach_held(Id, Owner) ->
-    case holder(Id) of
-        {ok, Owner} -> sinal_ffi:telemetry_detach(Id);
-        _ -> {error, nil}
-    end.
-
 %% Sends Message to janitor process Pid as a message to its name, so the
 %% request reaches that incarnation and no later one.
 send(Pid, Message) ->
     Pid ! {name(), Message},
     nil.
+
+%% Every sinal handler in the native handler table, as `{Owner, Id, Token}`,
+%% read from the config sinal_ffi:handle/4 receives as
+%% `{sinal_owner, Owner, Token, Callback}`. Handlers attached by other
+%% libraries have another function or config and are left out. A handler
+%% attached to several events is listed once.
+%%
+%% Telemetry inserts and deletes through its handler table server and
+%% reads the table directly. A synchronous call to that server first lets
+%% it apply the requests queued before this read, such as an insert from a
+%% janitor that exited while waiting for it.
+registrations() ->
+    case whereis(telemetry_handler_table) of
+        undefined ->
+            [];
+        Server ->
+            try sys:get_state(Server) of
+                _ -> ok
+            catch
+                exit:_ -> ok
+            end,
+            Handle = fun sinal_ffi:handle/4,
+            lists:usort([
+                {Owner, Id, Token}
+             || #{id := Id, function := Function, config := {sinal_owner, Owner, Token, _}}
+                    <- telemetry:list_handlers([]),
+                Function =:= Handle
+            ])
+    end.
+
+%% The owners of every sinal handler, each once.
+owners() ->
+    lists:usort([Owner || {Owner, _, _} <- registrations()]).
+
+%% The `{Id, Token}` of every sinal handler whose config names Owner.
+handlers_of(Owner) ->
+    [{Id, Token} || {HandlerOwner, Id, Token} <- registrations(), HandlerOwner =:= Owner].
+
+%% The owner and token of the sinal handler attached under Id, if any.
+holder(Id) ->
+    case [{Owner, Token} || {Owner, HandlerId, Token} <- registrations(), HandlerId =:= Id] of
+        [Holder | _] -> {ok, Holder};
+        [] -> {error, nil}
+    end.
+
+%% Detaches the registration Token under Id. Does nothing, and returns an
+%% error, when Id holds another registration or none: telemetry detaches
+%% by id alone, so the token is checked first.
+detach_registration(Id, Token) ->
+    case holder(Id) of
+        {ok, {_, Token}} -> sinal_ffi:telemetry_detach(Id);
+        _ -> {error, nil}
+    end.
 
 %% Called while the janitor is not registered. Starts the sinal application
 %% when it is not running (which starts the janitor), then makes one call to

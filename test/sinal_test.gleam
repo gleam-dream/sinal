@@ -86,6 +86,7 @@ pub fn observe_malformed_native_map_skips_one_invocation_test() {
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener,
     )
 
@@ -120,6 +121,7 @@ pub fn observe_callback_panic_keeps_native_failure_isolation_test() {
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener,
     )
 
@@ -793,6 +795,7 @@ pub fn emitted_maps_carry_exactly_the_encoded_keys_test() {
       listener_id,
       [[atom.create("test"), atom.create("encoded_keys")]],
       process.self(),
+      ffi.new_token(),
       fn(_, measurements, metadata) {
         process.send(raw, #(measurements, metadata))
       },
@@ -837,6 +840,7 @@ pub fn malformed_measurements_invokes_failure_observer_and_keeps_handler_test() 
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -894,6 +898,7 @@ pub fn malformed_metadata_invokes_failure_observer_and_keeps_handler_test() {
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -948,6 +953,7 @@ pub fn handler_returned_error_invokes_failure_observer_and_removes_handler_test(
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -1001,6 +1007,7 @@ pub fn unexpected_callback_crash_not_converted_to_typed_error_test() {
       listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -1091,7 +1098,7 @@ fn panic_message(work: fn() -> a) -> Result(String, Nil)
 @external(erlang, "scope_test_ffi", "span_context_term")
 fn span_context_term(context: span.SpanContext) -> Dynamic
 
-/// True for `{sinal_owner, Owner, Callback}`: the native config of every
+/// True for `{sinal_owner, Owner, Token, Callback}`: the native config of every
 /// sinal handler, which names the process that owns it.
 @external(erlang, "scope_test_ffi", "is_owned_config")
 fn is_owned_config(term: Dynamic) -> Bool
@@ -2245,6 +2252,7 @@ pub fn raw_telemetry_handler_observes_sinal_emission_test() {
       listener_id,
       [list.map(ev_name, atom.create)],
       process.self(),
+      ffi.new_token(),
       listener_cb,
     )
 
@@ -2533,10 +2541,10 @@ pub fn public_id_replacement_after_detach_test() {
   sinal.emit(ev, Nil, Nil)
   process.receive(subject, 100) |> should.equal(Ok("v2"))
 
-  // Attachment values retain the public ID, not a registration generation.
-  // A copied old value therefore detaches the replacement with that same ID.
-  sinal.detach(att1) |> should.equal(Ok(Nil))
+  // An attachment names one registration, not only its public ID. A copied
+  // old value does not detach the replacement that reuses the ID.
+  sinal.detach(att1) |> should.equal(Error(Nil))
   sinal.emit(ev, Nil, Nil)
-  process.receive(subject, 50) |> should.be_error()
-  sinal.detach(att2) |> should.equal(Error(Nil))
+  process.receive(subject, 100) |> should.equal(Ok("v2"))
+  sinal.detach(att2) |> should.equal(Ok(Nil))
 }

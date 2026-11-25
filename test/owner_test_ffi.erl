@@ -111,7 +111,7 @@ resume(Pid) ->
 await_attach_received(Pid, Owner) ->
     Result =
         receive
-            {trace, Pid, 'receive', {sinal_janitor, {attach, Owner, _, _, _}}} -> {ok, nil}
+            {trace, Pid, 'receive', {sinal_janitor, {attach, Owner, _, _, _, _}}} -> {ok, nil}
         after 5000 ->
             {error, nil}
         end,

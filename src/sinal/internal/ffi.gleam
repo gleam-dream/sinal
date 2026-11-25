@@ -36,16 +36,24 @@ pub fn is_map(term: Dynamic) -> Bool
 @external(erlang, "sinal_ffi", "is_missing_marker")
 pub fn is_missing_marker(term: Dynamic) -> Bool
 
+/// Names one registration: every attach gets a fresh token, so a handle
+/// to an earlier registration under the same id does not match a later one.
+pub type Token
+
+@external(erlang, "sinal_ffi", "new_token")
+pub fn new_token() -> Token
+
 /// Attaches `callback` under `handler_id` through `fun sinal_ffi:handle/4`,
-/// with `{sinal_owner, owner, callback}` as its native config, starting the
-/// `telemetry` application first when it is not running. Returns
-/// `Error(Nil)` when the id is already attached. Only the janitor installs
-/// handlers this way; it binds them to `owner`.
+/// with `{sinal_owner, owner, token, callback}` as its native config,
+/// starting the `telemetry` application first when it is not running.
+/// Returns `Error(Nil)` when the id is already attached. Only the janitor
+/// installs handlers this way; it binds them to `owner`.
 @external(erlang, "sinal_ffi", "telemetry_attach_many")
 pub fn telemetry_attach_many(
   handler_id: Dynamic,
   event_names: List(List(Atom)),
   owner: Pid,
+  token: Token,
   callback: fn(List(Atom), Dynamic, Dynamic) -> Nil,
 ) -> Result(Nil, Nil)
 

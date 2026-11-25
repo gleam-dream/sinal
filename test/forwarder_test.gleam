@@ -431,6 +431,7 @@ pub fn raising_handler_is_detached_and_forwarder_survives_test() {
       failure_listener_id,
       [failure_event],
       process.self(),
+      ffi.new_token(),
       fn(_, _, _) { process.send(failure_subject, Nil) },
     )
 

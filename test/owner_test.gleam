@@ -193,7 +193,7 @@ pub fn a_restarted_janitor_detaches_handlers_of_owners_that_exited_meanwhile_tes
   process.receive(seen_by_live, 0) |> should.equal(Error(Nil))
 }
 
-pub fn detach_releases_the_owner_binding_test() {
+pub fn an_owners_exit_leaves_a_reattached_id_of_another_owner_test() {
   let janitor = watch_janitor()
   let event =
     sinal.event(["owner_test", "released"], fields.int("n"), fields.empty())

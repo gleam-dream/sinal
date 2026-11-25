@@ -88,6 +88,7 @@ pub fn handler_reports_decode_failures_and_stays_attached_test() {
         ],
       ],
       process.self(),
+      ffi.new_token(),
       fn(_, _, _) { process.send(native_failures, Nil) },
     )
   let assert Ok(attachment) =

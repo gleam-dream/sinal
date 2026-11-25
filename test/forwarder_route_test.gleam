@@ -352,6 +352,7 @@ pub fn raising_handler_behind_a_route_never_reaches_the_emitter_test() {
         ],
       ],
       process.self(),
+      ffi.new_token(),
       fn(_, _, _) { process.send(failures, Nil) },
     )
 

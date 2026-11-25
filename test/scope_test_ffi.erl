@@ -181,7 +181,7 @@ get_otp_release() ->
 monotonic_nanos() ->
     erlang:monotonic_time(nanosecond).
 
-is_owned_config({sinal_owner, Owner, Callback}) ->
-    is_pid(Owner) andalso is_function(Callback, 3);
+is_owned_config({sinal_owner, Owner, Token, Callback}) ->
+    is_pid(Owner) andalso is_reference(Token) andalso is_function(Callback, 3);
 is_owned_config(_) ->
     false.

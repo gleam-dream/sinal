@@ -6,7 +6,8 @@
     map_lookup/2,
     is_native_map/1,
     is_missing_marker/1,
-    telemetry_attach_many/4,
+    telemetry_attach_many/5,
+    new_token/0,
     telemetry_detach/1,
     telemetry_execute/3,
     handle/4,
@@ -68,17 +69,22 @@ is_missing_marker(nil) -> true;
 is_missing_marker(undefined) -> true;
 is_missing_marker(_) -> false.
 
-%% Every handler is attached as this exported function, with its owner
-%% and the typed Gleam callback as its config. An exported capture keeps
-%% telemetry on its fast path and stops it from logging a "local function"
-%% warning for each attachment. The owner in the config is the record that
-%% a restarted janitor reads back (sinal_janitor_ffi:owned_handlers/0).
-handle(EventName, Measurements, Metadata, {sinal_owner, _Owner, Callback}) ->
+%% Every handler is attached as this exported function, with its owner,
+%% the token of its registration and the typed Gleam callback as its
+%% config. An exported capture keeps telemetry on its fast path and stops
+%% it from logging a "local function" warning for each attachment. The
+%% native handler table is the record of every registration: the janitor
+%% reads owners and tokens back from it (sinal_janitor_ffi).
+handle(EventName, Measurements, Metadata, {sinal_owner, _Owner, _Token, Callback}) ->
     Callback(EventName, Measurements, Metadata).
 
-telemetry_attach_many(HandlerId, EventNames, Owner, Callback) ->
+%% A token that names one registration: no other attach gets the same one.
+new_token() ->
+    make_ref().
+
+telemetry_attach_many(HandlerId, EventNames, Owner, Token, Callback) ->
     ensure_telemetry_started(),
-    Config = {sinal_owner, Owner, Callback},
+    Config = {sinal_owner, Owner, Token, Callback},
     case telemetry:attach_many(HandlerId, EventNames, fun ?MODULE:handle/4, Config) of
         ok -> {ok, nil};
         {error, already_exists} -> {error, nil}

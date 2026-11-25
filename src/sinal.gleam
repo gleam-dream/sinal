@@ -187,7 +187,7 @@ pub fn diagnostics() -> List(diagnostic.Diagnostic) {
 /// A registered handler, bound to the process that attached it. Keep it to
 /// `detach` the handler before that process exits.
 pub opaque type Attachment {
-  Attachment(id: Dynamic, owner: Pid)
+  Attachment(id: Dynamic, token: ffi.Token)
 }
 
 /// Why `attach` refused a subscription. The union is closed.
@@ -218,7 +218,7 @@ pub opaque type Subscription {
   Subscription(
     id: Option(String),
     label: Option(String),
-    install: fn(Dynamic, Pid) -> Result(Nil, Nil),
+    install: fn(Dynamic, Pid, ffi.Token) -> Result(Nil, Nil),
   )
 }
 
@@ -323,8 +323,8 @@ pub fn handler(
   let callback = fn(name, raw_measurements, raw_metadata) {
     dispatch(name, raw_measurements, raw_metadata, events, run, on_failure)
   }
-  Subscription(id: None, label: None, install: fn(id, owner) {
-    ffi.telemetry_attach_many(id, names, owner, callback)
+  Subscription(id: None, label: None, install: fn(id, owner, token) {
+    ffi.telemetry_attach_many(id, names, owner, token, callback)
   })
 }
 
@@ -376,11 +376,14 @@ pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
     None, None -> ffi.unique_handler_id()
   }
   let owner = process.self()
+  let token = ffi.new_token()
   case
-    janitor.attach(owner:, id: raw_id, install: fn() { install(raw_id, owner) }),
+    janitor.attach(owner:, id: raw_id, token:, install: fn() {
+      install(raw_id, owner, token)
+    }),
     id
   {
-    Ok(Nil), _ -> Ok(Attachment(raw_id, owner))
+    Ok(Nil), _ -> Ok(Attachment(raw_id, token))
     Error(Nil), Some(id) -> Error(AlreadyExists(id))
     Error(Nil), None -> panic as "sinal.attach: a fresh handler id was taken"
   }
@@ -433,12 +436,13 @@ fn attach_each(
 }
 
 /// Removes a handler. Any process can detach it, not only its owner.
-/// Returns `Error(Nil)` when it was not attached: it was detached before,
-/// telemetry removed it after it failed, or its owner exited.
+/// Returns `Error(Nil)` when its registration is not attached: it was
+/// detached before, telemetry removed it after it failed, or its owner
+/// exited. An attachment names one registration, so it never detaches a
+/// later registration that reuses its id. Detaching is a call to the
+/// janitor, which serializes it with installation and owner cleanup.
 pub fn detach(attachment: Attachment) -> Result(Nil, Nil) {
-  let detached = ffi.telemetry_detach(attachment.id)
-  janitor.release(owner: attachment.owner, id: attachment.id)
-  detached
+  janitor.detach(id: attachment.id, token: attachment.token)
 }
 
 /// A group of subscriptions for `with_subscriptions`.

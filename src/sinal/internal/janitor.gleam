@@ -3,17 +3,18 @@
 //// the registration when that process exits for any reason.
 ////
 //// `sinal.attach` asks the janitor to install the handler for the calling
-//// process (the owner). The janitor installs it, monitors the owner, and
-//// on the owner's `DOWN` detaches every handler the owner still holds.
-//// Installation and cleanup happen in this one process, so an owner's exit
-//// is always handled after the installations it made.
+//// process (the owner). The janitor installs it and monitors the owner. On
+//// the owner's `DOWN` it reads the native handler table and detaches every
+//// handler whose config names that owner. `sinal.detach` also runs in the
+//// janitor, so installation, detach and owner cleanup are serialized.
 ////
-//// The janitor keeps no record that a crash can lose. Each handler carries
-//// its owner in its native config (`{sinal_owner, Owner, Callback}`), so
-//// the native handler table, which the longer-lived `telemetry`
-//// application owns, is the record. A restarted janitor reads the owners
-//// back from it, monitors them again, and the owners that exited while no
-//// janitor ran deliver their `DOWN` at once.
+//// The janitor keeps no record of handlers, only one monitor per owner.
+//// Each handler carries its owner and a token that names its registration
+//// in its native config (`{sinal_owner, Owner, Token, Callback}`), so the
+//// native handler table, which the longer-lived `telemetry` application
+//// owns, is the one record. A restarted janitor reads the owners back from
+//// it and monitors them again; the owners that exited while no janitor ran
+//// deliver their `DOWN` at once.
 
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -21,17 +22,18 @@ import gleam/erlang/process.{type Pid}
 import gleam/list
 import gleam/otp/actor
 import gleam/otp/supervision
-import gleam/set.{type Set}
+import sinal/internal/ffi.{type Token}
 
 /// The janitor's messages.
 pub opaque type Message {
   Attach(
     owner: Pid,
     id: Dynamic,
+    token: Token,
     install: fn() -> Result(Nil, Nil),
     reply: process.Subject(Installation),
   )
-  Release(owner: Pid, id: Dynamic)
+  Detach(id: Dynamic, token: Token, reply: process.Subject(Result(Nil, Nil)))
   OwnerDown(process.Down)
 }
 
@@ -48,14 +50,9 @@ type Installation {
   InstallRaised(Exception)
 }
 
-/// `holders` maps each handler id to its owner; `owners` maps each owner to
-/// its monitor and the ids it holds. Both describe the same registrations.
+/// The owners the janitor monitors, each with its monitor.
 type State {
-  State(holders: Dict(Dynamic, Pid), owners: Dict(Pid, Owned))
-}
-
-type Owned {
-  Owned(monitor: process.Monitor, ids: Set(Dynamic))
+  State(owners: Dict(Pid, process.Monitor))
 }
 
 @external(erlang, "sinal_janitor_ffi", "capture")
@@ -67,18 +64,21 @@ fn reraise(exception: Exception) -> a
 @external(erlang, "sinal_janitor_ffi", "name")
 fn name() -> process.Name(Message)
 
-@external(erlang, "sinal_janitor_ffi", "owned_handlers")
-fn owned_handlers() -> List(#(Pid, Dynamic))
-
 @external(erlang, "sinal_janitor_ffi", "send")
 fn send(janitor: Pid, message: Message) -> Nil
 
-@external(erlang, "sinal_janitor_ffi", "holder")
-fn holder(id: Dynamic) -> Result(Pid, Nil)
+@external(erlang, "sinal_janitor_ffi", "owners")
+fn owners() -> List(Pid)
 
-/// Detaches handler `id` only when its native config names `owner`.
-@external(erlang, "sinal_janitor_ffi", "detach_held")
-fn detach_held(id: Dynamic, owner: Pid) -> Result(Nil, Nil)
+@external(erlang, "sinal_janitor_ffi", "handlers_of")
+fn handlers_of(owner: Pid) -> List(#(Dynamic, Token))
+
+@external(erlang, "sinal_janitor_ffi", "holder")
+fn holder(id: Dynamic) -> Result(#(Pid, Token), Nil)
+
+/// Detaches registration `token` under `id`, and nothing else.
+@external(erlang, "sinal_janitor_ffi", "detach_registration")
+fn detach_registration(id: Dynamic, token: Token) -> Result(Nil, Nil)
 
 @external(erlang, "sinal_janitor_ffi", "await_restart")
 fn await_restart() -> Nil
@@ -86,8 +86,8 @@ fn await_restart() -> Nil
 /// How long the janitor may take to start.
 const init_timeout = 5000
 
-/// How many times a registration waits for a janitor that is being
-/// restarted before it gives up.
+/// How many times a request waits for a janitor that is being restarted
+/// before it gives up.
 const restart_attempts = 100
 
 /// The janitor's child specification, for sinal's application supervisor.
@@ -100,12 +100,7 @@ fn start() -> Result(actor.Started(Nil), actor.StartError) {
     // The actor registers its name before this runs. A registration made
     // from now on either reaches this incarnation as a message, or was
     // installed earlier and is in the table read here.
-    let state =
-      list.fold(
-        owned_handlers(),
-        State(dict.new(), dict.new()),
-        fn(state, entry) { hold(state, entry.0, entry.1) },
-      )
+    let state = list.fold(owners(), State(dict.new()), watch)
     actor.initialised(state)
     |> actor.selecting(
       process.new_selector()
@@ -124,32 +119,30 @@ fn handle_message(
   message: Message,
 ) -> actor.Next(State, Message) {
   case message {
-    Attach(owner:, id:, install:, reply:) -> {
+    Attach(owner:, id:, token: _, install:, reply:) -> {
       let #(state, installation) = install_for(state, owner, id, install)
       process.send(reply, installation)
       actor.continue(state)
     }
-    Release(owner:, id:) ->
-      case dict.get(state.holders, id) {
-        Ok(holder) if holder == owner -> actor.continue(drop(state, id))
-        _ -> actor.continue(state)
-      }
-    OwnerDown(process.ProcessDown(pid:, ..)) ->
-      case dict.get(state.owners, pid) {
-        Error(Nil) -> actor.continue(state)
-        Ok(Owned(ids:, ..)) -> {
-          let state =
-            set.fold(ids, state, fn(state, id) {
-              // A detach that raises must not skip the others or stop the
-              // janitor. An id that telemetry removed and another caller
-              // reused is left alone.
-              let _ = capture(fn() { detach_held(id, pid) })
-              State(..state, holders: dict.delete(state.holders, id))
-            })
-          actor.continue(State(..state, owners: dict.delete(state.owners, pid)))
-        }
-      }
+    Detach(id:, token:, reply:) -> {
+      process.send(reply, detach_captured(id, token))
+      actor.continue(state)
+    }
+    OwnerDown(process.ProcessDown(pid:, ..)) -> {
+      // A detach that raises must not skip the others or stop the janitor.
+      list.each(handlers_of(pid), fn(handler) {
+        detach_captured(handler.0, handler.1)
+      })
+      actor.continue(State(owners: dict.delete(state.owners, pid)))
+    }
     OwnerDown(process.PortDown(..)) -> actor.continue(state)
+  }
+}
+
+fn detach_captured(id: Dynamic, token: Token) -> Result(Nil, Nil) {
+  case capture(fn() { detach_registration(id, token) }) {
+    Returned(detached) -> detached
+    Raised(_) -> Error(Nil)
   }
 }
 
@@ -160,22 +153,21 @@ fn install_for(
   install: fn() -> Result(Nil, Nil),
 ) -> #(State, Installation) {
   case capture(install) {
-    Returned(Ok(Nil)) -> #(hold(state, owner, id), Installed)
+    Returned(Ok(Nil)) -> #(watch(state, owner), Installed)
     Raised(exception) -> #(state, InstallRaised(exception))
     Returned(Error(Nil)) ->
-      case dict.get(state.holders, id) {
+      case holder(id) {
         // The id is held by an owner that exited and whose `DOWN` is still
         // in the mailbox, as when a supervisor restarts a process that
         // attaches under a stable `with_id` id. The new owner takes it
-        // over; the old owner's `DOWN` no longer names it.
-        Ok(holder) ->
+        // over; the old owner's `DOWN` finds no handler of its own there.
+        Ok(#(holder, held)) ->
           case process.is_alive(holder) {
             True -> #(state, Refused)
             False -> {
-              let _ = capture(fn() { detach_held(id, holder) })
-              let state = drop(state, id)
+              let _ = detach_captured(id, held)
               case capture(install) {
-                Returned(Ok(Nil)) -> #(hold(state, owner, id), Installed)
+                Returned(Ok(Nil)) -> #(watch(state, owner), Installed)
                 Returned(Error(Nil)) -> #(state, Refused)
                 Raised(exception) -> #(state, InstallRaised(exception))
               }
@@ -186,99 +178,85 @@ fn install_for(
   }
 }
 
-fn hold(state: State, owner: Pid, id: Dynamic) -> State {
-  // An id held by another owner whose handler was removed without a
-  // release (telemetry removes a failing handler) moves to the new owner.
-  let state = drop(state, id)
-  let owned = case dict.get(state.owners, owner) {
-    Ok(owned) -> owned
-    // Monitoring an owner that already exited delivers its `DOWN` at once.
-    Error(Nil) -> Owned(monitor: process.monitor(owner), ids: set.new())
-  }
-  State(
-    holders: dict.insert(state.holders, id, owner),
-    owners: dict.insert(
-      state.owners,
-      owner,
-      Owned(..owned, ids: set.insert(owned.ids, id)),
-    ),
-  )
-}
-
-fn drop(state: State, id: Dynamic) -> State {
-  case dict.get(state.holders, id) {
-    Error(Nil) -> state
-    Ok(owner) -> {
-      let holders = dict.delete(state.holders, id)
-      case dict.get(state.owners, owner) {
-        Error(Nil) -> State(..state, holders:)
-        Ok(Owned(monitor:, ids:)) -> {
-          let ids = set.delete(ids, id)
-          case set.is_empty(ids) {
-            True -> {
-              process.demonitor_process(monitor)
-              State(holders:, owners: dict.delete(state.owners, owner))
-            }
-            False ->
-              State(
-                holders:,
-                owners: dict.insert(state.owners, owner, Owned(monitor:, ids:)),
-              )
-          }
-        }
-      }
-    }
+/// Monitors `owner` unless it is already monitored. Monitoring an owner
+/// that already exited delivers its `DOWN` at once.
+fn watch(state: State, owner: Pid) -> State {
+  case dict.has_key(state.owners, owner) {
+    True -> state
+    False ->
+      State(owners: dict.insert(state.owners, owner, process.monitor(owner)))
   }
 }
 
 /// Runs `install` in the janitor and, when it returns `Ok`, binds handler
-/// `id` to `owner`: the janitor detaches it when `owner` exits, unless
-/// `release` came first. `install` returns `Error(Nil)` when the id is
-/// taken; an exception it raises is re-raised here.
+/// `id` to `owner`: the janitor detaches it when `owner` exits. `install`
+/// attaches the handler with `token` in its config and returns `Error(Nil)`
+/// when the id is taken; an exception it raises is re-raised here.
 ///
 /// Waits for the janitor's answer with no deadline: a request the janitor
 /// can still apply never outlives the caller's decision, so a failed attach
 /// leaves no handler. The janitor is a local supervised process, so either
-/// its answer comes or it exits. When it exits first, a handler it installed
-/// for this request is detached and the attach panics.
+/// its answer comes or it exits. When it exits first, the registration
+/// `token` names is detached, if the janitor installed it, and the attach
+/// panics.
 ///
 /// Starts sinal's application when it is not running. Panics when the
 /// janitor does not come back after a restart.
 pub fn attach(
   owner owner: Pid,
   id id: Dynamic,
+  token token: Token,
   install install: fn() -> Result(Nil, Nil),
 ) -> Result(Nil, Nil) {
   let janitor = await_running(restart_attempts)
-  let held_before = holder(id) == Ok(owner)
+  case request(janitor, Attach(owner:, id:, token:, install:, reply: _)) {
+    Ok(Installed) -> Ok(Nil)
+    Ok(Refused) -> Error(Nil)
+    Ok(InstallRaised(exception)) -> reraise(exception)
+    Error(Nil) -> {
+      let _ = detach_registration(id, token)
+      panic as "sinal: the janitor exited before answering an attach"
+    }
+  }
+}
+
+/// Detaches registration `token` under `id` through the janitor. Returns
+/// `Error(Nil)` when `id` holds another registration or none. A detach
+/// whose janitor exits before answering is asked again of its successor:
+/// the token makes the request safe to repeat.
+pub fn detach(id id: Dynamic, token token: Token) -> Result(Nil, Nil) {
+  detach_attempt(id, token, restart_attempts)
+}
+
+fn detach_attempt(
+  id: Dynamic,
+  token: Token,
+  attempts: Int,
+) -> Result(Nil, Nil) {
+  let janitor = await_running(restart_attempts)
+  case request(janitor, Detach(id:, token:, reply: _)) {
+    Ok(detached) -> detached
+    Error(Nil) if attempts > 0 -> detach_attempt(id, token, attempts - 1)
+    Error(Nil) -> panic as "sinal: the janitor keeps exiting"
+  }
+}
+
+/// Sends a request to the janitor `janitor` and waits for its answer, or
+/// returns `Error(Nil)` when that janitor exits first.
+fn request(
+  janitor: Pid,
+  make: fn(process.Subject(a)) -> Message,
+) -> Result(a, Nil) {
   let reply = process.new_subject()
   let monitor = process.monitor(janitor)
-  send(janitor, Attach(owner:, id:, install:, reply:))
+  send(janitor, make(reply))
   let answer =
     process.new_selector()
     |> process.select_map(reply, Ok)
     |> process.select_specific_monitor(monitor, fn(_) { Error(Nil) })
     |> process.selector_receive_forever
-  case answer {
-    Ok(installation) -> {
-      process.demonitor_process(monitor)
-      case installation {
-        Installed -> Ok(Nil)
-        Refused -> Error(Nil)
-        InstallRaised(exception) -> reraise(exception)
-      }
-    }
-    Error(Nil) -> {
-      case held_before {
-        True -> Nil
-        False -> {
-          let _ = detach_held(id, owner)
-          Nil
-        }
-      }
-      panic as "sinal: the janitor exited before answering an attach"
-    }
-  }
+  process.demonitor_process(monitor)
+  answer
 }
 
 fn await_running(attempts: Int) -> Pid {
@@ -289,21 +267,5 @@ fn await_running(attempts: Int) -> Pid {
       await_running(attempts - 1)
     }
     Error(Nil) -> panic as "sinal: the janitor is not running"
-  }
-}
-
-/// Makes the janitor forget handler `id` of `owner`, after a `detach`.
-/// Does nothing when the janitor is not running: its replacement reads
-/// the handler table, where the handler no longer is.
-pub fn release(owner owner: Pid, id id: Dynamic) -> Nil {
-  case process.named(name()) {
-    Ok(_) -> {
-      let _ =
-        capture(fn() {
-          process.send(process.named_subject(name()), Release(owner:, id:))
-        })
-      Nil
-    }
-    Error(Nil) -> Nil
   }
 }
