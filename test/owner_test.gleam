@@ -238,11 +238,14 @@ pub fn native_handlers_of_other_libraries_are_left_alone_test() {
   let event =
     sinal.event(["owner_test", "native"], fields.int("n"), fields.empty())
   let id = "owner_test_native"
+  let ready = process.new_subject()
   let attacher =
     process.spawn_unlinked(fn() {
       attach_native(id, [atom("owner_test"), atom("native")], process.self())
+      process.send(ready, Nil)
       process.sleep_forever()
     })
+  let assert Ok(Nil) = process.receive(ready, 1000)
   let assert Ok(old_janitor) = janitor()
   let supervisor = suspend_supervisor()
   kill_and_await(old_janitor)
