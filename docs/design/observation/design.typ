@@ -265,7 +265,7 @@
       #points(
         [The ordinary subscription reports a decode failure as a coalesced diagnostic and retains the registration. A custom failure observer that raises converts even a malformed-data path into native callback failure; #adr(4) records the retained-handler rule.],
         [A multi-event registration fails as one identity. Failure during one selected event removes it from every selected event, while an unrelated registration continues to receive occurrences.],
-        [Native `[telemetry, handler, failure]` metadata includes the triggering name, native handler identifier, callback configuration, exception class, reason and stacktrace. The configuration is the actual typed callback closure; captured application values are visible to native failure observers and handler-table introspection.],
+        [Native `[telemetry, handler, failure]` metadata includes the triggering name, native handler identifier, callback configuration, exception class, reason and stacktrace. The configuration is `{sinal_owner, Owner, Token, Callback}`, whose callback is the typed closure, so captured application values are visible to native failure observers and handler-table introspection.],
         [Opaque Subscription and Attachment types do not make captured data secret from native code. Applications must avoid capturing credentials or other sensitive data they cannot expose to installed native observers; Sinal does not redact that native configuration.],
       )
       #behavior(title: "Malformed data skips one callback invocation", area: "Native dispatch and registration", level: "boundary")[
