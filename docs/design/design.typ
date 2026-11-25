@@ -35,12 +35,12 @@
         (from: "span", to: "native", relation: "call", label: "start and terminal"),
         (from: "forwarder", to: "native", relation: "call", label: "dispatch"),
         (from: "native", to: "handler", relation: "call", label: "decode then invoke"),
-      ), caption: [The boundaries mark each context's responsibility rather than a process. Unrouted callbacks share the producer process; forwarded callbacks share the forwarder process. Native spans and drop reports bypass routes.],
+      ), caption: [The boundaries mark each context's responsibility rather than a process. Unrouted callbacks share the producer process; forwarded callbacks share the forwarder process. Span occurrences follow routes like every other occurrence; drop reports bypass routes.],
     )
     #points(
       [#ctx("observation") owns #term("term-event"), #term("term-fields") and #term("term-correlation"). Its definitions allocate no event process and install no registration.],
       [Registration binds caller callbacks into #term("term-subscription") values and returns #term("term-attachment") handles. Scope orchestration owns ordered acquisition and reverse cleanup.],
-      [Spans delegate timing and exception observation to native telemetry. #ctx("forwarding") owns optional process separation and admission through the #term("term-forwarder"), while the #term("term-route") table remains node-wide application configuration.],
+      [Spans measure timing and catch exceptions in the producer and dispatch their occurrences as ordinary emission does. #ctx("forwarding") owns optional process separation and admission through the #term("term-forwarder"), while the #term("term-route") table remains node-wide application configuration.],
       [#ctx("verification") owns the #term("term-native-oracle"), the #term("term-validation-profile") and the executable evidence for the other two contexts.],
       [All runtime work occurs on one BEAM node. There is no network transport, persistent event journal or cross-node registration; multiple nodes install independent handlers and routes.],
     )
@@ -66,7 +66,7 @@
         [emit], [Check enums, encode both native maps, select route], [Inline native dispatch or one admission/send attempt; no delivery receipt.],
         [collector.supervised], [Validate capacity; create the bounded store], [Attach each source not already attached; entries are written later by handlers.],
         [with_subscriptions], [Acquire complete known plan], [Work runs, then cleanup; separate work and cleanup outcomes.],
-        [span.run], [Encode start metadata], [Start, work, completion encoding, terminal observation and return/re-raise in one process.],
+        [span.run], [Encode start metadata], [Clocks, work, completion encoding and return/re-raise in the producer; each observation dispatched as emit dispatches it.],
         [forwarder.new/supervised], [Obtain stable name counters; validate startup settings], [Publish incarnation target only after initialization; handlers execute later.],
         [route/unroute], [Validate trusted prefix], [Serialize node-wide binding update; in-flight old delivery persists.],
       ))
@@ -143,7 +143,7 @@
     ]
     #subsection(title: "A scoped diagnostic and a native span")[
       #points(
-        [A test or explicit diagnostic call creates an ordered plan for the span's typed start and stop observers. Scope acquisition completes before work starts, and those native span observations remain inline even while the shop prefix is routed.],
+        [A test or explicit diagnostic call creates an ordered plan for the span's typed start and stop observers. Scope acquisition completes before work starts, and those span observations follow the shop prefix's route like every other occurrence #adr(18).],
         [A returned business Error produces stop and remains the work result. A catchable throw produces exception with the start context and re-raises its original evidence; scope cleanup then attempts every known registration and reports indexed failures without replacing that outcome.],
         [These examples compose observation ownership rather than creating a shared runtime. The source package still chooses when its business state changed, the application still chooses retention/export and Sinal still provides only typed native observation plus explicitly selected bounded forwarding.],
       )

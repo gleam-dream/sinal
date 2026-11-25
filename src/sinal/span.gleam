@@ -29,8 +29,10 @@
 ////
 //// Native telemetry measures the timing fields; `duration_in`,
 //// `system_time_in` and `monotonic_time_in` read them in an explicit
-//// `TimeUnit`. A span runs in one process: it ignores forwarder routes,
-//// because its start and stop must share a process to measure duration.
+//// `TimeUnit`. The producer measures the span: it reads the clocks, runs
+//// the work and re-raises its exception. Each of the three events then
+//// follows forwarder routes exactly as `sinal.emit` does, so a routed
+//// span's handlers run in the forwarder.
 
 import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
@@ -258,13 +260,15 @@ pub type Completion(result, extra_measurements, stop_metadata) {
 
 /// Runs `work` inside the span and returns its result. A raised exception
 /// (error, exit or throw) emits the exception event and is re-raised with
-/// its class, reason and stacktrace.
+/// its class, reason and stacktrace. The work runs and is timed in the
+/// calling process; each event is then dispatched as `sinal.emit`
+/// dispatches it, to a forwarder when a route matches its name.
 pub fn run(
   span: Span(start_metadata, extra_measurements, stop_metadata),
   start_metadata: start_metadata,
   work: fn() -> Completion(a, extra_measurements, stop_metadata),
 ) -> a {
-  ffi.telemetry_span(
+  ffi.span(
     list.map(span.name, atom.create),
     emit.encode(
       span.start_metadata,
@@ -290,6 +294,7 @@ pub fn run(
         ),
       )
     },
+    emit.dispatch,
   )
 }
 

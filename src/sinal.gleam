@@ -102,7 +102,6 @@ import sinal/internal/emit
 import sinal/internal/ffi
 import sinal/internal/janitor
 import sinal/internal/name as grammar
-import sinal/internal/route
 
 /// A typed event: its name and the codecs of its measurements and
 /// metadata.
@@ -172,11 +171,7 @@ pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
     emit.encode(event.metadata, metadata, caller: "sinal.emit", event: fn() {
       event.name
     })
-  case route.find(event.name) {
-    Ok(send) -> send(event.name, raw_measurements, raw_metadata)
-    Error(Nil) ->
-      ffi.telemetry_execute(event.name, raw_measurements, raw_metadata)
-  }
+  emit.dispatch(event.name, raw_measurements, raw_metadata)
 }
 
 /// The `[sinal, diagnostic, occurred]` event that reports sinal's own

@@ -145,7 +145,7 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 - A handler belongs to the process that attaches it. Sinal's own OTP application runs a janitor that detaches a process's handlers when the process exits, so attach long-lived handlers from a long-lived supervised process, never from a process that returns once setup is done. Removal follows the exit without being synchronous with it.
 - Forwarding is best effort. Its default capacity is 1,024 events, queued plus executing. A full or unavailable forwarder drops and counts an event; it does not retry, fall back to inline execution, or provide a delivery receipt. Pending events can be lost at shutdown.
 - The [collector](src/sinal/collector.gleam) keeps the newest 1,024 entries by default and overwrites the oldest. It is a diagnostic aid: it bounds entry count and not entry size, starts empty after a restart, and exports nothing.
-- Forwarded handlers run in the forwarder process, without the producer's process-local context. Native spans stay in one process and ignore routes.
+- Forwarded handlers run in the forwarder process, without the producer's process-local context. Spans are timed in the producer, and their start, stop and exception events follow routes like every other event.
 
 ## Examples and reference
 
