@@ -270,7 +270,7 @@ pub fn run(
       span.start_metadata,
       start_metadata,
       caller: "sinal/span.run",
-      event: fn() { list.append(span.name, ["start"]) },
+      event: fn() { role_atoms(span, "start") },
     ),
     fn() {
       let Completion(result:, measurements:, metadata:) = work()
@@ -280,13 +280,13 @@ pub fn run(
           span.stop_measurements,
           measurements,
           caller: "sinal/span.run",
-          event: fn() { list.append(span.name, ["stop"]) },
+          event: fn() { role_atoms(span, "stop") },
         ),
         emit.encode(
           span.stop_metadata,
           metadata,
           caller: "sinal/span.run",
-          event: fn() { list.append(span.name, ["stop"]) },
+          event: fn() { role_atoms(span, "stop") },
         ),
       )
     },
@@ -459,4 +459,9 @@ fn kind_field() -> fields.Fields(ExceptionKind) {
         }
       }),
   )
+}
+
+/// The atom name of one of the span's events, for a diagnostic.
+fn role_atoms(span: Span(a, b, c), role: String) -> List(atom.Atom) {
+  list.map(list.append(span.name, [role]), atom.create)
 }

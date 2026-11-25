@@ -178,14 +178,15 @@
     #subsection(title: "Enum completeness and non-silent incompatibility")[
       #points(
         [`enum` requires a nonempty value list with unique encoded names. An exhaustive naming function does not prove that the list includes every constructor of the caller's type.],
-        [Encoding an unlisted value still writes its name for native observers. `fields.check` returns InvalidField for that value, while the public emit paths log the same incompatibility in the producer process and still emit the occurrence.],
+        [Encoding an unlisted value still writes its name for native observers. `fields.check` returns InvalidField for that value, while the public emit paths report the same incompatibility as a coalesced diagnostic in the producer process and still emit the occurrence.],
         [A typed observer's enum decoder rejects the unlisted name and skips that invocation. This is a definition-completeness risk rather than a delivery receipt or a handler-returned application error.],
       )
       #behavior(title: "An unlisted enum value remains diagnosable", area: "Definitions and codecs", level: "boundary")[
         #given[a caller value is absent from its enum's declared value list]
         #when[the caller emits that value]
         #then[the encoded name remains available to native observers]
-        #then[the producer receives an incompatibility warning naming the event and field]
+        #then[the first such occurrence for the event name logs an incompatibility warning naming the event and field]
+        #then[every occurrence is counted and reported by the diagnostic event on its coalesced schedule]
         #then[a typed observer reports malformed input and remains installed if its failure observer returns normally]
       ]
       #points(
@@ -197,7 +198,7 @@
   #section(title: "Native dispatch and registration", lead: "The native registry selects callbacks; Sinal selects and decodes their typed definition.", body: [
     #answers(title: "Native dispatch contracts", accent: accent,
       responsibility: [Translate typed values to native maps and bind selected definitions to installed callbacks.],
-      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach` and failure descriptions.],
+      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach`, `diagnostic_event` and failure descriptions.],
       interactions: [The native telemetry registry runs exported sinal_ffi:handle/4 with `{sinal_owner, Owner, Callback}` as configuration; the janitor installs every registration. Routes optionally change the dispatch process.],
       invariants: [Selected event names are distinct inside one handler; one native identifier names one registration at a time; measurement decoding precedes metadata decoding and handler invocation.],
       failure: [Malformed input skips one invocation; returned handler error or callback exception removes the whole registration; native call failures can raise beyond AttachError.],
@@ -221,7 +222,7 @@
     ]
     #subsection(title: "Pure subscriptions and installed identity")[
       #points(
-        [`observe` is the common infallible one-event path with a fresh identifier and warning logger for decode failures. `observe_labelled` adds a readable label without requiring label uniqueness or a typed attach result.],
+        [`observe` is the common infallible one-event path with a fresh identifier and coalesced diagnostic reporting for decode failures. `observe_labelled` adds a readable label without requiring label uniqueness or a typed attach result.],
         [`subscription` describes the same infallible callback without installing it. `handler` describes one fallible callback and failure observer for a nonempty list of same-shaped events; it returns the selected descriptor to both callbacks and refuses repeated names as definition bugs.],
         [Different measurement or metadata shapes belong in separate subscriptions. Their callbacks remain typed before the opaque Subscription values are grouped into a heterogeneous plan.],
         [Fresh native identity is `{sinal_handler, N}` or `{sinal_handler, Label, N}`, where N comes from a node-local positive unique integer. Labels accept arbitrary strings, create no atoms, and are diagnostic names rather than collision keys.],
@@ -237,6 +238,20 @@
         [Subscription construction installs nothing, but opaque closures may retain caller resources. Applications bound the count and lifetime of subscriptions and captured values; no library subscription-count or capture-size limit exists.],
       )
     ]
+    #subsection(title: "Coalesced diagnostics")[
+      #points(
+        [Sinal reports two conditions of its own without failing the emitter: an emitted value absent from its enum list, and an ordinary subscription's invocation skipped by a decode failure. Either can repeat on every occurrence of an event, so a report per occurrence would make the producer's cost depend on the logger and let whoever triggers the condition choose the log volume.],
+        [Each condition is counted per event name for the life of the node. The first occurrence logs one warning. The diagnostic event `[sinal, diagnostic, occurred]` is emitted when the count reaches each power of two, with the occurrences since the previous report and the total; occurrences after the last power of two stay counted until the next report.],
+        [The report runs synchronously in the process that met the condition and is never routed, so a forwarder cannot drop or reorder it. A `handler`'s own failure observer is unchanged: the caller owns that policy.],
+        [Counters live in node-wide storage keyed by condition and event name. Both come from source, so the key set is bounded.],
+      )
+      #behavior(title: "A repeated diagnostic logs once and is counted", area: "Native dispatch and registration", level: "boundary")[
+        #given[a diagnostic condition already occurred for an event name]
+        #when[the condition occurs again for that name]
+        #then[no further warning is logged]
+        #then[the occurrence is counted and the diagnostic event carries the count when the total reaches a power of two]
+      ]
+    ]
     #subsection(title: "Decode failure, handler error and callback exception")[
       #md-table(3, (
         [Outcome], [Typed observer], [Native consequence],
@@ -247,7 +262,7 @@
         [Run or failure observer raises], [Unexpected exception does not enter the caller's e], [Entire registration removed; native failure occurrence emitted.],
       ))
       #points(
-        [The ordinary subscription logs a decode warning and retains the registration. A custom failure observer that raises converts even a malformed-data path into native callback failure; #adr(4) records the retained-handler rule.],
+        [The ordinary subscription reports a decode failure as a coalesced diagnostic and retains the registration. A custom failure observer that raises converts even a malformed-data path into native callback failure; #adr(4) records the retained-handler rule.],
         [A multi-event registration fails as one identity. Failure during one selected event removes it from every selected event, while an unrelated registration continues to receive occurrences.],
         [Native `[telemetry, handler, failure]` metadata includes the triggering name, native handler identifier, callback configuration, exception class, reason and stacktrace. The configuration is the actual typed callback closure; captured application values are visible to native failure observers and handler-table introspection.],
         [Opaque Subscription and Attachment types do not make captured data secret from native code. Applications must avoid capturing credentials or other sensitive data they cannot expose to installed native observers; Sinal does not redact that native configuration.],

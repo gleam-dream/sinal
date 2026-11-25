@@ -21,7 +21,8 @@
     identity/1,
     is_decoding/0,
     decoding/1,
-    log_warning/1
+    log_warning/1,
+    count_diagnostic/2
 ]).
 
 identity(X) ->
@@ -145,3 +146,33 @@ event_parts({event, Name, Measurements, Metadata}) ->
 log_warning(Message) ->
     logger:warning("~ts", [Message], #{domain => [sinal]}),
     nil.
+
+%% Counts one occurrence of a diagnostic condition for an event name and
+%% returns the new total. The counter is created on first use and kept in
+%% `persistent_term` for the life of the node. Kinds are a closed set and
+%% names come from source, so the keys are bounded. Storing a new key does
+%% not trigger the global scan that replacing one does; the node-local lock
+%% stops two first occurrences from replacing each other's counter.
+count_diagnostic(Kind, Name) ->
+    Key = {sinal_diagnostic, Kind, Name},
+    Counter =
+        case persistent_term:get(Key, undefined) of
+            undefined ->
+                global:trans(
+                    {Key, self()},
+                    fun() ->
+                        case persistent_term:get(Key, undefined) of
+                            undefined ->
+                                New = atomics:new(1, [{signed, false}]),
+                                persistent_term:put(Key, New),
+                                New;
+                            Existing ->
+                                Existing
+                        end
+                    end,
+                    [node()]
+                );
+            Existing ->
+                Existing
+        end,
+    atomics:add_get(Counter, 1, 1).
