@@ -42,9 +42,9 @@
 ////   unspecified, as it already is for native telemetry handler order.
 //// - **The forwarder is the handler's `self()`.** Handlers run inside the
 ////   forwarder process. Process-dictionary context on the producer is not
-////   carried across the hop, and a native span cannot be forwarded (its
-////   start and stop must share one process to measure duration); spans and
-////   this module's own drop report ignore routes.
+////   carried across the hop. A span is timed in the producer and its
+////   start, stop and exception events follow routes like any other event;
+////   this module's own drop report ignores routes.
 //// - **Shutdown does not drain.** Pending events are lost when the process
 ////   stops. A restart takes a best-effort snapshot of the in-flight count
 ////   and reports it as `lost`. This count is not a delivery receipt.
