@@ -41,6 +41,7 @@ pub fn main() {
   bench_codec()
   bench_span()
   bench_unrouted()
+  bench_unlisted_enum()
 
   io.println(
     "================================================================================",
@@ -274,5 +275,54 @@ fn bench_unrouted() {
     <> " ns/op with no routes, "
     <> int.to_string(other_route_nanos / samples)
     <> " ns/op with one route on another prefix\n",
+  )
+}
+
+type BenchOutcome {
+  BenchListed
+  BenchUnlisted
+}
+
+/// Every emit of a value that its `fields.enum` list does not name takes
+/// the diagnostic path. The listed loop is the same emit without it.
+fn bench_unlisted_enum() {
+  let outcome =
+    fields.enum("outcome", [BenchListed], fn(outcome) {
+      case outcome {
+        BenchListed -> "listed"
+        BenchUnlisted -> "unlisted"
+      }
+    })
+  let ev = sinal.event(["bench", "unlisted_enum"], fields.empty(), outcome)
+
+  let warmup = 10_000
+  let samples = 20_000
+
+  loop_n(warmup, fn(_) { sinal.emit(ev, Nil, BenchListed) })
+
+  let start_t = monotonic_nanos()
+  loop_n(samples, fn(_) { sinal.emit(ev, Nil, BenchListed) })
+  let listed_nanos = monotonic_nanos() - start_t
+
+  let unlisted_start = monotonic_nanos()
+  loop_n(samples, fn(_) { sinal.emit(ev, Nil, BenchUnlisted) })
+  let unlisted_nanos = monotonic_nanos() - unlisted_start
+
+  io.println(
+    "6. Diagnostic path (sinal.emit of an enum value, no handlers, default logger):",
+  )
+  io.println(
+    "   Samples:    "
+    <> int.to_string(samples)
+    <> " iterations (warmup: "
+    <> int.to_string(warmup)
+    <> ")",
+  )
+  io.println(
+    "   Latency:    "
+    <> int.to_string(listed_nanos / samples)
+    <> " ns/op for a listed value, "
+    <> int.to_string(unlisted_nanos / samples)
+    <> " ns/op for an unlisted value\n",
   )
 }

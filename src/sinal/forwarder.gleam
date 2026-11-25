@@ -358,13 +358,13 @@ pub fn emit(
       measurement_fields,
       measurements,
       caller: "sinal/forwarder.emit",
-      event: fn() { list.map(name, atom.to_string) },
+      event: fn() { name },
     ),
     emit.encode(
       metadata_fields,
       metadata,
       caller: "sinal/forwarder.emit",
-      event: fn() { list.map(name, atom.to_string) },
+      event: fn() { name },
     ),
   )
 }

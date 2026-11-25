@@ -10,6 +10,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
 import sinal
+import sinal/diagnostic
 import sinal/fields
 import sinal/internal/ffi
 import sinal/span
@@ -171,7 +172,7 @@ pub fn emit_reports_an_unlisted_enum_value_at_the_emit_site_test() {
     capture_warnings(fn() { sinal.emit(ev, Nil, #(Delivered, Some(Retried))) })
   logs
   |> should.equal([
-    "sinal.emit: event [\"decode_failure\", \"emit_site\"] carries a value that its fields.enum list does not name (invalid value at key previous: expected one of delivered, found \"retried\"); every sinal handler of the event will skip it as malformed",
+    "sinal.emit: event [\"decode_failure\", \"emit_site\"] carries a value that its fields.enum list does not name (invalid value at key previous: expected one of delivered, found \"retried\"); every sinal handler of the event will skip it as malformed. Later occurrences are counted and reported by the [sinal, diagnostic, occurred] event",
   ])
   // The native map still carries the name, for Erlang and Elixir handlers.
   fields.encode(incomplete_outcome(), Retried)
@@ -259,4 +260,94 @@ pub fn the_documented_round_trip_pattern_catches_an_incomplete_list_test() {
     outcome_name,
   ))
   |> should.equal(Ok(Nil))
+}
+
+fn repeat(times: Int, work: fn() -> Nil) -> Nil {
+  case times <= 0 {
+    True -> Nil
+    False -> {
+      work()
+      repeat(times - 1, work)
+    }
+  }
+}
+
+/// Emits `work` a hundred times while observing the diagnostic event, and
+/// returns the warnings logged and the reports received for `event`.
+fn hundred_times(
+  event: String,
+  work: fn() -> Nil,
+) -> #(List(String), List(#(diagnostic.Count, diagnostic.Report))) {
+  let reports = process.new_subject()
+  let attachment =
+    sinal.observe(sinal.diagnostic_event(), fn(count, report) {
+      case report.event == event {
+        True -> process.send(reports, #(count, report))
+        False -> Nil
+      }
+    })
+  let #(Nil, logs) = capture_warnings(fn() { repeat(100, work) })
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  #(logs, drain(reports, []))
+}
+
+fn drain(subject: process.Subject(a), seen: List(a)) -> List(a) {
+  case process.receive(subject, 0) {
+    Ok(message) -> drain(subject, [message, ..seen])
+    Error(Nil) -> list.reverse(seen)
+  }
+}
+
+pub fn repeated_unlisted_values_log_once_and_report_counts_test() {
+  let ev =
+    sinal.event(
+      ["decode_failure", "coalesced_emit"],
+      fields.empty(),
+      incomplete_outcome(),
+    )
+  let #(logs, reports) =
+    hundred_times("decode_failure.coalesced_emit", fn() {
+      sinal.emit(ev, Nil, Retried)
+    })
+  list.length(logs) |> should.equal(1)
+  // Reports at totals 1, 2, 4, 8, 16, 32 and 64 account for 64 of the 100.
+  list.map(reports, fn(report) { report.0 })
+  |> should.equal([
+    diagnostic.Count(occurrences: 1, total: 1),
+    diagnostic.Count(occurrences: 1, total: 2),
+    diagnostic.Count(occurrences: 2, total: 4),
+    diagnostic.Count(occurrences: 4, total: 8),
+    diagnostic.Count(occurrences: 8, total: 16),
+    diagnostic.Count(occurrences: 16, total: 32),
+    diagnostic.Count(occurrences: 32, total: 64),
+  ])
+  let assert [#(_, first), ..] = reports
+  first.kind |> should.equal(diagnostic.UnlistedValue)
+  string.contains(first.detail, "sinal.emit: event") |> should.equal(True)
+}
+
+pub fn repeated_decode_failures_log_once_and_report_counts_test() {
+  let ev =
+    sinal.event(
+      ["decode_failure", "coalesced_observe"],
+      fields.int("count"),
+      fields.empty(),
+    )
+  let attachment = sinal.observe(ev, fn(_, _) { Nil })
+  let #(logs, reports) =
+    hundred_times("decode_failure.coalesced_observe", fn() {
+      native_emit(
+        ["decode_failure", "coalesced_observe"],
+        native_map([#("count", dynamic.string("x"))]),
+        native_map([]),
+      )
+    })
+  sinal.detach(attachment) |> should.equal(Ok(Nil))
+  list.length(logs) |> should.equal(1)
+  list.map(reports, fn(report) { { report.0 }.total })
+  |> should.equal([1, 2, 4, 8, 16, 32, 64])
+  let assert [#(_, first), ..] = reports
+  first.kind |> should.equal(diagnostic.SkippedInvocation)
+  string.contains(first.detail, "malformed measurements")
+  |> should.equal(True)
 }

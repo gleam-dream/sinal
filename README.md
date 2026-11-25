@@ -102,7 +102,7 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 ## Operational limits
 
 - Event-name segments, field keys, and route prefixes become permanent BEAM atoms. Keep them in source code; never build them from request or user input.
-- Without a route, observers run synchronously in the emitting process and can delay it. A malformed native map skips one callback and reports a typed failure; a fallible handler that returns an error is removed by native telemetry.
+- Without a route, observers run synchronously in the emitting process and can delay it. A malformed native map skips one callback and reports a typed failure. Sinal's own reports of that, and of an emitted enum value its list does not name, are coalesced per event name: one warning, then counts in the [diagnostic event](src/sinal/diagnostic.gleam); a fallible handler that returns an error is removed by native telemetry.
 - Forwarding is best effort. Its default capacity is 1,024 events, queued plus executing. A full or unavailable forwarder drops and counts an event; it does not retry, fall back to inline execution, or provide a delivery receipt. Pending events can be lost at shutdown.
 - Forwarded handlers run in the forwarder process, without the producer's process-local context. Native spans stay in one process and ignore routes.
 

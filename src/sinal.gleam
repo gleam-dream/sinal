@@ -34,7 +34,8 @@
 //// catches callback errors, exits and throws; untrappable termination can
 //// still stop the executing process. A native map that does not decode
 //// skips that one invocation: the handler's failure
-//// observer receives the typed `HandlerFailure` (`observe` logs it), and
+//// observer receives the typed `HandlerFailure` (`observe` reports it as
+//// a coalesced diagnostic: one warning, then `diagnostic_event`), and
 //// the handler stays attached when failure reporting returns normally.
 //// A handler that returns an error or crashes
 //// is removed, and telemetry emits its standard
@@ -75,6 +76,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
+import sinal/diagnostic
 import sinal/fields.{type FieldError, type Fields}
 import sinal/internal/emit
 import sinal/internal/ffi
@@ -143,17 +145,32 @@ pub fn emit(event: Event(m, d), measurements: m, metadata: d) -> Nil {
       event.measurements,
       measurements,
       caller: "sinal.emit",
-      event: fn() { name(event) },
+      event: fn() { event.name },
     )
   let raw_metadata =
     emit.encode(event.metadata, metadata, caller: "sinal.emit", event: fn() {
-      name(event)
+      event.name
     })
   case route.find(event.name) {
     Ok(send) -> send(event.name, raw_measurements, raw_metadata)
     Error(Nil) ->
       ffi.telemetry_execute(event.name, raw_measurements, raw_metadata)
   }
+}
+
+/// The `[sinal, diagnostic, occurred]` event that reports sinal's own
+/// diagnostics: an emitted value missing from its `fields.enum` list, and
+/// an `observe` or `subscription` invocation skipped because a native map
+/// did not decode. It is emitted in the process that hit the condition,
+/// when the count for that condition and event name reaches 1, 2, 4 and
+/// each later power of two; `sinal/diagnostic` states the schedule and its
+/// limits. It is synchronous and never routed.
+pub fn diagnostic_event() -> Event(diagnostic.Count, diagnostic.Report) {
+  event(
+    diagnostic.event_name,
+    diagnostic.count_fields(),
+    diagnostic.report_fields(),
+  )
 }
 
 /// A registered handler. Keep it to `detach` the handler.
@@ -196,7 +213,9 @@ pub opaque type Subscription {
 /// Attaches an infallible handler to one event and returns its attachment.
 /// The handler runs in the emitting process (or the forwarder's, for a
 /// routed event). A native map that does not decode skips that one
-/// invocation and logs a warning; the handler stays attached. A handler
+/// invocation and reports a `SkippedInvocation` diagnostic (one warning for
+/// the event name, then `diagnostic_event`); the handler stays attached. A
+/// handler
 /// crash removes it and emits telemetry's `[telemetry, handler, failure]`
 /// event.
 pub fn observe(event: Event(m, d), run: fn(m, d) -> Nil) -> Attachment {
@@ -233,7 +252,9 @@ fn install_fresh(subscription: Subscription, caller: String) -> Attachment {
 
 /// Describes an infallible handler of one event. When a native map does
 /// not decode, the handler skips that one invocation, stays attached, and
-/// logs a warning that names the event and the `HandlerFailure`.
+/// reports a `SkippedInvocation` diagnostic that names the event and the
+/// `HandlerFailure`: a warning the first time for that event name, and
+/// `diagnostic_event` on the coalesced schedule of `sinal/diagnostic`.
 pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
   handler(
     [event],
@@ -242,11 +263,15 @@ pub fn subscription(event: Event(m, d), run: fn(m, d) -> Nil) -> Subscription {
       Ok(Nil)
     },
     fn(event, failure) {
-      ffi.log_warning(
-        "sinal.observe: skipped one invocation of event "
-        <> string.inspect(name(event))
-        <> ": "
-        <> describe_handler_failure(failure, fn(_) { "" }),
+      diagnostic.report(
+        diagnostic.SkippedInvocation,
+        name: event.name,
+        describe: fn() {
+          "sinal.observe: skipped one invocation of event "
+          <> string.inspect(name(event))
+          <> ": "
+          <> describe_handler_failure(failure, fn(_) { "" })
+        },
       )
     },
   )
