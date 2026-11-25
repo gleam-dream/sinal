@@ -1,4 +1,5 @@
 import gleeunit
+import usage/collecting
 import usage/correlation_ids
 import usage/forwarding
 import usage/handlers
@@ -33,6 +34,10 @@ pub fn spans_test() {
 
 pub fn forwarding_test() {
   forwarding.run()
+}
+
+pub fn collecting_test() {
+  collecting.run()
 }
 
 pub fn correlation_ids_test() {

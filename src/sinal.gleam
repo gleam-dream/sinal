@@ -47,7 +47,8 @@
 //// for several same-shaped events with a fallible handler and a typed
 //// failure observer, `with_label` to name the handler in
 //// `:telemetry.list_handlers`, and `with_id` for a stable native handler
-//// id. `attach` installs one for the long term; `with_subscriptions`
+//// id. `attach` installs one for the long term and `attach_all` a group,
+//// all or nothing; `with_subscriptions`
 //// installs a group for the duration of one function call. Sinal gives
 //// every handler a fresh id unless `with_id` names one, so duplicate-id
 //// refusal requires `with_id`. Native startup or registry failures can still
@@ -332,6 +333,51 @@ pub fn attach(subscription: Subscription) -> Result(Attachment, AttachError) {
   }
 }
 
+/// Installs every subscription until `detach`, in list order, and returns
+/// their attachments in that order. It is `attach` for a group that an
+/// application installs once at start, for example one handler per event
+/// of a library.
+///
+/// The group is all or nothing. When an attach is refused, the earlier
+/// subscriptions are detached and the error names the failing index and
+/// any detach that failed, as `with_subscriptions` reports it. When an
+/// attach raises, the earlier subscriptions are detached and the exception
+/// is re-raised.
+pub fn attach_all(
+  subscriptions: List(Subscription),
+) -> Result(List(Attachment), SubscriptionScopeError) {
+  attach_each(subscriptions, 0, [], [])
+}
+
+fn attach_each(
+  subscriptions: List(Subscription),
+  index: Int,
+  cleanups: List(#(Int, fn() -> Result(Nil, Nil))),
+  attachments: List(Attachment),
+) -> Result(List(Attachment), SubscriptionScopeError) {
+  case subscriptions {
+    [] -> Ok(list.reverse(attachments))
+    [subscription, ..rest] ->
+      case ffi_acquire_subscription(fn() { attach(subscription) }) {
+        Acquired(Ok(attachment)) ->
+          attach_each(
+            rest,
+            index + 1,
+            [#(index, fn() { detach(attachment) }), ..cleanups],
+            [attachment, ..attachments],
+          )
+        Acquired(Error(error)) ->
+          Error(SubscriptionAttachFailed(
+            index,
+            error,
+            cleanup_subscriptions(cleanups),
+          ))
+        AcquisitionRaised(exception) ->
+          cleanup_and_reraise(cleanups, fn(_) { Nil }, exception)
+      }
+  }
+}
+
 /// Removes a handler. Returns `Error(Nil)` when it was not attached: it was
 /// detached before, or telemetry removed it after it failed.
 pub fn detach(attachment: Attachment) -> Result(Nil, Nil) {
@@ -351,8 +397,9 @@ pub type SubscriptionCleanupFailure {
   SubscriptionCleanupFailure(index: Int, failure: CleanupFailure)
 }
 
-/// `with_subscriptions` could not attach the subscription at `index`; the
-/// work did not run, and earlier subscriptions received cleanup attempts.
+/// `with_subscriptions` or `attach_all` could not attach the subscription
+/// at `index`. Scoped work did not run, and earlier subscriptions received
+/// cleanup attempts.
 pub type SubscriptionScopeError {
   SubscriptionAttachFailed(
     index: Int,

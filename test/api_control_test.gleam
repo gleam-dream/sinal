@@ -3,6 +3,7 @@ import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
 import gleam/list
+import gleam/string
 import gleeunit/should
 import sinal
 import sinal/fields
@@ -410,4 +411,56 @@ pub fn describe_functions_name_the_failure_test() {
   |> should.equal(
     "subscription 2 did not attach: a handler with id \"metrics\" is already attached; rollback failed for subscription 0 (the handler was already detached)",
   )
+}
+
+pub fn attach_all_installs_every_subscription_in_order_test() {
+  let event =
+    sinal.event(["api_control", "attach_all"], fields.int("n"), fields.empty())
+  let seen = process.new_subject()
+  let tagged = fn(tag: String) {
+    sinal.subscription(event, fn(n, _) {
+      process.send(seen, tag <> int.to_string(n))
+    })
+  }
+  let assert Ok(attachments) = sinal.attach_all([tagged("a"), tagged("b")])
+  sinal.emit(event, 1, Nil)
+  let assert Ok(first) = process.receive(seen, 0)
+  let assert Ok(second) = process.receive(seen, 0)
+  list.sort([first, second], string.compare) |> should.equal(["a1", "b1"])
+  list.map(attachments, sinal.detach) |> should.equal([Ok(Nil), Ok(Nil)])
+  sinal.emit(event, 2, Nil)
+  process.receive(seen, 0) |> should.equal(Error(Nil))
+}
+
+pub fn attach_all_detaches_the_group_when_one_attach_is_refused_test() {
+  let event =
+    sinal.event(
+      ["api_control", "attach_all_refused"],
+      fields.int("n"),
+      fields.empty(),
+    )
+  let seen = process.new_subject()
+  let subscription = fn() {
+    sinal.subscription(event, fn(n, _) { process.send(seen, n) })
+  }
+  let taken = subscription() |> sinal.with_id("api_control_attach_all_taken")
+  let assert Ok(incumbent) = sinal.attach(taken)
+  process.receive(seen, 0) |> should.equal(Error(Nil))
+
+  sinal.attach_all([subscription(), taken, subscription()])
+  |> should.equal(
+    Error(
+      sinal.SubscriptionAttachFailed(
+        index: 1,
+        error: sinal.AlreadyExists("api_control_attach_all_taken"),
+        rollback_failures: [],
+      ),
+    ),
+  )
+  // Only the incumbent is left: the first subscription was rolled back and
+  // the third was never attached.
+  sinal.emit(event, 1, Nil)
+  process.receive(seen, 0) |> should.equal(Ok(1))
+  process.receive(seen, 0) |> should.equal(Error(Nil))
+  sinal.detach(incumbent) |> should.equal(Ok(Nil))
 }

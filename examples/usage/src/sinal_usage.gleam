@@ -4,6 +4,7 @@
 //// matches the library.
 
 import gleam/io
+import usage/collecting
 import usage/correlation_ids
 import usage/forwarding
 import usage/handlers
@@ -25,6 +26,8 @@ pub fn main() -> Nil {
   spans.run()
   io.println("forwarding")
   forwarding.run()
+  io.println("collecting")
+  collecting.run()
   io.println("correlation_ids")
   correlation_ids.run()
   io.println("all usage examples passed")

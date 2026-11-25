@@ -14,6 +14,8 @@
   (slug: "term-subscription-plan", title: [Subscription plan], body: [An ordered group of subscriptions with a reporter for cleanup failures that accompany a catchable exception.]),
   (slug: "term-subscription-scope", title: [Subscription scope], body: [One acquisition, work, and cleanup lifetime for a subscription plan. It owns the registrations it successfully acquired.]),
   (slug: "term-cleanup-failure", title: [Cleanup failure], body: [A failed detach attempt during scope cleanup, retained with its zero-based plan index. It never replaces the work value or the work exception.]),
+  (slug: "term-collector", title: [Collector], body: [An application-supervised process that attaches a fixed list of sources and owns a bounded in-memory store of the most recent entries built from their occurrences. It is a diagnostic reader's aid, distinct from an exporter.]),
+  (slug: "term-collector-entry", title: [Collector entry], body: [One application-typed value that a source builds from one occurrence and the collector retains until newer entries overwrite it.]),
   (slug: "term-correlation", title: [Correlation], body: [An opaque UTF-8 value of one to 128 bytes identifying an application-selected unit of work across observations. It is distinct from a package's own invocation identifier.]),
   (slug: "term-span", title: [Span], body: [An immutable definition of the start, stop, and exception observations surrounding one call of instrumented work.]),
   (slug: "term-span-completion", title: [Span completion], body: [The normal result of instrumented work together with its extra stop measurements and independent stop metadata. A returned application error is a normal completion.]),

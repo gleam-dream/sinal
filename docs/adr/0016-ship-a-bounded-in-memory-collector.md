@@ -1,0 +1,9 @@
+# Ship a bounded in-memory collector
+
+<a id="adr-0016"></a>
+
+- Sinal provides a collector: an application-supervised process that attaches a fixed list of sources and owns a store of the newest entries, bounded by entry count. It also provides `attach_all`, which installs a group of long-lived subscriptions all or nothing.
+- [ADR 0013](0013-leave-export-aggregation-and-persistence-to-integrations.md) leaves export, aggregation and persistence to integrations, and that stands. The collector serializes nothing, aggregates nothing, retries nothing and keeps nothing across a restart. It answers one need that every consuming application otherwise meets with its own module: reading back recent observations in the same node, in a test or a small application. Those modules kept every entry in a list held by a process, which grows for the life of the process.
+- Handlers write entries directly to a table owned by the collector's process, each over the oldest slot. A collector that received entries as messages was rejected: its mailbox is a second, unbounded store in front of the bounded one, and bounding it needs the forwarder's admission protocol. The cost of direct writes is best-effort ordering when concurrent writers are a full capacity apart.
+- Sources are attached under identifiers derived from the collector's name and address the store by name. A handler therefore survives a restart of the collector, and a restart cannot attach a second handler for the same source. Identifiers chosen fresh per incarnation were rejected because the handlers of a stopped incarnation would stay attached with no owner.
+- The entry type is the application's. A collector indexed by correlation was not built: an application filters the bounded list it reads, and an index would fix one entry shape for every application.

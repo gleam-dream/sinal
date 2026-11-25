@@ -334,6 +334,49 @@
     ]
     #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal.gleam")[Subscription acquisition], #lnk("../../../src/sinal_scope_ffi.erl")[exception and cleanup shim], #lnk("../../../test/api_control_test.gleam")[heterogeneous scope tests] and #lnk("../../../test/sinal_test.gleam")[scope and in-flight detach tests] own the observable cases.]
   ])
+  #section(title: "Bounded collection", lead: "A collector retains the newest entries and nothing else.", body: [
+    #answers(title: "Collection contracts", accent: accent,
+      responsibility: [Attach a fixed list of sources and retain the newest application-typed entries for an in-process reader.],
+      interface: [`attach_all`; `collector.new`, `with_capacity`, `source`, `source_with`, `supervised`, `record`, `entries`, `recorded` and `detach`.],
+      interactions: [Sources are ordinary subscriptions under stable identifiers. Their handlers write to storage owned by the collector's supervised process, from the process that runs the handler.],
+      invariants: [The store never holds more entries than its capacity; a writer never waits for the collector's process or for a reader.],
+      failure: [Without a running collector an entry is discarded; a restart starts empty; an invalid capacity or an occupied storage name fails the start.],
+    )
+    #subsection(title: "Why the package holds a collector")[
+      #points(
+        [Applications that follow work across packages each wrote the same module: one handler per package event, an entry type, and a process that keeps every entry in a list. That list grows for the life of the process. The #term("term-collector") gives those applications and their tests one bounded store; #adr(16) records why it belongs here although export and aggregation do not.],
+        [The collector retains #term("term-collector-entry") values for a reader in the same node. It serializes nothing, aggregates nothing, retries nothing and keeps nothing across a restart, so the export no-goal in the root foundation is unchanged.],
+      )
+    ]
+    #subsection(title: "Bounds, placement and lifetime")[
+      #points(
+        [Capacity counts entries, 1,024 by default. A new entry overwrites the oldest; the count of entries handed to the running incarnation stays readable, so a reader can tell how many were overwritten. Entry size is the application's choice and is not bounded.],
+        [A source's handler builds the entry and writes it in the process that runs the handler: the producer, or the forwarder for a routed occurrence. There is no mailbox between handler and store, so nothing queues and an unrouted occurrence is readable as soon as its emit returns.],
+        [Entries are ordered by one shared sequence. Writers separated by a full capacity of entries can leave an older entry in a newer one's place, so ordering is best effort under concurrency and capacity should far exceed the number of concurrent producers.],
+        [The store belongs to one incarnation of the collector's process and disappears with it. Each source is attached under an identifier derived from the collector's name and the source's position; its handler addresses the store by name, so the handler of an earlier incarnation serves its replacement and a restart attaches only what is missing. `detach` removes the collector's handlers by that naming.],
+        [A source function that raises is a failed handler: native telemetry removes it, and the next restart attaches it again. A malformed occurrence is skipped as for any ordinary subscription.],
+        [`attach_all` installs a group of long-lived subscriptions in order and returns their attachments. A refusal or an exception detaches the subscriptions already installed and reports as a scope acquisition does, so a group is never left partly attached by a typed refusal.],
+      )
+      #behavior(title: "A full collector overwrites its oldest entry", area: "Bounded collection", level: "boundary")[
+        #given[a running collector already holds its capacity of entries]
+        #when[a source records another entry]
+        #then[the oldest entry is no longer retained]
+        #then[the retained entries, oldest first, end with the new entry]
+      ]
+      #behavior(title: "A restarted collector starts empty with one handler per source", area: "Bounded collection", level: "boundary")[
+        #given[the collector's process was restarted by its supervisor]
+        #when[a source's event occurs once]
+        #then[exactly one entry is retained]
+      ]
+      #behavior(title: "A refused group attach leaves no member attached", area: "Bounded collection", level: "boundary")[
+        #given[one subscription of a group names an identifier already in use]
+        #when[the caller attaches the group]
+        #then[the result names the refused index]
+        #then[the group's earlier subscriptions are detached and later ones are not attempted]
+      ]
+    ]
+    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal/collector.gleam")[Collector], #lnk("../../../src/sinal_collector_ffi.erl")[bounded store], #lnk("../../../test/collector_test.gleam")[collector tests] and #lnk("../../../test/api_control_test.gleam")[group attach tests] own the observable cases.]
+  ])
   #section(title: "Correlation", lead: "A small shared value joins package-owned observations without owning their lifecycle.", body: [
     #answers(title: "Correlation contracts", accent: accent,
       responsibility: [Admit a bounded observation value and expose interoperable optional or required metadata fields.],
