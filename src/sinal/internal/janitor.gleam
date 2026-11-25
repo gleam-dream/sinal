@@ -22,7 +22,6 @@ import gleam/list
 import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/set.{type Set}
-import sinal/internal/ffi
 
 /// The janitor's messages.
 pub opaque type Message {
@@ -70,6 +69,10 @@ fn name() -> process.Name(Message)
 
 @external(erlang, "sinal_janitor_ffi", "owned_handlers")
 fn owned_handlers() -> List(#(Pid, Dynamic))
+
+/// Detaches handler `id` only when its native config names `owner`.
+@external(erlang, "sinal_janitor_ffi", "detach_held")
+fn detach_held(id: Dynamic, owner: Pid) -> Result(Nil, Nil)
 
 @external(erlang, "sinal_janitor_ffi", "await_restart")
 fn await_restart() -> Nil
@@ -131,8 +134,9 @@ fn handle_message(
           let state =
             set.fold(ids, state, fn(state, id) {
               // A detach that raises must not skip the others or stop the
-              // janitor.
-              let _ = capture(fn() { ffi.telemetry_detach(id) })
+              // janitor. An id that telemetry removed and another caller
+              // reused is left alone.
+              let _ = capture(fn() { detach_held(id, pid) })
               State(..state, holders: dict.delete(state.holders, id))
             })
           actor.continue(State(..state, owners: dict.delete(state.owners, pid)))
@@ -161,7 +165,7 @@ fn install_for(
           case process.is_alive(holder) {
             True -> #(state, Refused)
             False -> {
-              let _ = capture(fn() { ffi.telemetry_detach(id) })
+              let _ = capture(fn() { detach_held(id, holder) })
               let state = drop(state, id)
               case capture(install) {
                 Returned(Ok(Nil)) -> #(hold(state, owner, id), Installed)

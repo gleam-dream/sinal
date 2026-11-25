@@ -1,6 +1,6 @@
 -module(sinal_janitor_ffi).
 
--export([capture/1, reraise/1, name/0, owned_handlers/0, await_restart/0]).
+-export([capture/1, reraise/1, name/0, owned_handlers/0, detach_held/2, await_restart/0]).
 
 %% Runs Work and returns its value, or the class, reason and stacktrace of
 %% the error, exit or throw it raised.
@@ -35,6 +35,29 @@ owned_handlers() ->
                     <- telemetry:list_handlers([]),
                 Function =:= Handle
             ])
+    end.
+
+%% Detaches handler Id only when it is a sinal handler that Owner holds.
+%% Telemetry removes a failing handler without telling the janitor, and
+%% another caller may then attach under the same id; telemetry detaches
+%% by id alone, so the native config is checked first.
+detach_held(Id, Owner) ->
+    Handle = fun sinal_ffi:handle/4,
+    Held = lists:any(
+        fun
+            (#{id := HandlerId, function := Function, config := {sinal_owner, HandlerOwner, _}}) ->
+                HandlerId =:= Id andalso Function =:= Handle andalso HandlerOwner =:= Owner;
+            (_) ->
+                false
+        end,
+        case whereis(telemetry_handler_table) of
+            undefined -> [];
+            _ -> telemetry:list_handlers([])
+        end
+    ),
+    case Held of
+        true -> sinal_ffi:telemetry_detach(Id);
+        false -> {error, nil}
     end.
 
 %% Called while the janitor is not registered. Starts the sinal application

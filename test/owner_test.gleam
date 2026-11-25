@@ -279,3 +279,26 @@ pub fn a_stable_id_passes_to_the_next_owner_after_its_owner_exits_test() {
   process.receive(seen, 0) |> should.equal(Ok(1))
   let assert Ok(Nil) = sinal.detach(attachment)
 }
+
+// Telemetry removes a sinal handler whose callback raises, and another
+// library then attaches a native handler under the same id. The exit of
+// the sinal handler's owner must not remove that native handler.
+pub fn an_exited_owner_leaves_a_native_handler_that_reused_its_id_alone_test() {
+  let janitor = watch_janitor()
+  let name = ["owner_test", "reused_native"]
+  let event = sinal.event(name, fields.int("n"), fields.empty())
+  let id = "owner_test_reused_native"
+  let subscription =
+    sinal.subscription(event, fn(_, _) { panic as "fails on purpose" })
+    |> sinal.with_id(id)
+  let owner = owner_of(subscription)
+  sinal.emit(event, 1, Nil)
+  native_attached(id) |> should.be_false
+
+  attach_native(id, [atom("owner_test"), atom("reused_native")], process.self())
+  process.kill(owner)
+  settle(janitor, owner)
+
+  native_attached(id) |> should.be_true
+  detach_native(id)
+}
