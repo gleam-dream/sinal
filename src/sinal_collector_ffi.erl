@@ -17,12 +17,16 @@ create(Name, Capacity) ->
     end.
 
 %% Writes Entry over the oldest slot. Runs in the calling process and never
-%% raises: without a running collector the entry is discarded.
+%% raises: without a running collector the entry is discarded. The table is
+%% resolved once, so the read and the write reach the same incarnation: a
+%% deleted table's identifier stays invalid even when a restarted collector
+%% reuses the name, and the write is then discarded.
 record(Name, Entry) ->
     try
-        [{meta, Capacity, Sequence}] = ets:lookup(Name, meta),
+        Table = ets:whereis(Name),
+        [{meta, Capacity, Sequence}] = ets:lookup(Table, meta),
         N = atomics:add_get(Sequence, 1, 1),
-        true = ets:insert(Name, {(N - 1) rem Capacity, N, Entry}),
+        true = ets:insert(Table, {(N - 1) rem Capacity, N, Entry}),
         nil
     catch
         error:_ -> nil
