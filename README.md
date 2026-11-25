@@ -26,6 +26,7 @@ Sinal does not provide an exporter, metric aggregation, durable delivery, remote
 - Encode and decode primitive, custom, optional, enum, and record fields.
 - Attach typed observers or fallible handlers to one or more events, with labels and stable handler IDs.
 - Scope a group of subscriptions around work and inspect cleanup failures.
+- Bind handlers to an owner process through a supervised janitor, which detaches them when the owner exits.
 - Instrument work with native start, stop, and exception span events.
 - Carry bounded correlation values in optional or required metadata fields.
 - Route event-name prefixes to an optional supervised, bounded forwarder.
@@ -103,9 +104,10 @@ pub fn isolate_library(name: process.Name(forwarder.Message)) -> Nil {
 
 - Event-name segments, field keys, and route prefixes become permanent BEAM atoms. Keep them in source code; never build them from request or user input.
 - Without a route, observers run synchronously in the emitting process and can delay it. A malformed native map skips one callback and reports a typed failure; a fallible handler that returns an error is removed by native telemetry.
+- `attach` and `with_subscriptions` clean up in the calling process. An exit signal that terminates that process skips the cleanup and leaves its handlers attached; `attach_owned` and `with_janitor` bind them to the process through a supervised [janitor](src/sinal/janitor.gleam).
 - Forwarding is best effort. Its default capacity is 1,024 events, queued plus executing. A full or unavailable forwarder drops and counts an event; it does not retry, fall back to inline execution, or provide a delivery receipt. Pending events can be lost at shutdown.
 - Forwarded handlers run in the forwarder process, without the producer's process-local context. Native spans stay in one process and ignore routes.
 
 ## Examples and reference
 
-The [compiled usage examples](examples/usage/README.md) cover handlers, scopes, spans, correlation, and forwarding. See the API docs for [events and subscriptions](src/sinal.gleam), [field codecs](src/sinal/fields.gleam), [correlation](src/sinal/correlation.gleam), [spans](src/sinal/span.gleam), and [forwarding](src/sinal/forwarder.gleam). The [design](docs/design/design-layer.pdf) documents ownership and contracts; [benchmark notes](docs/BENCHMARKS.md) record a dated local run and its limits.
+The [compiled usage examples](examples/usage/README.md) cover handlers, scopes, spans, correlation, and forwarding. See the API docs for [events and subscriptions](src/sinal.gleam), [field codecs](src/sinal/fields.gleam), [correlation](src/sinal/correlation.gleam), [spans](src/sinal/span.gleam), [owner-bound cleanup](src/sinal/janitor.gleam), and [forwarding](src/sinal/forwarder.gleam). The [design](docs/design/design-layer.pdf) documents ownership and contracts; [benchmark notes](docs/BENCHMARKS.md) record a dated local run and its limits.

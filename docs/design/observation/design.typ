@@ -77,7 +77,7 @@
         #attribute(id: "status", name: "Status", type: "Registration status", provenance: "observed", state-type: "attachment-status", state-machine: "attachment-lifecycle")[The current registry relationship; it is not cached authority inside the handle.]
         #relates(cardinality: "n : 1")[Installs one subscription description.]
       ]
-      #state-machine(id: "attachment-lifecycle", subject: "attachment", state-field: "status", state-type: "attachment-status", title: "Native registration transitions", accent: accent, states: ("vacant", "attached", "detached", "failed"), initial: "vacant", accepting: ("detached", "failed"), transitions: (("vacant", "attached", "successful attach"), ("attached", "attached", "malformed occurrence skipped"), ("attached", "detached", "detach or registry shutdown"), ("attached", "failed", "handler failure removes registration")), caption: [A duplicate stable identifier refuses a new acquisition and leaves the existing registration unchanged. Reusing an identifier creates a new registration; a stale handle can detach that replacement.])
+      #state-machine(id: "attachment-lifecycle", subject: "attachment", state-field: "status", state-type: "attachment-status", title: "Native registration transitions", accent: accent, states: ("vacant", "attached", "detached", "failed"), initial: "vacant", accepting: ("detached", "failed"), transitions: (("vacant", "attached", "successful attach"), ("attached", "attached", "malformed occurrence skipped"), ("attached", "detached", "detach, owner exit or registry shutdown"), ("attached", "failed", "handler failure removes registration")), caption: [A duplicate stable identifier refuses a new acquisition and leaves the existing registration unchanged. Reusing an identifier creates a new registration; a stale handle can detach that replacement.])
     ]
     #subsection(title: "Scope lifetime")[A scope owns only attachments whose acquisitions completed successfully. A typed refusal skips work; a catchable exception leaves through cleanup and re-raise.
       #state-type(id: "scope-status", title: "Scope status", variants: ("acquiring", "working", "cleaning", "completed", "refused", "raised"))
@@ -87,7 +87,7 @@
         #attribute(id: "status", name: "Status", type: "Scope status", provenance: "derived", state-type: "scope-status", state-machine: "scope-lifecycle")[Derived from the current acquisition, work or cleanup step.]
         #relates(cardinality: "1 : 0..n")[Owns acquired attachments until cleanup is attempted.]
       ]
-      #state-machine(id: "scope-lifecycle", subject: "scope", state-field: "status", state-type: "scope-status", title: "Scoped acquisition and cleanup", accent: accent, flow: "top-to-bottom", states: ("acquiring", "working", "cleaning", "completed", "refused", "raised"), initial: "acquiring", accepting: ("completed", "refused", "raised"), transitions: (("acquiring", "acquiring", "one registration succeeds"), ("acquiring", "working", "all acquired"), ("acquiring", "cleaning", "refusal or acquisition exception"), ("working", "cleaning", "return or catchable exception"), ("cleaning", "completed", "return retained with cleanup failures"), ("cleaning", "refused", "typed acquisition refusal"), ("cleaning", "raised", "original exception re-raised")), caption: [Cleanup outcome does not replace the work outcome. An untrappable kill, node loss or VM loss can interrupt any nonterminal state without following a cleanup transition.])
+      #state-machine(id: "scope-lifecycle", subject: "scope", state-field: "status", state-type: "scope-status", title: "Scoped acquisition and cleanup", accent: accent, flow: "top-to-bottom", states: ("acquiring", "working", "cleaning", "completed", "refused", "raised"), initial: "acquiring", accepting: ("completed", "refused", "raised"), transitions: (("acquiring", "acquiring", "one registration succeeds"), ("acquiring", "working", "all acquired"), ("acquiring", "cleaning", "refusal or acquisition exception"), ("working", "cleaning", "return or catchable exception"), ("cleaning", "completed", "return retained with cleanup failures"), ("cleaning", "refused", "typed acquisition refusal"), ("cleaning", "raised", "original exception re-raised")), caption: [Cleanup outcome does not replace the work outcome. An exit signal that terminates the scope's process, node loss or VM loss can interrupt any nonterminal state without following a cleanup transition. For a plan bound to a #term("term-janitor"), the janitor then removes the acquired registrations.])
     ]
     #subsection(title: "Span invocation lifetime")[One native context identifies each invocation. The terminal choice is the work's normal return or catchable exception, independent of observation callback success.
       #state-type(id: "span-status", title: "Span invocation status", variants: ("not-started", "running", "stopped", "exception"))
@@ -197,7 +197,7 @@
   #section(title: "Native dispatch and registration", lead: "The native registry selects callbacks; Sinal selects and decodes their typed definition.", body: [
     #answers(title: "Native dispatch contracts", accent: accent,
       responsibility: [Translate typed values to native maps and bind selected definitions to installed callbacks.],
-      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `detach` and failure descriptions.],
+      interface: [`emit`, `observe`, `observe_labelled`, `subscription`, `handler`, `with_label`, `with_id`, `attach`, `attach_owned`, `detach` and failure descriptions.],
       interactions: [The native telemetry registry runs exported sinal_ffi:handle/4 with the typed closure as configuration. Routes optionally change the dispatch process.],
       invariants: [Selected event names are distinct inside one handler; one native identifier names one registration at a time; measurement decoding precedes metadata decoding and handler invocation.],
       failure: [Malformed input skips one invocation; returned handler error or callback exception removes the whole registration; native call failures can raise beyond AttachError.],
@@ -288,10 +288,10 @@
   #section(title: "Subscription scopes", lead: "A scope retains work outcomes while making registration cleanup visible.", body: [
     #answers(title: "Scope ownership contracts", accent: accent,
       responsibility: [Acquire an ordered plan, run work only after complete acquisition, and attempt reverse cleanup.],
-      interface: [`subscriptions`, `with_exception_cleanup_reporter`, `with_subscriptions`, indexed failure records and completion/error descriptions.],
+      interface: [`subscriptions`, `with_exception_cleanup_reporter`, `with_janitor`, `with_subscriptions`, indexed failure records and completion/error descriptions; `janitor.new` and `janitor.supervised`.],
       interactions: [Native attach/detach supply effects; the Erlang scope shim captures all catchable exception classes and preserves re-raise evidence.],
       invariants: [Every known successful acquisition receives a cleanup attempt on ordinary or catchable exit; cleanup never replaces the normal work value or original exception.],
-      failure: [Typed acquisition refusal returns an indexed error plus rollback failures; acquisition/work exception re-raises after cleaning known registrations; untrappable termination can skip cleanup.],
+      failure: [Typed acquisition refusal returns an indexed error plus rollback failures; acquisition/work exception re-raises after cleaning known registrations; an exit signal that terminates the scope's process skips cleanup unless a janitor owns the registrations.],
     )
     #subsection(title: "Acquisition, rollback and completion")[
       #points(
@@ -322,7 +322,7 @@
         [A work or acquisition exception's cleanup failures reach the configured reporter because there is no completion result to return. A reporter exception is caught and discarded before re-raising the original work exception; #adr(5) records this outcome separation.],
         [Installation and removal are sequential rather than atomic. Concurrent emitters can see a partial registration set, and callbacks selected in another process can finish after scope exit.],
         [Captured resources must outlive independently executing callbacks, or applications must exclude concurrent emission during the scope. Scoped registration is suitable for explicit diagnostic/test lifetimes; it does not imply safe dynamic per-request subscriptions over a node-global event name.],
-        [There is no work deadline, cleanup deadline or cancellation token in the scope API. A killed process or VM loss bypasses cleanup; normal native-call limits and user callback behavior still determine blocking.],
+        [There is no work deadline, cleanup deadline or cancellation token in the scope API. The scope's own cleanup runs in the calling process, so any exit signal that terminates that process (a linked process exiting, a supervisor shutdown, a kill) bypasses it, as VM loss does; normal native-call limits and user callback behavior still determine blocking.],
       )
       #behavior(title: "Cleanup reporting cannot replace a work exception", area: "Subscription scopes", level: "boundary")[
         #given[scoped work raises a catchable exception]
@@ -332,7 +332,28 @@
         #then[the original exception class, reason and stacktrace are re-raised even if the reporter raises]
       ]
     ]
-    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal.gleam")[Subscription acquisition], #lnk("../../../src/sinal_scope_ffi.erl")[exception and cleanup shim], #lnk("../../../test/api_control_test.gleam")[heterogeneous scope tests] and #lnk("../../../test/sinal_test.gleam")[scope and in-flight detach tests] own the observable cases.]
+    #subsection(title: "Owner-bound registrations")[
+      #points(
+        [Cleanup that runs in the registering process cannot outlive that process. An owner-bound registration moves cleanup to a #term("term-janitor"): the janitor installs the handler, monitors the #term("term-owner") and detaches the handler when the owner exits, whatever the exit reason. #adr(16) records the choice of a supervised process.],
+        [The janitor performs installation and monitoring in one process, so the owner's exit is always handled after the installation it follows. A registration made for an owner that already exited is removed at once.],
+        [`attach_owned` returns the same attachment and the same AlreadyExists refusal as `attach`, and an installation exception is re-raised in the caller. Detaching an owner-bound attachment also ends the janitor's tracking of it, so the owner's later exit cannot remove a registration that reuses the identifier.],
+        [`with_janitor` binds every registration of a plan to the process that runs the scope. The scope's ordinary and exceptional cleanup are unchanged; the janitor acts only when that process exits first.],
+        [The application supervises the janitor and starts it before the processes that register through it. Registering through a janitor that is not running, or that does not answer within five seconds, panics in the caller. The owner is monitored before the reply, so a registration whose reply was not received is still removed when its owner exits.],
+        [Removal follows the owner's exit without being synchronous with it: an emitter can select the handler in between, and a selected callback finishes. Tracking is state of the janitor process; when the janitor exits, its tracked registrations stay attached and its replacement starts empty.],
+      )
+      #behavior(title: "An owner's exit removes its registrations", area: "Subscription scopes", level: "boundary")[
+        #given[a registration is bound to an owner through a running janitor]
+        #when[the owner exits for any reason, including an exit signal it could not catch]
+        #then[the janitor detaches the registration]
+        #then[later occurrences do not reach its handler]
+      ]
+      #behavior(title: "Detach ends the owner binding", area: "Subscription scopes", level: "boundary")[
+        #given[an owner-bound registration was detached by its attachment]
+        #when[the owner exits later]
+        #then[a registration that reuses the identifier stays attached]
+      ]
+    ]
+    #notes(title: "Implementation and behavioral evidence")[#lnk("../../../src/sinal/janitor.gleam")[Janitor process], #lnk("../../../test/owner_test.gleam")[owner exit tests], #lnk("../../../src/sinal.gleam")[Subscription acquisition], #lnk("../../../src/sinal_scope_ffi.erl")[exception and cleanup shim], #lnk("../../../test/api_control_test.gleam")[heterogeneous scope tests] and #lnk("../../../test/sinal_test.gleam")[scope and in-flight detach tests] own the observable cases.]
   ])
   #section(title: "Correlation", lead: "A small shared value joins package-owned observations without owning their lifecycle.", body: [
     #answers(title: "Correlation contracts", accent: accent,

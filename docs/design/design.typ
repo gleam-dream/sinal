@@ -64,6 +64,7 @@
         [subscription/plan], [Bind typed callbacks and validate selected names], [Retain closures only; no installed registry state.],
         [attach], [Select native identity; ensure telemetry application], [Registry mutation; successful reply returns its handle. A failed reply can leave uncertain mutation.],
         [emit], [Check enums, encode both native maps, select route], [Inline native dispatch or one admission/send attempt; no delivery receipt.],
+        [attach_owned], [Select native identity; call the running janitor], [The janitor mutates the registry and monitors the owner; the owner's exit detaches.],
         [with_subscriptions], [Acquire complete known plan], [Work runs, then cleanup; separate work and cleanup outcomes.],
         [span.run], [Encode start metadata], [Start, work, completion encoding, terminal observation and return/re-raise in one process.],
         [forwarder.new/supervised], [Obtain stable name counters; validate startup settings], [Publish incarnation target only after initialization; handlers execute later.],
