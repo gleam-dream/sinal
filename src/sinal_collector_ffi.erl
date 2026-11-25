@@ -1,6 +1,6 @@
 -module(sinal_collector_ffi).
 
--export([create/2, record/2, entries/1, recorded/1, detach_handlers/1]).
+-export([create/2, record/2, entries/1, recorded/1]).
 
 %% The collector's entries live in a public named ETS table owned by the
 %% collector process, so the table disappears with that process. Row
@@ -45,25 +45,3 @@ recorded(Name) ->
     catch
         error:badarg -> 0
     end.
-
-%% Detaches every handler whose id is Prefix followed by an index.
-detach_handlers(Prefix) ->
-    case whereis(telemetry_handler_table) of
-        undefined ->
-            nil;
-        _ ->
-            Size = byte_size(Prefix),
-            Ids = lists:usort([
-                Id
-             || #{id := Id} <- telemetry:list_handlers([]),
-                is_binary(Id),
-                byte_size(Id) > Size,
-                binary:part(Id, 0, Size) =:= Prefix,
-                is_index(binary:part(Id, Size, byte_size(Id) - Size))
-            ]),
-            lists:foreach(fun telemetry:detach/1, Ids),
-            nil
-    end.
-
-is_index(Digits) ->
-    lists:all(fun(Byte) -> Byte >= $0 andalso Byte =< $9 end, binary_to_list(Digits)).

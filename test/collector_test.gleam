@@ -28,6 +28,24 @@ type Running(entry) {
 @external(erlang, "collector_test_ffi", "trace_receives")
 fn trace_receives(pid: process.Pid) -> Nil
 
+@external(erlang, "erlang", "atom_to_binary")
+fn name_to_string(name: process.Name(a)) -> String
+
+@external(erlang, "collector_test_ffi", "handler_count")
+fn handler_count(event: List(String)) -> Int
+
+@external(erlang, "collector_test_ffi", "terminate_child")
+fn terminate_child(supervisor: process.Pid) -> Nil
+
+@external(erlang, "owner_test_ffi", "janitor_pid")
+fn janitor() -> process.Pid
+
+@external(erlang, "owner_test_ffi", "await_down_received")
+fn await_down_received(pid: process.Pid, owner: process.Pid) -> Result(Nil, Nil)
+
+@external(erlang, "owner_test_ffi", "sync")
+fn sync(pid: process.Pid) -> Nil
+
 @external(erlang, "collector_test_ffi", "await_restart")
 fn await_restart(
   supervisor: process.Pid,
@@ -64,7 +82,6 @@ pub fn collects_entries_from_several_events_in_order_test() {
   collector.entries(recent)
   |> should.equal(["first a1", "second b2", "first c3"])
   collector.recorded(recent) |> should.equal(3)
-  collector.detach(recent)
 }
 
 pub fn keeps_only_the_newest_capacity_entries_test() {
@@ -74,7 +91,6 @@ pub fn keeps_only_the_newest_capacity_entries_test() {
   emit_range(event, 1, 1000)
   collector.entries(recent) |> should.equal([997, 998, 999, 1000])
   collector.recorded(recent) |> should.equal(1000)
-  collector.detach(recent)
 }
 
 pub fn a_restarted_collector_starts_empty_and_keeps_collecting_test() {
@@ -93,20 +109,50 @@ pub fn a_restarted_collector_starts_empty_and_keeps_collecting_test() {
 
   collector.entries(recent) |> should.equal([])
   sinal.emit(event, 2, "w")
-  // One handler serves both incarnations: the entry is recorded once.
+  // The replacement took over the source's id: the entry is recorded once.
   collector.entries(recent) |> should.equal([2])
   collector.recorded(recent) |> should.equal(1)
-  collector.detach(recent)
 }
 
-pub fn detach_stops_collecting_test() {
-  let event = count_event("detach")
-  let #(recent, _) =
-    start("collector-detach", 4, [collector.source(event, fn(n, _) { n })])
+// The collector's process owns its sources' handlers, so stopping it
+// detaches them; there is nothing to detach by hand.
+pub fn stopping_the_collector_detaches_its_handlers_test() {
+  let event = count_event("stopped")
+  let #(recent, running) =
+    start("collector-stopped", 4, [collector.source(event, fn(n, _) { n })])
   sinal.emit(event, 1, "w")
-  collector.detach(recent)
-  sinal.emit(event, 2, "w")
   collector.entries(recent) |> should.equal([1])
+  handler_count(["collector_test", "stopped"]) |> should.equal(1)
+
+  let assert Ok(pid) = process.named(running.name)
+  let janitor = janitor()
+  trace_receives(janitor)
+  terminate_child(running.supervisor)
+  let assert Ok(Nil) = await_down_received(janitor, pid)
+  sync(janitor)
+  handler_count(["collector_test", "stopped"]) |> should.equal(0)
+}
+
+// Sources attach all or nothing: when one is refused, the start fails and
+// none of them stays attached.
+pub fn a_refused_source_fails_the_start_and_attaches_none_test() {
+  let event = count_event("refused")
+  let name = process.new_name("collector-refused")
+  // Another live process holds the id of the collector's second source.
+  let assert Ok(incumbent) =
+    sinal.attach(
+      sinal.subscription(event, fn(_, _) { Nil })
+      |> sinal.with_id("sinal/collector:" <> name_to_string(name) <> ":1"),
+    )
+  let recent: Collector(Int) = collector.new(name)
+  let spec =
+    collector.supervised(recent, [
+      collector.source(event, fn(n, _) { n }),
+      collector.source(event, fn(n, _) { n + 1 }),
+    ])
+  spec.start() |> should.be_error
+  handler_count(["collector_test", "refused"]) |> should.equal(1)
+  let assert Ok(Nil) = sinal.detach(incumbent)
 }
 
 pub fn a_collector_that_is_not_running_discards_and_reads_empty_test() {
@@ -141,5 +187,4 @@ pub fn source_with_records_selected_occurrences_test() {
   emit_range(event, 1, 3)
   collector.entries(recent) |> should.equal([2, 3])
   list.length(collector.entries(recent)) |> should.equal(2)
-  collector.detach(recent)
 }

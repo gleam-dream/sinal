@@ -49,11 +49,15 @@
 ////   process: a restart starts empty, and without a running collector an
 ////   entry is discarded. The collector exports nothing, aggregates nothing
 ////   and is not a delivery receipt.
-//// - **Handlers outlive a restart.** Each source is attached under an id
-////   derived from the collector's name and its position in the list, so a
-////   restarted collector finds its handlers attached and attaches only the
-////   missing ones. `detach` removes them. A handler that telemetry removed
-////   after its function raised is attached again by the next restart.
+//// - **Handlers live as long as the process.** The collector's process
+////   attaches its sources while it starts, all or nothing, so it owns their
+////   handlers: when it stops or crashes, sinal detaches them. Each source
+////   is attached under an id derived from the collector's name and its
+////   position in the list, so a restarted collector takes the ids over
+////   from the incarnation it replaces and no occurrence is recorded twice.
+////   An id held by another live process fails the start with `InitFailed`
+////   and leaves no source attached. A handler that telemetry removed after
+////   its function raised is attached again by the next restart.
 //// - **One name, one table.** The table's name is the collector's process
 ////   name in the ETS namespace; a pre-existing ETS table of that name, or
 ////   a capacity below 1, makes the start fail with `InitFailed`. Create
@@ -99,9 +103,6 @@ fn ffi_entries(name: process.Name(Message(entry))) -> List(entry)
 @external(erlang, "sinal_collector_ffi", "recorded")
 fn ffi_recorded(name: process.Name(Message(entry))) -> Int
 
-@external(erlang, "sinal_collector_ffi", "detach_handlers")
-fn detach_handlers(prefix: String) -> Nil
-
 @external(erlang, "erlang", "atom_to_binary")
 fn name_to_string(name: process.Name(a)) -> String
 
@@ -139,7 +140,8 @@ pub fn source(
 
 /// Builds the subscription from the collector's `record` function, for a
 /// `sinal.handler` over several events or a handler that records only some
-/// occurrences. The collector replaces the subscription's id.
+/// occurrences. The collector replaces the subscription's id with one
+/// derived from its name and the source's position.
 pub fn source_with(
   subscribe: fn(fn(entry) -> Nil) -> Subscription,
 ) -> Source(entry) {
@@ -173,15 +175,21 @@ fn start_collector(
       create(collector.name, collector.capacity)
       |> result.replace_error("sinal/collector: the table already exists"),
     )
-    list.index_map(sources, fn(source, index) {
-      // `AlreadyExists` means a previous incarnation attached this source.
-      // Its handler writes by name, so it serves this incarnation too.
-      let _ =
+    // Attached from this process, which owns the handlers: they are
+    // detached when it exits. The ids are stable, so a replacement takes
+    // over the ids of the incarnation it replaces at once, and two
+    // incarnations never both record one occurrence.
+    use _attachments <- result.try(
+      sources
+      |> list.index_map(fn(source, index) {
         source.subscribe(record(collector, _))
         |> sinal.with_id(id_prefix(collector) <> int.to_string(index))
-        |> sinal.attach
-      Nil
-    })
+      })
+      |> sinal.attach_all
+      |> result.map_error(fn(error) {
+        "sinal/collector: " <> sinal.describe_scope_error(error)
+      }),
+    )
     actor.initialised(Nil)
     |> actor.returning(collector)
     |> Ok
@@ -214,11 +222,4 @@ pub fn entries(collector: Collector(entry)) -> List(entry) {
 /// already overwritten. Zero when the collector is not running.
 pub fn recorded(collector: Collector(entry)) -> Int {
   ffi_recorded(collector.name)
-}
-
-/// Detaches the handlers of the collector's sources, for an application
-/// that stops its collector for good. Stopping the process alone leaves
-/// them attached, discarding every entry.
-pub fn detach(collector: Collector(entry)) -> Nil {
-  detach_handlers(id_prefix(collector))
 }

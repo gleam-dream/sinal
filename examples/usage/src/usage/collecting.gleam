@@ -46,9 +46,9 @@ pub fn run() -> Nil {
   request("/orders", 9)
   assert collector.entries(recent) == ["/users 4", "/orders 9"]
   assert collector.recorded(recent) == 2
-  collector.detach(recent)
 
-  // Long-lived handlers for several events attach together or not at all.
+  // Handlers for several events attach together or not at all, owned by
+  // the calling process.
   let assert Ok(attachments) =
     sinal.attach_all([
       sinal.subscription(event, fn(_, _) { Nil }),

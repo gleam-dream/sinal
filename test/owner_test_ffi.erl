@@ -2,6 +2,7 @@
 
 -export([
     janitor/0,
+    janitor_pid/0,
     trace_receives/1,
     await_down_received/2,
     sync/1,
@@ -20,6 +21,9 @@ janitor() ->
         undefined -> {error, nil};
         Pid -> {ok, Pid}
     end.
+
+janitor_pid() ->
+    whereis(sinal_janitor).
 
 %% Makes the calling process the tracer of every message Pid receives.
 trace_receives(Pid) ->
