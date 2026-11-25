@@ -152,8 +152,8 @@ pub fn bool(key: String) -> Fields(Bool) {
 /// still writes its name, and every emit path (`sinal.emit`,
 /// `forwarder.emit`, `span.run`) reports an `UnlistedValue` diagnostic
 /// from the emitting process that names the event and the value: one
-/// warning for the event name, then counts in `sinal.diagnostic_event`
-/// (see `sinal/diagnostic`). A handler using this enum
+/// warning for the event name, then a count that `sinal.diagnostics`
+/// reads (see `sinal/diagnostic`). A handler using this enum
 /// fails to decode it, reports `MalformedMetadata` (or
 /// `MalformedMeasurements`) to its failure observer, skips that one
 /// invocation and stays attached when failure reporting returns normally.
