@@ -1,5 +1,13 @@
 # Sinal
 
+> **Sinal 0.2.0 is a breaking release.** Read the [migration guide](https://github.com/gleam-dream/sinal/blob/main/docs/MIGRATION.md) before you upgrade from 0.1.
+>
+> - A handler is bound to the process that attaches it and is detached when that process exits.
+> - An attachment names one registration, so a stale `sinal.detach` returns `Error(Nil)`.
+> - Span events are dispatched through forwarder routes.
+> - Sinal's repeated diagnostics log once per event name and are counted; read them with `sinal.diagnostics()`.
+> - Depend on `sinal >= 0.2.0 and < 0.3.0`.
+
 [![CI](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gleam-dream/sinal/actions/workflows/ci.yml)
 [![sinal on Hex](https://img.shields.io/hexpm/v/sinal?label=Hex%3A%20sinal)](https://hex.pm/packages/sinal)
 [![Gleam](https://img.shields.io/badge/Gleam-FFAFF3?logo=gleam&logoColor=000000)](https://gleam.run/)
