@@ -40,7 +40,7 @@ actor.new_with_initialiser(1000, fn(subject) {
 
 Call `setup` from `main` only when `main` itself keeps running, for example by sleeping forever after it starts the supervisor. A test that attaches in one process and emits in another keeps working while the attaching process is alive.
 
-To attach several handlers from one long-lived process, use `sinal.attach_all`. It installs the list in order, all or nothing, and returns `Result(List(Attachment), SubscriptionScopeError)`.
+To attach several handlers from one long-lived process, use `sinal.attach_all`. It installs the list in order and returns `Result(List(Attachment), SubscriptionScopeError)`. When an attach is refused, it detaches the earlier handlers and returns `SubscriptionAttachFailed`. If one of those rollback detaches fails, that handler can stay installed until its owner exits, and `rollback_failures` names it. Check `rollback_failures` when the group must leave nothing behind.
 
 **Other effects.**
 
@@ -62,7 +62,11 @@ To attach several handlers from one long-lived process, use `sinal.attach_all`. 
 let _ = sinal.detach(old_attachment)
 
 // After: that call returns Error(Nil) and leaves the newer handler attached.
-let assert Ok(Nil) = sinal.detach(latest_attachment)
+case sinal.detach(latest_attachment) {
+  Ok(Nil) -> Nil
+  // Already gone: its owner exited or another caller detached it.
+  Error(Nil) -> Nil
+}
 ```
 
 ## Diagnostics log once and are counted
@@ -92,15 +96,15 @@ The counts last for the life of the node and are kept per condition and event na
 
 ## Span events follow forwarder routes
 
-**What changed.** `span.run` measures the span in the calling process, then dispatches its start, stop, and exception events as `sinal.emit` does. When a prefix route covers a span name, its handlers run in the forwarder process, not in the producer. In 0.1 spans ignored routes and always ran their handlers in the producer.
+**What changed.** `span.run` measures the span in the calling process, then dispatches its start, stop, and exception events as `sinal.emit` does. When a prefix route matches the name of one of a span's events (the span name followed by `start`, `stop`, or `exception`), that event's handlers run in the forwarder process, not in the producer. In 0.1 spans ignored routes and always ran their handlers in the producer.
 
 **Why.** A routed prefix is meant to keep callback work off the producer, and spans broke that rule.
 
-**What to do.** Nothing, for a span that no route covers. For a routed span:
+**What to do.** Nothing, for a span whose start, stop, and exception event names no route matches. A route such as `["db", "query", "stop"]` does not match the span name `["db", "query"]` but does match its stop event. For a span with a routed event name:
 
 - A handler no longer sees the producer's process-dictionary context. Carry what it needs in the span's metadata.
 - A full or unavailable forwarder drops the span's events as it drops any routed event, so a handler can see a start without a stop.
-- To keep a span's handlers in the producer, remove the route that covers the span's name.
+- To keep a span's handlers in the producer, remove the routes that match the span's start, stop, and exception event names.
 
 ## The native handler configuration changed
 
@@ -114,4 +118,4 @@ The counts last for the life of the node and are kept per condition and event na
 2. Find each call to `attach`, `observe`, `observe_labelled`, and `with_subscriptions` that a short-lived process runs, and move it into a long-lived supervised process.
 3. Find each retained `Attachment` that outlives a restart and replace it with the one from the latest `attach`.
 4. Replace log matchers on Sinal warnings with `sinal.diagnostics()` polling.
-5. Check each route prefix that covers a span.
+5. Check each route prefix against the start, stop, and exception event names of each span.
